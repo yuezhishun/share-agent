@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/apps/" />
+  <Folder Name="/apps/orchestrator/" />
+  <Folder Name="/apps/orchestrator/src/">
+    <Project Path="PtyAgent.Api/PtyAgent.Api.csproj" />
+  </Folder>
+  <Folder Name="/apps/orchestrator/tests/">
+    <Project Path="../tests/PtyAgent.Api.Tests/PtyAgent.Api.Tests.csproj" />
+  </Folder>
+</Solution>

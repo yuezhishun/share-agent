@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Pty Agent Console</title>
+  <style>
+    :root { --bg:#0b1320; --panel:#131c2f; --text:#d9e2f1; --accent:#29d; --warn:#f6a623; --err:#ff5a5f; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:radial-gradient(circle at top,#1a2a46,#0b1320); color:var(--text); }
+    .wrap { max-width:1100px; margin:24px auto; padding:0 16px; }
+    .card { background:var(--panel); border:1px solid #28344d; border-radius:12px; padding:16px; margin-bottom:16px; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; }
+    input, textarea, button { background:#0f1727; border:1px solid #2a3650; color:var(--text); padding:8px; border-radius:8px; }
+    textarea { width:100%; min-height:90px; }
+    input { flex:1; min-width:180px; }
+    button { cursor:pointer; border-color:var(--accent); }
+    #events { max-height:420px; overflow:auto; white-space:pre-wrap; }
+    .evt { padding:6px 0; border-bottom:1px dashed #26314a; }
+    .warn { color:var(--warn); }
+    .error { color:var(--err); }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h2>Pty Agent Secretary Console</h2>
+    <div class="row">
+      <input id="title" placeholder="Task title" value="Build XXX system" />
+      <input id="cliType" placeholder="CLI type" value="codex" />
+      <input id="complex" placeholder="Complex? true/false" value="true" />
+    </div>
+    <textarea id="intent">Please implement a simple backend module with planning and execution milestones.</textarea>
+    <div class="row">
+      <button onclick="createTask()">Create Task</button>
+      <button onclick="loadReport()">Load Report</button>
+      <input id="taskId" placeholder="Task ID for timeline" />
+      <button onclick="loadTimeline()">Load Timeline</button>
+    </div>
+    <div id="report"></div>
+  </div>
+
+  <div class="card">
+    <h3>Runtime Events</h3>
+    <div id="events"></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js"></script>
+<script>
+  const events = document.getElementById('events');
+  const report = document.getElementById('report');
+
+  function appendEvent(evt) {
+    const div = document.createElement('div');
+    div.className = 'evt ' + (evt.severity === 'error' ? 'error' : evt.severity === 'warn' ? 'warn' : '');
+    div.textContent = `[${evt.timestamp}] ${evt.eventType} task=${evt.taskId} session=${evt.sessionId || '-'} :: ${evt.payload}`;
+    events.prepend(div);
+  }
+
+  async function createTask() {
+    const payload = {
+      title: document.getElementById('title').value,
+      intent: document.getElementById('intent').value,
+      cliType: document.getElementById('cliType').value,
+      isComplex: document.getElementById('complex').value === 'true'
+    };
+    const res = await fetch('/api/tasks', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+    const body = await res.json();
+    document.getElementById('taskId').value = body.taskId;
+  }
+
+  async function loadReport() {
+    const res = await fetch('/api/reports/progress');
+    const body = await res.json();
+    report.textContent = JSON.stringify(body, null, 2);
+  }
+
+  async function loadTimeline() {
+    const taskId = document.getElementById('taskId').value;
+    const res = await fetch(`/api/tasks/${taskId}/timeline`);
+    const body = await res.json();
+    report.textContent = JSON.stringify(body, null, 2);
+  }
+
+  const conn = new signalR.HubConnectionBuilder().withUrl('/hubs/runtime').withAutomaticReconnect().build();
+  conn.on('runtime_event', appendEvent);
+  conn.start();
+</script>
+</body>
+</html>

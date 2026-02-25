@@ -128,6 +128,7 @@ onMounted(async () => {
   try {
     await loadProjectOptions();
     await Promise.all([profileStore.loadProfiles(), terminalStore.loadSessions({ includeExited: false })]);
+    await terminalStore.preloadSessionTails();
     await loadGlobalQuickCommandsFromBackend();
     await loadFsAllowedRootsFromBackend();
     const settings = normalizeDisplaySettings(displaySettings.value);
@@ -147,7 +148,7 @@ onMounted(async () => {
       selectedSessionId.value = targetSessionId;
       terminalStore.openSession(targetSessionId, String(targetSessionId).slice(0, 8));
       if (settings.replayOnEntry) {
-        terminalStore.reconnectNow(targetSessionId, { replay: true });
+        terminalStore.reconnectNow(targetSessionId, { replayMode: 'tail' });
       }
     }
   } catch (err) {
@@ -274,6 +275,14 @@ function reconnect() {
     return;
   }
   terminalStore.reconnectNow(terminalStore.activeSessionId);
+}
+
+function replaySessionFromServer(sessionId) {
+  if (!sessionId) {
+    return;
+  }
+  selectedSessionId.value = sessionId;
+  terminalStore.reconnectNow(sessionId, { replayMode: 'full' });
 }
 
 function disconnect() {
@@ -641,7 +650,7 @@ function normalizeDisplaySettings(input = {}) {
     defaultCols: 160,
     defaultRows: 40,
     autoCreateOnEmpty: true,
-    replayOnEntry: true,
+    replayOnEntry: false,
     defaultCliKey: 'codex',
     general: {
       defaultProfile: normalizeDefaultProfile({}),
@@ -1235,6 +1244,14 @@ async function readError(res, fallback) {
               <span class="terminal-session-last" :title="`最后活跃：${formatLastActive(session.lastActivityAt)}`">
                 {{ formatLastActive(session.lastActivityAt) }}
               </span>
+              <button
+                class="terminal-session-replay"
+                title="从服务器完整回放"
+                aria-label="从服务器完整回放"
+                @click.stop="replaySessionFromServer(session.sessionId)"
+              >
+                ↻
+              </button>
               <span class="terminal-session-status" :title="sessionStatus(session)">
                 <i :class="['terminal-session-dot', `is-${statusDotClass(session)}`]" />
               </span>
@@ -1381,7 +1398,7 @@ async function readError(res, fallback) {
               </div>
               <div class="terminal-settings-check-grid">
                 <label class="inline-check"><input v-model="displaySettings.autoCreateOnEmpty" type="checkbox" /> 无会话时自动创建终端</label>
-                <label class="inline-check"><input v-model="displaySettings.replayOnEntry" type="checkbox" /> 进入终端页时 replay 刷新</label>
+                <label class="inline-check"><input v-model="displaySettings.replayOnEntry" type="checkbox" /> 进入终端页时必要回放（tail）</label>
                 <label class="inline-check"><input v-model="displaySettings.showRefreshAction" type="checkbox" /> 显示刷新按钮</label>
                 <label class="inline-check"><input v-model="displaySettings.showReconnectAction" type="checkbox" /> 显示重连按钮</label>
                 <label class="inline-check"><input v-model="displaySettings.showDisconnectAction" type="checkbox" /> 显示断开按钮</label>

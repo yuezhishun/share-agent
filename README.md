@@ -1,16 +1,20 @@
 # pty-agent
 
-AI秘书式多CLI编排系统，当前采用双系统架构：
+AI秘书式多CLI编排系统，当前采用多应用架构：
 1. `Agent Orchestrator`：`.NET + Microsoft Agent Framework`（任务编排/HITL/评估）
-2. `Terminal Gateway`：`Node.js + node-pty`（交互式终端会话）
-3. `Web Console`：`Vue 3 + xterm.js`（任务看板+多终端标签）
+2. `Terminal Gateway (Node)`：`Node.js + node-pty`（现网默认交互式终端会话）
+3. `Terminal Gateway (Dotnet)`：`.NET Minimal API + WebSocket`（新实现，对等联调中）
+4. `Web Console`：`Vue 3 + xterm.js`（任务看板+多终端标签）
 
 ## 目录
 
 - `apps/orchestrator/src/PtyAgent.Api`：Orchestrator API
 - `apps/terminal-gateway`：Node PTY 网关
+- `apps/terminal-gateway-dotnet/TerminalGateway.Api`：Dotnet PTY 网关
+- `apps/terminal-gateway-dotnet/TerminalGateway.Api.Tests`：Dotnet 网关测试
 - `apps/secretary-web`：Vue 前端
 - `docs/ai-secretary-plan-v3-node-pty-vue.md`：V3 设计文档
+- `docs/terminal-gateway-dotnet.md`：Dotnet 网关运行与测试说明
 - `deploy/`：Docker Compose + Nginx + smoke 脚本
 
 ## 本地开发
@@ -29,7 +33,13 @@ npm install
 npm start
 ```
 
-### 3) Vue Console
+### 3) Terminal Gateway Dotnet
+
+```bash
+dotnet run --project apps/terminal-gateway-dotnet/TerminalGateway.Api/TerminalGateway.Api.csproj
+```
+
+### 4) Vue Console
 
 ```bash
 cd apps/secretary-web
@@ -52,6 +62,12 @@ cd apps/terminal-gateway
 npm test
 ```
 
+### Terminal Gateway Dotnet
+
+```bash
+dotnet test apps/terminal-gateway-dotnet/TerminalGateway.Api.Tests/TerminalGateway.Api.Tests.csproj -v minimal
+```
+
 ### Vue Build
 
 ```bash
@@ -71,6 +87,19 @@ npm run build
 默认行为：
 - Linux/macOS 下 `auto` 优先 `nodepty`，失败回退 `process`
 - Windows 下 `auto` 优先 `nodepty`，失败回退 `process`
+
+说明：
+- 当前 orchestrator 默认仍使用 Node 网关（`apps/terminal-gateway`）。
+- Dotnet 网关（`apps/terminal-gateway-dotnet`）用于对等联调与逐步切换验证。
+
+## Nginx 配置位置
+
+当前项目涉及 3 个关键 Nginx 配置文件：
+- 主配置（线上实际入口）：`/www/server/nginx/conf/nginx.conf`
+- 站点配置（线上实际生效）：`/www/server/panel/vhost/nginx/pty-agent-web.conf`、`/www/server/panel/vhost/nginx/pyt.addai.vip.conf`
+- 仓库部署参考配置：`deploy/nginx.conf`
+
+详细说明见：`docs/nginx-config-paths.md`
 
 ## 一键部署（开发环境）
 

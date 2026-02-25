@@ -8,14 +8,27 @@ const TERMINAL_API_BASE = import.meta.env.VITE_TERMINAL_API_BASE || '/terminal-a
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000];
 const MAX_RECONNECT_ATTEMPTS = 20;
 const MAX_SESSION_BUFFER_CHARS = 8 * 1024 * 1024;
+const DEFAULT_HISTORY_LIMIT_BYTES = 256 * 1024;
+const PRELOAD_TAIL_LIMIT_BYTES = Number(import.meta.env.VITE_TERMINAL_PRELOAD_TAIL_LIMIT_BYTES || 512 * 1024);
+const PRELOAD_MAX_SESSIONS = Number(import.meta.env.VITE_TERMINAL_PRELOAD_MAX_SESSIONS || 5);
+const PRELOAD_CONCURRENCY = Number(import.meta.env.VITE_TERMINAL_PRELOAD_CONCURRENCY || 2);
 
-function buildWsUrl(sessionId, replay = false, writeToken = '') {
+function buildWsUrl(sessionId, options = {}) {
+  const replayMode = normalizeReplayMode(options.replayMode || (options.replay ? 'full' : 'none'));
+  const sinceSeq = Number.isFinite(Number(options.sinceSeq)) ? Math.trunc(Number(options.sinceSeq)) : null;
+  const writeToken = String(options.writeToken || '').trim();
   const defaultBase = typeof window !== 'undefined'
     ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`
     : 'ws://127.0.0.1:7300';
   const url = new URL('/ws/terminal', WS_BASE || defaultBase);
   url.searchParams.set('sessionId', sessionId);
-  url.searchParams.set('replay', replay ? '1' : '0');
+  url.searchParams.set('replayMode', replayMode);
+  if (sinceSeq !== null) {
+    url.searchParams.set('sinceSeq', String(sinceSeq));
+  }
+  if (replayMode === 'full') {
+    url.searchParams.set('replay', '1');
+  }
   if (writeToken) {
     url.searchParams.set('writeToken', writeToken);
   }
@@ -78,6 +91,44 @@ export const useTerminalStore = defineStore('terminal', {
         this._runtime = new Map();
       }
       return this._runtime;
+    },
+
+    _ensureRuntimeEntry(sessionId) {
+      const runtime = this._ensureRuntime();
+      let entry = runtime.get(sessionId);
+      if (!entry) {
+        entry = {
+          ws: null,
+          listeners: new Set(),
+          pingTimer: null,
+          reconnectTimer: null,
+          manualStop: false,
+          reconnectAttempts: 0,
+          replayMode: 'none',
+          replayHydrated: false,
+          outputBuffer: '',
+          outputTruncated: false,
+          headSeq: 1,
+          tailSeq: 0,
+          canDeltaReplay: true,
+          historyLoading: false,
+          historyHasMore: true
+        };
+        runtime.set(sessionId, entry);
+      }
+      return entry;
+    },
+
+    _emitSyntheticReplay(sessionId, data) {
+      const runtime = this._ensureRuntime();
+      const entry = runtime.get(sessionId);
+      if (!entry) {
+        return;
+      }
+      const message = { type: 'output', sessionId, data: String(data || ''), replay: true };
+      for (const listener of entry.listeners) {
+        listener(message);
+      }
     },
 
     _upsertSession(sessionPatch) {
@@ -145,7 +196,7 @@ export const useTerminalStore = defineStore('terminal', {
       }
     },
 
-    _appendSessionOutput(entry, data) {
+    _appendSessionOutput(entry, data, direction = 'append') {
       if (!entry) {
         return { truncated: false, bytes: 0 };
       }
@@ -153,11 +204,15 @@ export const useTerminalStore = defineStore('terminal', {
       if (!text) {
         return { truncated: entry.outputTruncated === true, bytes: Number(entry.outputBuffer?.length || 0) };
       }
-      const merged = `${entry.outputBuffer || ''}${text}`;
+      const merged = direction === 'prepend' ? `${text}${entry.outputBuffer || ''}` : `${entry.outputBuffer || ''}${text}`;
       const truncated = merged.length > MAX_SESSION_BUFFER_CHARS;
-      entry.outputBuffer = merged.length <= MAX_SESSION_BUFFER_CHARS
-        ? merged
-        : merged.slice(merged.length - MAX_SESSION_BUFFER_CHARS);
+      if (merged.length <= MAX_SESSION_BUFFER_CHARS) {
+        entry.outputBuffer = merged;
+      } else if (direction === 'prepend') {
+        entry.outputBuffer = merged.slice(0, MAX_SESSION_BUFFER_CHARS);
+      } else {
+        entry.outputBuffer = merged.slice(merged.length - MAX_SESSION_BUFFER_CHARS);
+      }
       entry.outputTruncated = entry.outputTruncated === true || truncated;
       return { truncated: entry.outputTruncated === true, bytes: entry.outputBuffer.length };
     },
@@ -301,6 +356,58 @@ export const useTerminalStore = defineStore('terminal', {
       }
     },
 
+    async preloadSessionTails({ limitBytes = PRELOAD_TAIL_LIMIT_BYTES, maxSessions = PRELOAD_MAX_SESSIONS, concurrency = PRELOAD_CONCURRENCY } = {}) {
+      const targets = this.sessions
+        .filter((x) => x.status === 'running')
+        .slice(0, Math.max(0, Math.trunc(maxSessions || 0)));
+      if (targets.length === 0) {
+        return;
+      }
+      const workerCount = Math.max(1, Math.min(Math.trunc(concurrency || 1), targets.length));
+      let cursor = 0;
+      const workers = [];
+      for (let i = 0; i < workerCount; i += 1) {
+        workers.push((async () => {
+          while (cursor < targets.length) {
+            const index = cursor;
+            cursor += 1;
+            const session = targets[index];
+            try {
+              await this.hydrateSessionTail(session.sessionId, { limitBytes });
+            } catch {
+              // Skip tail preload errors to avoid blocking initial workspace render.
+            }
+          }
+        })());
+      }
+      await Promise.all(workers);
+    },
+
+    async hydrateSessionTail(sessionId, { limitBytes = PRELOAD_TAIL_LIMIT_BYTES } = {}) {
+      if (!sessionId) {
+        return null;
+      }
+      const max = clampInt(limitBytes, 1024, MAX_SESSION_BUFFER_CHARS, PRELOAD_TAIL_LIMIT_BYTES);
+      const res = await fetch(`${TERMINAL_API_BASE}/sessions/${encodeURIComponent(sessionId)}/snapshot?limitBytes=${max}`);
+      if (!res.ok) {
+        throw new Error(await readError(res, `snapshot failed: ${res.status}`));
+      }
+      const snapshot = await res.json();
+      const entry = this._ensureRuntimeEntry(sessionId);
+      entry.outputBuffer = String(snapshot?.data || '');
+      entry.outputTruncated = snapshot?.truncated === true;
+      entry.headSeq = Number(snapshot?.headSeq || 1);
+      entry.tailSeq = Number(snapshot?.tailSeq || 0);
+      entry.historyHasMore = entry.headSeq > 1 || entry.outputTruncated === true;
+      this._upsertSession({
+        sessionId,
+        outputTruncated: entry.outputTruncated,
+        outputBytes: Number(snapshot?.totalBytes || snapshot?.bytes || entry.outputBuffer.length),
+        maxOutputBufferBytes: Number(snapshot?.maxOutputBufferBytes || MAX_SESSION_BUFFER_CHARS)
+      });
+      return snapshot;
+    },
+
     openSession(sessionId, title = '') {
       if (!sessionId) {
         return;
@@ -315,23 +422,30 @@ export const useTerminalStore = defineStore('terminal', {
 
       this.activeSessionId = sessionId;
       this._persistActiveSession();
+      const runtime = this._ensureRuntime();
+      for (const [id, entry] of runtime.entries()) {
+        if (id === sessionId) {
+          continue;
+        }
+        if (entry.reconnectTimer) {
+          clearTimeout(entry.reconnectTimer);
+          entry.reconnectTimer = null;
+        }
+        if (entry.pingTimer) {
+          clearInterval(entry.pingTimer);
+          entry.pingTimer = null;
+        }
+        if (entry.ws && (entry.ws.readyState === WebSocket.OPEN || entry.ws.readyState === WebSocket.CONNECTING)) {
+          entry.manualStop = true;
+          entry.ws.close();
+        }
+      }
       this.ensureConnection(sessionId);
     },
 
     subscribe(sessionId, listener) {
       const runtime = this._ensureRuntime();
-      const entry = runtime.get(sessionId) || {
-        ws: null,
-        listeners: new Set(),
-        pingTimer: null,
-        reconnectTimer: null,
-        manualStop: false,
-        reconnectAttempts: 0,
-        requestReplay: true,
-        replayHydrated: false,
-        outputBuffer: '',
-        outputTruncated: false
-      };
+      const entry = this._ensureRuntimeEntry(sessionId);
       entry.listeners.add(listener);
       runtime.set(sessionId, entry);
 
@@ -348,24 +462,12 @@ export const useTerminalStore = defineStore('terminal', {
       if (!sessionId) {
         return;
       }
+      if (this.activeSessionId && this.activeSessionId !== sessionId) {
+        return;
+      }
 
       const runtime = this._ensureRuntime();
-      let entry = runtime.get(sessionId);
-      if (!entry) {
-        entry = {
-          ws: null,
-          listeners: new Set(),
-          pingTimer: null,
-          reconnectTimer: null,
-          manualStop: false,
-          reconnectAttempts: 0,
-          requestReplay: true,
-          replayHydrated: false,
-          outputBuffer: '',
-          outputTruncated: false
-        };
-        runtime.set(sessionId, entry);
-      }
+      const entry = this._ensureRuntimeEntry(sessionId);
 
       if (entry.ws && (entry.ws.readyState === WebSocket.OPEN || entry.ws.readyState === WebSocket.CONNECTING)) {
         return;
@@ -380,7 +482,12 @@ export const useTerminalStore = defineStore('terminal', {
       entry.manualStop = false;
 
       const writeToken = String(this.sessionWriteTokens?.[sessionId] || '').trim();
-      const ws = new WebSocket(buildWsUrl(sessionId, entry.requestReplay === true, writeToken));
+      const sinceSeq = entry.replayMode === 'none' ? entry.tailSeq : null;
+      const ws = new WebSocket(buildWsUrl(sessionId, {
+        replayMode: entry.replayMode || 'none',
+        sinceSeq,
+        writeToken
+      }));
       entry.ws = ws;
       runtime.set(sessionId, entry);
 
@@ -404,7 +511,13 @@ export const useTerminalStore = defineStore('terminal', {
 
         if (msg.type === 'ready') {
           entry.replayHydrated = false;
-          entry.requestReplay = false;
+          entry.canDeltaReplay = msg.canDeltaReplay !== false;
+          entry.headSeq = Number(msg.headSeq || entry.headSeq || 1);
+          entry.tailSeq = Number(msg.tailSeq || entry.tailSeq || 0);
+          entry.historyHasMore = entry.headSeq > 1 || msg.outputTruncated === true;
+          if (entry.replayMode === 'full' || entry.replayMode === 'tail') {
+            entry.replayMode = 'none';
+          }
           this._upsertSession({
             sessionId,
             taskId: msg.taskId || '',
@@ -426,12 +539,26 @@ export const useTerminalStore = defineStore('terminal', {
         }
 
         if (msg.type === 'output') {
+          if (msg.truncatedSince === true && entry.replayMode === 'none') {
+            this.reconnectNow(sessionId, { replayMode: 'tail' });
+            return;
+          }
           if (msg.replay === true && entry.replayHydrated !== true) {
             entry.outputBuffer = '';
             entry.outputTruncated = false;
             entry.replayHydrated = true;
           }
           const outputState = this._appendSessionOutput(entry, msg.data);
+          if (Number.isFinite(Number(msg.seqStart))) {
+            entry.headSeq = entry.headSeq > 0 ? Math.min(entry.headSeq, Number(msg.seqStart)) : Number(msg.seqStart);
+          }
+          if (Number.isFinite(Number(msg.seqEnd))) {
+            entry.tailSeq = Math.max(entry.tailSeq, Number(msg.seqEnd));
+          }
+          if (entry.headSeq < 1) {
+            entry.headSeq = 1;
+          }
+          entry.historyHasMore = entry.headSeq > 1 || outputState.truncated === true;
           this._upsertSession({
             sessionId,
             lastActivityAt: new Date().toISOString(),
@@ -441,7 +568,6 @@ export const useTerminalStore = defineStore('terminal', {
         }
 
         if (msg.type === 'exit') {
-          entry.requestReplay = false;
           this._upsertSession({
             sessionId,
             status: 'exited',
@@ -466,6 +592,9 @@ export const useTerminalStore = defineStore('terminal', {
       };
 
       ws.onclose = () => {
+        if (entry.ws === ws) {
+          entry.ws = null;
+        }
         if (entry.pingTimer) {
           clearInterval(entry.pingTimer);
           entry.pingTimer = null;
@@ -473,6 +602,9 @@ export const useTerminalStore = defineStore('terminal', {
 
         const current = this.sessions.find((x) => x.sessionId === sessionId);
         if (!current) {
+          return;
+        }
+        if (this.activeSessionId && this.activeSessionId !== sessionId) {
           return;
         }
 
@@ -486,8 +618,8 @@ export const useTerminalStore = defineStore('terminal', {
         }
 
         entry.reconnectAttempts += 1;
-        entry.requestReplay = true;
         entry.replayHydrated = false;
+        entry.replayMode = 'none';
         this._setConnectionStatus(sessionId, 'reconnecting');
 
         const delay = RECONNECT_DELAYS_MS[Math.min(entry.reconnectAttempts - 1, RECONNECT_DELAYS_MS.length - 1)];
@@ -498,42 +630,25 @@ export const useTerminalStore = defineStore('terminal', {
       };
     },
 
-    reconnectNow(sessionId, { replay = true } = {}) {
+    reconnectNow(sessionId, { replay = true, replayMode = '' } = {}) {
       if (!sessionId) {
         return;
       }
 
       const runtime = this._ensureRuntime();
-      const entry = runtime.get(sessionId);
-      if (!entry) {
-        const created = {
-          ws: null,
-          listeners: new Set(),
-          pingTimer: null,
-          reconnectTimer: null,
-          manualStop: false,
-          reconnectAttempts: 0,
-          requestReplay: replay === true,
-          replayHydrated: false,
-          outputBuffer: '',
-          outputTruncated: false
-        };
-        runtime.set(sessionId, created);
-        this.ensureConnection(sessionId);
-        return;
-      }
+      const entry = this._ensureRuntimeEntry(sessionId);
 
       entry.manualStop = false;
       entry.reconnectAttempts = 0;
-      entry.requestReplay = replay === true;
       entry.replayHydrated = false;
+      entry.replayMode = normalizeReplayMode(replayMode || (replay === true ? 'full' : 'none'));
 
       if (entry.reconnectTimer) {
         clearTimeout(entry.reconnectTimer);
         entry.reconnectTimer = null;
       }
 
-      if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
+      if (entry.ws && (entry.ws.readyState === WebSocket.OPEN || entry.ws.readyState === WebSocket.CONNECTING)) {
         entry.ws.close();
       } else {
         this.ensureConnection(sessionId);
@@ -634,12 +749,69 @@ export const useTerminalStore = defineStore('terminal', {
       return await res.json();
     },
 
+    async loadOlderHistory(sessionId, { limitBytes = DEFAULT_HISTORY_LIMIT_BYTES } = {}) {
+      if (!sessionId) {
+        return { loaded: false, reason: 'missing-session' };
+      }
+      const entry = this._ensureRuntimeEntry(sessionId);
+      if (entry.historyLoading) {
+        return { loaded: false, reason: 'already-loading' };
+      }
+      if (entry.historyHasMore === false) {
+        return { loaded: false, reason: 'no-more' };
+      }
+
+      entry.historyLoading = true;
+      try {
+        const max = clampInt(limitBytes, 1024, MAX_SESSION_BUFFER_CHARS, DEFAULT_HISTORY_LIMIT_BYTES);
+        const beforeSeq = Number.isFinite(entry.headSeq) && entry.headSeq > 1 ? entry.headSeq : null;
+        const params = new URLSearchParams();
+        if (beforeSeq !== null) {
+          params.set('beforeSeq', String(beforeSeq));
+        }
+        params.set('limitBytes', String(max));
+        const res = await fetch(`${TERMINAL_API_BASE}/sessions/${encodeURIComponent(sessionId)}/history?${params.toString()}`);
+        if (!res.ok) {
+          throw new Error(await readError(res, `history failed: ${res.status}`));
+        }
+        const body = await res.json();
+        const chunks = Array.isArray(body?.chunks) ? body.chunks : [];
+        if (chunks.length === 0) {
+          entry.historyHasMore = body?.hasMore === true;
+          return { loaded: false, reason: 'empty' };
+        }
+
+        const merged = chunks.map((x) => String(x?.data || '')).join('');
+        const firstSeq = Number(chunks[0]?.seqStart || entry.headSeq || 1);
+        entry.headSeq = Number.isFinite(firstSeq) ? firstSeq : entry.headSeq;
+        entry.historyHasMore = body?.hasMore === true;
+        const outputState = this._appendSessionOutput(entry, merged, 'prepend');
+        this._upsertSession({
+          sessionId,
+          outputTruncated: outputState.truncated,
+          outputBytes: outputState.bytes
+        });
+        this._emitSyntheticReplay(sessionId, entry.outputBuffer);
+        return { loaded: true, bytes: merged.length, hasMore: entry.historyHasMore };
+      } finally {
+        entry.historyLoading = false;
+      }
+    },
+
     getSessionOutputBuffer(sessionId) {
       if (!sessionId) {
         return '';
       }
-      const runtime = this._ensureRuntime();
-      return String(runtime.get(sessionId)?.outputBuffer || '');
+      const entry = this._ensureRuntimeEntry(sessionId);
+      return String(entry.outputBuffer || '');
+    },
+
+    isSessionHistoryLoading(sessionId) {
+      if (!sessionId) {
+        return false;
+      }
+      const entry = this._ensureRuntimeEntry(sessionId);
+      return entry.historyLoading === true;
     },
 
     async removeSession(sessionId) {
@@ -679,4 +851,26 @@ async function readError(res, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function clampInt(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return fallback;
+  }
+  if (n < min) {
+    return min;
+  }
+  if (n > max) {
+    return max;
+  }
+  return Math.trunc(n);
+}
+
+function normalizeReplayMode(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  if (mode === 'none' || mode === 'tail' || mode === 'full') {
+    return mode;
+  }
+  return 'none';
 }

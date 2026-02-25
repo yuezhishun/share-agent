@@ -322,6 +322,201 @@ test('session owner token controls writable websocket access', async (t) => {
   });
 });
 
+test('delta replay from sinceSeq only returns newer output', async (t) => {
+  const { app } = await buildServer({
+    port: 0,
+    host: '127.0.0.1',
+    internalToken: TOKEN,
+    wsToken: WS_TOKEN
+  });
+  await app.listen({ port: 0, host: '127.0.0.1' });
+  t.after(async () => { await app.close(); });
+
+  const address = app.server.address();
+  const base = `http://127.0.0.1:${address.port}`;
+  const sessionId = randomUUID();
+  const createRes = await fetch(`${base}/internal/sessions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-internal-token': TOKEN },
+    body: JSON.stringify({
+      sessionId,
+      taskId: randomUUID(),
+      cliType: 'custom',
+      mode: 'execute',
+      shell: '/bin/bash',
+      cwd: '/tmp',
+      command: '',
+      env: {},
+      cols: 120,
+      rows: 30
+    })
+  });
+  assert.equal(createRes.status, 200);
+
+  let cutoffSeq = 0;
+  await new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${address.port}/ws/terminal?sessionId=${sessionId}&replay=1`);
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error('timeout waiting first output'));
+    }, 8000);
+
+    ws.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.type !== 'output') {
+        return;
+      }
+      cutoffSeq = Math.max(cutoffSeq, Number(msg.seqEnd || 0));
+      if (msg.data.includes('/tmp')) {
+        clearTimeout(timeout);
+        ws.close();
+        resolve();
+      }
+    });
+    ws.on('error', (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
+
+  const inputRes = await fetch(`${base}/internal/sessions/${sessionId}/input`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-internal-token': TOKEN },
+    body: JSON.stringify({ data: 'echo delta-two\r' })
+  });
+  assert.equal(inputRes.status, 200);
+
+  const deltaMessages = [];
+  await new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${address.port}/ws/terminal?sessionId=${sessionId}&replayMode=none&sinceSeq=${cutoffSeq}`);
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error('timeout waiting delta output'));
+    }, 8000);
+    ws.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      deltaMessages.push(msg);
+      if (msg.type === 'output' && msg.data.includes('delta-two')) {
+        clearTimeout(timeout);
+        ws.close();
+        resolve();
+      }
+    });
+    ws.on('error', (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
+
+  assert.ok(deltaMessages.some((x) => x.type === 'output' && x.data.includes('delta-two')));
+  assert.ok(deltaMessages.every((x) => x.type !== 'output' || !x.data.includes('/tmp')));
+});
+
+test('delta replay reports truncatedSince when sinceSeq is too old', async (t) => {
+  const { app } = await buildServer({
+    port: 0,
+    host: '127.0.0.1',
+    internalToken: TOKEN,
+    wsToken: WS_TOKEN,
+    maxOutputBufferBytes: 64
+  });
+  await app.listen({ port: 0, host: '127.0.0.1' });
+  t.after(async () => { await app.close(); });
+
+  const address = app.server.address();
+  const base = `http://127.0.0.1:${address.port}`;
+  const sessionId = randomUUID();
+  const createRes = await fetch(`${base}/internal/sessions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-internal-token': TOKEN },
+    body: JSON.stringify({
+      sessionId,
+      taskId: randomUUID(),
+      cliType: 'custom',
+      mode: 'execute',
+      shell: '/bin/bash',
+      cwd: '/tmp',
+      command: "printf 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'; sleep 5",
+      env: {},
+      cols: 120,
+      rows: 30
+    })
+  });
+  assert.equal(createRes.status, 200);
+
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  const messages = [];
+  await new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${address.port}/ws/terminal?sessionId=${sessionId}&replayMode=none&sinceSeq=-1`);
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error('timeout waiting truncatedSince'));
+    }, 8000);
+    ws.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      messages.push(msg);
+      if (msg.type === 'output' && msg.truncatedSince === true) {
+        clearTimeout(timeout);
+        ws.close();
+        resolve();
+      }
+    });
+    ws.on('error', (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
+
+  assert.ok(messages.some((x) => x.type === 'output' && x.truncatedSince === true));
+});
+
+test('history endpoint returns paged chunks before a seq', async (t) => {
+  const { app } = await buildServer({
+    port: 0,
+    host: '127.0.0.1',
+    internalToken: TOKEN,
+    wsToken: WS_TOKEN
+  });
+  await app.listen({ port: 0, host: '127.0.0.1' });
+  t.after(async () => { await app.close(); });
+
+  const address = app.server.address();
+  const base = `http://127.0.0.1:${address.port}`;
+  const sessionId = randomUUID();
+  const createRes = await fetch(`${base}/internal/sessions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-internal-token': TOKEN },
+    body: JSON.stringify({
+      sessionId,
+      taskId: randomUUID(),
+      cliType: 'custom',
+      mode: 'execute',
+      shell: '/bin/bash',
+      cwd: '/tmp',
+      command: "echo line-one; echo line-two; echo line-three",
+      env: {},
+      cols: 120,
+      rows: 30
+    })
+  });
+  assert.equal(createRes.status, 200);
+
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  const snapshotRes = await fetch(`${base}/sessions/${sessionId}/snapshot?limitBytes=1024`);
+  assert.equal(snapshotRes.status, 200);
+  const snapshot = await snapshotRes.json();
+  assert.ok(Number(snapshot.tailSeq) > 0);
+
+  const historyRes = await fetch(`${base}/sessions/${sessionId}/history?beforeSeq=${snapshot.tailSeq}&limitBytes=64`);
+  assert.equal(historyRes.status, 200);
+  const history = await historyRes.json();
+  assert.ok(Array.isArray(history.chunks));
+  assert.ok(history.chunks.length >= 1);
+  assert.ok(history.chunks.every((x) => Number(x.seqEnd) < Number(snapshot.tailSeq)));
+});
+
 test('only one writable peer is allowed for the same session at a time', async (t) => {
   const { app } = await buildServer({ port: 0, host: '127.0.0.1', internalToken: TOKEN, wsToken: WS_TOKEN });
   await app.listen({ port: 0, host: '127.0.0.1' });

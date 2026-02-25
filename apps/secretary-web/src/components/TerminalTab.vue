@@ -33,6 +33,9 @@ const outputTruncatedHint = computed(() => {
   const mb = (max / (1024 * 1024)).toFixed(max % (1024 * 1024) === 0 ? 0 : 1);
   return `历史输出已截断，仅保留最近 ${mb} MB`;
 });
+const historyLoadingHint = computed(() => {
+  return store.isSessionHistoryLoading(props.sessionId) ? '正在加载更早历史...' : '';
+});
 
 let term;
 let fitAddon;
@@ -46,6 +49,8 @@ let altVoiceCaptureArmed = false;
 let replayRendered = false;
 let containerResizeObserver = null;
 let resizeRaf = null;
+let scrollLoadCooldownTimer = null;
+let scrollLoadInFlight = false;
 
 onMounted(() => {
   const settings = normalizeDisplaySettings(props.displaySettings);
@@ -129,6 +134,29 @@ onMounted(() => {
     store.sendInput(props.sessionId, data);
   });
 
+  term.onScroll(async () => {
+    if (scrollLoadInFlight) {
+      return;
+    }
+    const viewportY = Number(term?.buffer?.active?.viewportY || 0);
+    if (viewportY > 0) {
+      return;
+    }
+    scrollLoadInFlight = true;
+    try {
+      await store.loadOlderHistory(props.sessionId);
+    } catch {
+      // keep terminal responsive even if history loading fails
+    } finally {
+      if (scrollLoadCooldownTimer) {
+        clearTimeout(scrollLoadCooldownTimer);
+      }
+      scrollLoadCooldownTimer = setTimeout(() => {
+        scrollLoadInFlight = false;
+      }, 300);
+    }
+  });
+
   if (settings.copyOnSelect) {
     term.onSelectionChange(() => {
       copySelection();
@@ -170,6 +198,10 @@ onBeforeUnmount(() => {
   }
   if (pasteHintTimer) {
     clearTimeout(pasteHintTimer);
+  }
+  if (scrollLoadCooldownTimer) {
+    clearTimeout(scrollLoadCooldownTimer);
+    scrollLoadCooldownTimer = null;
   }
   if (unsub) {
     unsub();
@@ -653,6 +685,7 @@ function resolveTheme(themeId) {
   <div class="terminal-tab-shell">
     <small v-if="pasteHint" class="mono warn-text terminal-paste-hint">{{ pasteHint }}</small>
     <small v-if="outputTruncatedHint" class="mono warn-text terminal-paste-hint">{{ outputTruncatedHint }}</small>
+    <small v-if="historyLoadingHint" class="mono terminal-paste-hint">{{ historyLoadingHint }}</small>
     <div class="terminal-surface">
       <div ref="resizeOverlayRef" class="terminal-resize-overlay" />
       <div ref="mountRef" class="terminal-wrap" />

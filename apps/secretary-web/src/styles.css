@@ -828,7 +828,7 @@ a.card {
   width: 100%;
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 15px 15px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 15px 15px 15px;
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
@@ -909,6 +909,38 @@ a.card {
   pointer-events: auto;
   transition: none;
   cursor: pointer;
+}
+
+.terminal-session-replay {
+  width: 15px;
+  min-width: 15px;
+  height: 15px;
+  justify-self: center;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 1;
+  pointer-events: auto;
+  transition: none;
+  cursor: pointer;
+  color: #b9c9da;
+}
+
+.terminal-session-replay:hover,
+.terminal-session-replay:focus,
+.terminal-session-replay:focus-visible {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  outline: none;
+  color: #d5e3f1;
 }
 
 .terminal-session-end:hover,

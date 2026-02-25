@@ -193,19 +193,30 @@ export class PtyManager {
       writerPeer: null,
       outputTruncated: false,
       maxOutputBufferBytes: this.maxOutputBufferBytes,
-      outputBuffer: '',
+      outputBytes: 0,
+      outputChunks: [],
+      headSeq: 1,
+      tailSeq: 0,
+      nextSeq: 1,
       subscribers: new Set()
     };
 
     proc.onData((data) => {
       record.lastActivityAt = new Date().toISOString();
-      const output = appendOutputBuffer(record.outputBuffer, data, record.maxOutputBufferBytes);
-      record.outputBuffer = output.buffer;
-      if (output.truncated) {
+      const output = appendOutputChunk(record, data);
+      if (output.truncated === true) {
         record.outputTruncated = true;
       }
       for (const sub of record.subscribers) {
-        sub.send({ type: 'output', sessionId: record.sessionId, stream: 'stdout', data });
+        sub.send({
+          type: 'output',
+          sessionId: record.sessionId,
+          stream: 'stdout',
+          data,
+          seqStart: output.seqStart,
+          seqEnd: output.seqEnd,
+          truncatedSince: false
+        });
       }
     });
 
@@ -375,22 +386,43 @@ export class PtyManager {
   snapshot(sessionId, { limitBytes = this.maxOutputBufferBytes } = {}) {
     const s = this.requireSession(sessionId);
     const max = clampInt(limitBytes, 1, this.maxOutputBufferBytes, this.maxOutputBufferBytes);
-    const truncated = s.outputTruncated === true || s.outputBuffer.length > max;
+    const snapshotData = collectTailDataWithinBytes(s.outputChunks, max);
+    const snapshotBytes = Buffer.byteLength(snapshotData, 'utf8');
+    const truncated = s.outputTruncated === true || s.outputBytes > snapshotBytes;
     return {
       sessionId: s.sessionId,
       status: s.status,
       exitCode: s.exitCode,
-      data: s.outputBuffer.length <= max ? s.outputBuffer : s.outputBuffer.slice(s.outputBuffer.length - max),
-      bytes: Math.min(s.outputBuffer.length, max),
-      totalBytes: s.outputBuffer.length,
+      data: snapshotData,
+      bytes: snapshotBytes,
+      totalBytes: s.outputBytes,
       truncated,
-      maxOutputBufferBytes: s.maxOutputBufferBytes
+      maxOutputBufferBytes: s.maxOutputBufferBytes,
+      headSeq: s.headSeq,
+      tailSeq: s.tailSeq
+    };
+  }
+
+  history(sessionId, { beforeSeq = null, limitBytes = 256 * 1024 } = {}) {
+    const s = this.requireSession(sessionId);
+    const max = clampInt(limitBytes, 1024, this.maxOutputBufferBytes, 256 * 1024);
+    const normalizedBeforeSeq = Number.isFinite(Number(beforeSeq)) ? Math.trunc(Number(beforeSeq)) : null;
+    const selected = collectHistoryBeforeSeq(s.outputChunks, normalizedBeforeSeq, max);
+    const hasMore = selected.hasMore;
+    return {
+      sessionId: s.sessionId,
+      chunks: selected.chunks,
+      hasMore,
+      nextBeforeSeq: hasMore && selected.chunks.length > 0 ? selected.chunks[0].seqStart : null,
+      truncated: s.outputTruncated === true
     };
   }
 
   attach(sessionId, wsPeer, options = {}) {
     const s = this.requireSession(sessionId);
     const replay = options?.replay === true;
+    const replayMode = normalizeReplayMode(options?.replayMode, replay ? 'full' : 'none');
+    const sinceSeq = Number.isFinite(Number(options?.sinceSeq)) ? Math.trunc(Number(options.sinceSeq)) : null;
     let writable = this._isWritable(s, options?.writeToken);
     if (writable && s.writerPeer && s.writerPeer !== wsPeer) {
       writable = false;
@@ -400,8 +432,18 @@ export class PtyManager {
     }
     wsPeer.writable = writable;
     if (s.status === 'exited') {
-      if (replay && s.outputBuffer) {
-        wsPeer.send({ type: 'output', sessionId: s.sessionId, stream: 'stdout', data: s.outputBuffer, replay: true });
+      const fullData = joinChunksData(s.outputChunks);
+      if ((replay || replayMode === 'full' || replayMode === 'tail') && fullData) {
+        wsPeer.send({
+          type: 'output',
+          sessionId: s.sessionId,
+          stream: 'stdout',
+          data: fullData,
+          replay: true,
+          seqStart: s.headSeq,
+          seqEnd: s.tailSeq,
+          truncatedSince: false
+        });
       }
       wsPeer.send({ type: 'exit', sessionId: s.sessionId, exitCode: s.exitCode, signal: null });
       wsPeer.close();
@@ -423,12 +465,57 @@ export class PtyManager {
       args: [...(s.args || [])],
       cliType: s.cliType,
       mode: s.mode,
-      outputBytes: s.outputBuffer.length,
+      outputBytes: s.outputBytes,
       outputTruncated: s.outputTruncated === true,
-      maxOutputBufferBytes: s.maxOutputBufferBytes
+      maxOutputBufferBytes: s.maxOutputBufferBytes,
+      headSeq: s.headSeq,
+      tailSeq: s.tailSeq,
+      canDeltaReplay: true
     });
-    if (replay && s.outputBuffer) {
-      wsPeer.send({ type: 'output', sessionId: s.sessionId, stream: 'stdout', data: s.outputBuffer, replay: true });
+    if (replay || replayMode === 'full' || replayMode === 'tail') {
+      const fullData = joinChunksData(s.outputChunks);
+      if (fullData) {
+        wsPeer.send({
+          type: 'output',
+          sessionId: s.sessionId,
+          stream: 'stdout',
+          data: fullData,
+          replay: true,
+          seqStart: s.headSeq,
+          seqEnd: s.tailSeq,
+          truncatedSince: false
+        });
+      }
+      return summarizeSession(s);
+    }
+
+    if (replayMode === 'none' && sinceSeq !== null) {
+      const delta = collectDeltaFromSeq(s.outputChunks, sinceSeq, s.headSeq, s.tailSeq);
+      if (delta.truncatedSince === true) {
+        wsPeer.send({
+          type: 'output',
+          sessionId: s.sessionId,
+          stream: 'stdout',
+          data: '',
+          replay: false,
+          seqStart: s.headSeq,
+          seqEnd: s.tailSeq,
+          truncatedSince: true
+        });
+        return summarizeSession(s);
+      }
+      for (const item of delta.chunks) {
+        wsPeer.send({
+          type: 'output',
+          sessionId: s.sessionId,
+          stream: 'stdout',
+          data: item.data,
+          replay: false,
+          seqStart: item.seqStart,
+          seqEnd: item.seqEnd,
+          truncatedSince: false
+        });
+      }
     }
     return summarizeSession(s);
   }
@@ -728,7 +815,7 @@ function summarizeSession(s) {
     createdAt: s.createdAt,
     lastActivityAt: s.lastActivityAt,
     exitCode: s.exitCode,
-    outputBytes: s.outputBuffer.length,
+    outputBytes: s.outputBytes,
     outputTruncated: s.outputTruncated === true,
     maxOutputBufferBytes: s.maxOutputBufferBytes,
     backend: 'node-pty'
@@ -917,12 +1004,185 @@ function renderTemplate(value, context) {
   return rendered.trim();
 }
 
-function appendOutputBuffer(prev, chunk, maxBytes = DEFAULT_MAX_OUTPUT_BUFFER_BYTES) {
-  const next = `${prev}${chunk || ''}`;
-  if (next.length <= maxBytes) {
-    return { buffer: next, truncated: false };
+function appendOutputChunk(session, chunk) {
+  const data = String(chunk || '');
+  if (!data) {
+    return { seqStart: session.nextSeq, seqEnd: session.nextSeq - 1, truncated: false };
   }
-  return { buffer: next.slice(next.length - maxBytes), truncated: true };
+
+  let normalizedData = data;
+  let seqStart = session.nextSeq;
+  let seqEnd = seqStart + normalizedData.length - 1;
+  let bytes = Buffer.byteLength(normalizedData, 'utf8');
+  let truncated = false;
+  if (bytes > session.maxOutputBufferBytes) {
+    const trimmed = trimTailByBytes(normalizedData, session.maxOutputBufferBytes);
+    const droppedChars = normalizedData.length - trimmed.length;
+    normalizedData = trimmed;
+    seqStart += droppedChars;
+    seqEnd = seqStart + normalizedData.length - 1;
+    bytes = Buffer.byteLength(normalizedData, 'utf8');
+    truncated = true;
+  }
+  session.outputChunks.push({ data: normalizedData, bytes, seqStart, seqEnd });
+  session.outputBytes += bytes;
+  session.nextSeq = seqEnd + 1;
+  session.headSeq = session.outputChunks[0]?.seqStart ?? session.nextSeq;
+  session.tailSeq = session.outputChunks[session.outputChunks.length - 1]?.seqEnd ?? (session.nextSeq - 1);
+
+  while (session.outputBytes > session.maxOutputBufferBytes && session.outputChunks.length > 0) {
+    const dropped = session.outputChunks.shift();
+    if (!dropped) {
+      break;
+    }
+    session.outputBytes -= dropped.bytes;
+    truncated = true;
+  }
+
+  if (session.outputBytes < 0) {
+    session.outputBytes = 0;
+  }
+  session.headSeq = session.outputChunks[0]?.seqStart ?? session.nextSeq;
+  session.tailSeq = session.outputChunks[session.outputChunks.length - 1]?.seqEnd ?? (session.nextSeq - 1);
+  return { seqStart, seqEnd, truncated };
+}
+
+function collectTailDataWithinBytes(chunks, limitBytes) {
+  if (!Array.isArray(chunks) || chunks.length === 0) {
+    return '';
+  }
+  const selected = [];
+  let usedBytes = 0;
+  for (let idx = chunks.length - 1; idx >= 0; idx -= 1) {
+    const chunk = chunks[idx];
+    if (!chunk) {
+      continue;
+    }
+    if (usedBytes + chunk.bytes <= limitBytes) {
+      selected.push(chunk.data);
+      usedBytes += chunk.bytes;
+      continue;
+    }
+    const remaining = limitBytes - usedBytes;
+    if (remaining > 0) {
+      selected.push(trimTailByBytes(chunk.data, remaining));
+    }
+    break;
+  }
+  return selected.reverse().join('');
+}
+
+function collectHistoryBeforeSeq(chunks, beforeSeq, limitBytes) {
+  if (!Array.isArray(chunks) || chunks.length === 0) {
+    return { chunks: [], hasMore: false };
+  }
+  const boundary = Number.isFinite(beforeSeq) ? Math.trunc(beforeSeq) : Number.POSITIVE_INFINITY;
+  const selected = [];
+  let usedBytes = 0;
+  let hasMore = false;
+  for (let idx = chunks.length - 1; idx >= 0; idx -= 1) {
+    const chunk = chunks[idx];
+    if (!chunk || chunk.seqStart >= boundary) {
+      continue;
+    }
+    let candidateData = chunk.data;
+    let candidateSeqStart = chunk.seqStart;
+    let candidateSeqEnd = chunk.seqEnd;
+    if (candidateSeqEnd >= boundary) {
+      const keepLen = Math.max(0, boundary - candidateSeqStart);
+      candidateData = candidateData.slice(0, keepLen);
+      candidateSeqEnd = boundary - 1;
+    }
+    if (!candidateData || candidateSeqEnd < candidateSeqStart) {
+      continue;
+    }
+    let candidateBytes = Buffer.byteLength(candidateData, 'utf8');
+    if (usedBytes + candidateBytes <= limitBytes) {
+      selected.push({ data: candidateData, bytes: candidateBytes, seqStart: candidateSeqStart, seqEnd: candidateSeqEnd });
+      usedBytes += candidateBytes;
+      continue;
+    }
+    const remaining = limitBytes - usedBytes;
+    if (remaining > 0) {
+      const trimmed = trimTailByBytes(candidateData, remaining);
+      const shift = candidateData.length - trimmed.length;
+      selected.push({
+        data: trimmed,
+        bytes: Buffer.byteLength(trimmed, 'utf8'),
+        seqStart: candidateSeqStart + shift,
+        seqEnd: candidateSeqEnd
+      });
+      usedBytes = limitBytes;
+    }
+    hasMore = idx > 0;
+    break;
+  }
+  if (selected.length > 0) {
+    return { chunks: selected.reverse().map((x) => ({ data: x.data, seqStart: x.seqStart, seqEnd: x.seqEnd })), hasMore };
+  }
+  return { chunks: [], hasMore: false };
+}
+
+function collectDeltaFromSeq(chunks, sinceSeq, headSeq, tailSeq) {
+  if (!Number.isFinite(sinceSeq)) {
+    return { chunks: [], truncatedSince: false };
+  }
+  if (sinceSeq < headSeq - 1) {
+    return { chunks: [], truncatedSince: true };
+  }
+  if (sinceSeq >= tailSeq) {
+    return { chunks: [], truncatedSince: false };
+  }
+
+  const items = [];
+  for (const chunk of chunks) {
+    if (!chunk || chunk.seqEnd <= sinceSeq) {
+      continue;
+    }
+    if (chunk.seqStart > sinceSeq) {
+      items.push({ data: chunk.data, seqStart: chunk.seqStart, seqEnd: chunk.seqEnd });
+      continue;
+    }
+    const cut = sinceSeq - chunk.seqStart + 1;
+    const partial = chunk.data.slice(cut);
+    if (!partial) {
+      continue;
+    }
+    items.push({ data: partial, seqStart: sinceSeq + 1, seqEnd: chunk.seqEnd });
+  }
+  return { chunks: items, truncatedSince: false };
+}
+
+function joinChunksData(chunks) {
+  if (!Array.isArray(chunks) || chunks.length === 0) {
+    return '';
+  }
+  return chunks.map((x) => x.data || '').join('');
+}
+
+function trimTailByBytes(data, maxBytes) {
+  const text = String(data || '');
+  if (!text || maxBytes <= 0) {
+    return '';
+  }
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) {
+    return text;
+  }
+  let start = 0;
+  let out = text;
+  while (out && Buffer.byteLength(out, 'utf8') > maxBytes && start < text.length) {
+    start += 1;
+    out = text.slice(start);
+  }
+  return out;
+}
+
+function normalizeReplayMode(value, fallback = 'none') {
+  const mode = normalizeString(value).toLowerCase();
+  if (mode === 'none' || mode === 'tail' || mode === 'full') {
+    return mode;
+  }
+  return fallback;
 }
 
 function generateWriteToken() {

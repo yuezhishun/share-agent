@@ -153,6 +153,17 @@ export async function buildServer(overrides = {}) {
     }
   });
 
+  app.get('/sessions/:sessionId/history', async (request, reply) => {
+    try {
+      const beforeSeq = request.query?.beforeSeq;
+      const limitBytes = request.query?.limitBytes;
+      return manager.history(request.params.sessionId, { beforeSeq, limitBytes });
+    } catch (err) {
+      reply.code(404);
+      return { error: String(err.message || err) };
+    }
+  });
+
   // Public lightweight endpoint for web terminal creation (no auth in current phase).
   app.post('/sessions', async (request, reply) => {
     try {
@@ -272,6 +283,8 @@ export async function buildServer(overrides = {}) {
     const q = request.query || {};
     const sessionId = q.sessionId;
     const replay = String(q.replay ?? '0') === '1';
+    const replayMode = String(q.replayMode ?? '').trim();
+    const sinceSeq = q.sinceSeq;
     const writeToken = String(q.writeToken ?? '');
 
     if (!sessionId) {
@@ -296,7 +309,7 @@ export async function buildServer(overrides = {}) {
     };
 
     try {
-      manager.attach(sessionId, peer, { replay, writeToken });
+      manager.attach(sessionId, peer, { replay, replayMode, sinceSeq, writeToken });
     } catch (err) {
       peer.send({ type: 'error', code: 'SESSION_NOT_FOUND', message: String(err.message || err) });
       peer.close();

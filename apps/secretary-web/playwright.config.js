@@ -2,7 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './e2e',
-  testIgnore: '**/integration.spec.js',
+  testIgnore: ['**/integration.spec.js', '**/cluster.spec.js'],
   fullyParallel: true,
   reporter: 'html',
   use: {

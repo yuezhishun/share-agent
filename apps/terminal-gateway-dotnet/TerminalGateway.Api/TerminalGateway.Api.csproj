@@ -6,8 +6,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.0" />
-    <ProjectReference Include="../../../../github/Porta.Pty/src/Porta.Pty/Porta.Pty.csproj" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" />
+    <PackageReference Include="Porta.Pty" />
   </ItemGroup>
 
   <ItemGroup>

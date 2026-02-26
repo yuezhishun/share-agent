@@ -18,6 +18,10 @@ export async function buildServer(overrides = {}) {
 
   await app.register(websocketPlugin);
 
+  app.addHook('onClose', async () => {
+    manager.dispose();
+  });
+
   app.addHook('onRequest', async (request, reply) => {
     if (!request.url.startsWith('/internal/')) {
       return;

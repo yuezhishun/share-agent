@@ -20,7 +20,7 @@
       </label>
       <div class="row">
         <button type="button" @click="refresh">Refresh</button>
-        <button type="button" @click="connect" :disabled="!selectedId">Connect</button>
+        <button type="button" @click="connect" :disabled="!selectedId || terminalStore.isReconnecting">Connect</button>
         <button type="button" @click="disconnect" :disabled="!terminalStore.wsConnected">Disconnect</button>
       </div>
       <div class="subtle">{{ terminalStore.status }}</div>

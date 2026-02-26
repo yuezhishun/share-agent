@@ -47,7 +47,7 @@ public sealed class TerminalHub : Hub
         await Groups.AddToGroupAsync(connectionId, BuildInstanceGroup(instanceId));
         _registry.Bind(connectionId, instanceId);
 
-        var snapshot = _manager.Snapshot(instanceId, advanceSeq: true);
+        var snapshot = _manager.Snapshot(instanceId, advanceSeq: false);
         if (snapshot is not null)
         {
             await Clients.Caller.SendAsync("TerminalEvent", snapshot);
@@ -211,7 +211,7 @@ public sealed class TerminalHub : Hub
             return;
         }
 
-        var snapshot = _manager.Snapshot(instanceId, advanceSeq: true);
+        var snapshot = _manager.Snapshot(instanceId, advanceSeq: false);
         if (snapshot is null)
         {
             if (!TryResolveRemoteNode(instanceId, out var nodeId))

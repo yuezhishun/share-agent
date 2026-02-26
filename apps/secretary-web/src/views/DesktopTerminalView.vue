@@ -77,7 +77,7 @@
               {{ item.node_online ? 'online' : 'offline' }}
               <span v-if="item.node_label"> | {{ item.node_label }}</span>
             </div>
-            <button type="button" @click="connect(item.id)">Connect</button>
+            <button type="button" @click="connect(item.id)" :disabled="terminalStore.isReconnecting">Connect</button>
           </li>
         </ul>
       </div>

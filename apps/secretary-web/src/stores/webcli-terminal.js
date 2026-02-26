@@ -46,6 +46,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
     selectedProjectPath: '',
     status: 'Ready',
     wsConnected: false,
+    isReconnecting: false,
     connection: null,
     joinedInstanceId: '',
     listeners: [],
@@ -273,6 +274,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       this.connection = null;
       this.joinedInstanceId = '';
       this.wsConnected = false;
+      this.isReconnecting = false;
     },
 
     async ensureConnection() {
@@ -308,11 +310,13 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
 
       connection.onreconnecting(() => {
         this.wsConnected = false;
+        this.isReconnecting = true;
         this.setStatus('Reconnecting...');
       });
 
       connection.onreconnected(async () => {
         this.wsConnected = true;
+        this.isReconnecting = false;
         this.setStatus(`Connected: ${this.selectedInstanceId}`);
         try {
           await connection.invoke('JoinInstance', { instanceId: this.selectedInstanceId });
@@ -326,6 +330,8 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       connection.onclose(() => {
         this.wsConnected = false;
         this.joinedInstanceId = '';
+        this.isReconnecting = false;
+        this.setStatus('disconnected');
       });
 
       try {
@@ -333,6 +339,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
         this.wsConnected = true;
       } catch (error) {
         this.wsConnected = false;
+        this.isReconnecting = false;
         this.setStatus(String(error?.message || error || 'connect failed'));
       }
     },

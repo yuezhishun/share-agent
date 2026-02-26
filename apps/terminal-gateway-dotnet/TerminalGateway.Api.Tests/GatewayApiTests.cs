@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.SignalR.Client;
 using TerminalGateway.Api.Models;
+using TerminalGateway.Api.Tests.Oracle;
 
 namespace TerminalGateway.Api.Tests;
 
@@ -598,6 +599,76 @@ public class GatewayApiTests
         }
 
         Assert.Equal(1, countSeq1);
+    }
+
+    [Fact]
+    [Trait("Category", "oracle")]
+    public async Task RequestSyncSnapshot_Should_Converge_With_Oracle_State()
+    {
+        await using var app = new GatewayFactory();
+        using var client = app.CreateClient();
+
+        var createRes = await client.PostAsJsonAsync("/api/instances", new
+        {
+            command = "/bin/cat",
+            cols = 80,
+            rows = 25,
+            cwd = "/home/yueyuan"
+        });
+        Assert.Equal(HttpStatusCode.OK, createRes.StatusCode);
+        var created = JsonDocument.Parse(await createRes.Content.ReadAsStringAsync()).RootElement;
+        var instanceId = created.GetProperty("instance_id").GetString()!;
+
+        await using var hub = BuildHubConnection(client);
+        List<JsonElement> messages = [];
+        var gate = new object();
+
+        hub.On<JsonElement>("TerminalEvent", msg =>
+        {
+            lock (gate)
+            {
+                messages.Add(msg.Clone());
+            }
+        });
+
+        await hub.StartAsync();
+        await hub.InvokeAsync("JoinInstance", new { instanceId });
+        _ = await WaitForMessageAsync(messages, gate, msg => GetType(msg) == "term.snapshot", TimeSpan.FromSeconds(8));
+
+        const string input = "oracle-gateway-sync\n";
+        await hub.InvokeAsync("SendInput", new { instanceId, data = input });
+        var patch = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.patch" && JsonSerializer.Serialize(msg).Contains("oracle-gateway-sync", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(8));
+
+        await hub.InvokeAsync("RequestSync", new { instanceId, type = "screen" });
+        await Task.Delay(250);
+
+        JsonElement snapshot;
+        lock (gate)
+        {
+            snapshot = messages
+                .Where(msg => GetType(msg) == "term.snapshot")
+                .OrderByDescending(msg => msg.GetProperty("ts").GetInt64())
+                .FirstOrDefault();
+        }
+
+        Assert.True(snapshot.ValueKind == JsonValueKind.Object, "missing term.snapshot");
+        Assert.True(snapshot.GetProperty("ts").GetInt64() >= patch.GetProperty("ts").GetInt64(), "snapshot did not refresh after sync");
+
+        using var oracle = new XTermOracleAdapter(80, 25);
+        oracle.Feed(input);
+        var expected = TerminalFrameNormalizer.FromOracle(oracle.Export());
+        var actual = TerminalFrameNormalizer.FromSnapshot(snapshot);
+        Assert.Equal(expected.Cols, actual.Cols);
+        Assert.Equal(expected.Rows, actual.Rows);
+        Assert.True(expected.VisibleLines.Count > 0);
+        Assert.True(actual.VisibleLines.Count >= expected.VisibleLines.Count);
+        for (var i = 0; i < expected.VisibleLines.Count; i++)
+        {
+            var actualLine = actual.VisibleLines[actual.VisibleLines.Count - expected.VisibleLines.Count + i];
+            Assert.Equal(expected.VisibleLines[i], actualLine);
+        }
     }
 
 

@@ -773,6 +773,34 @@ export class PtyManager {
       // ignore persistence failures for now
     }
   }
+
+  dispose() {
+    for (const session of this.sessions.values()) {
+      try {
+        for (const sub of session.subscribers || []) {
+          try {
+            sub.close();
+          } catch {
+            // ignore subscriber close errors during shutdown
+          }
+        }
+        session.subscribers?.clear?.();
+        session.writerPeer = null;
+      } catch {
+        // ignore subscriber cleanup errors during shutdown
+      }
+
+      try {
+        if (session.status === 'running') {
+          session.proc.kill('SIGKILL');
+        }
+      } catch {
+        // ignore process kill errors during shutdown
+      }
+    }
+
+    this.sessions.clear();
+  }
 }
 
 function resolveDefaultExecutable(cliType) {

@@ -1,27 +1,13 @@
 services:
-  orchestrator:
+  terminal-gateway-dotnet:
     image: mcr.microsoft.com/dotnet/sdk:10.0
     working_dir: /workspace
-    command: ["dotnet", "run", "--project", "apps/orchestrator/src/PtyAgent.Api/PtyAgent.Api.csproj", "--urls", "http://0.0.0.0:5121"]
+    command: ["dotnet", "run", "--project", "apps/terminal-gateway-dotnet/TerminalGateway.Api/TerminalGateway.Api.csproj"]
     volumes:
       - ..:/workspace
     environment:
-      Runtime__TerminalBackend: nodepty
-      Runtime__TerminalGatewayBaseUrl: http://terminal-gateway:7300
-      Runtime__TerminalGatewayToken: dev-terminal-token
-      Runtime__TerminalGatewayTimeoutMs: 5000
-      Orchestration__EngineProvider: maf
-    depends_on:
-      - terminal-gateway
-
-  terminal-gateway:
-    build:
-      context: ../apps/terminal-gateway
-    environment:
       PORT: 7300
       HOST: 0.0.0.0
-      TERMINAL_GATEWAY_TOKEN: dev-terminal-token
-      TERMINAL_WS_TOKEN: dev-terminal-token
 
   secretary-web:
     build:
@@ -34,6 +20,5 @@ services:
     ports:
       - "8080:80"
     depends_on:
-      - orchestrator
-      - terminal-gateway
+      - terminal-gateway-dotnet
       - secretary-web

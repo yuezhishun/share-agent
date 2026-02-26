@@ -2,8 +2,6 @@
 
 ## Project Structure & Module Organization
 This repository is a multi-app monorepo:
-- `apps/orchestrator/src/PtyAgent.Api`: .NET API and orchestration runtime.
-- `apps/orchestrator/tests/PtyAgent.Api.Tests`: xUnit integration/unit tests.
 - `apps/terminal-gateway`: Fastify + `node-pty` terminal gateway (`src/`, `test/`).
 - `apps/terminal-gateway-dotnet/TerminalGateway.Api`: .NET terminal gateway API.
 - `apps/terminal-gateway-dotnet/TerminalGateway.Api.Tests`: xUnit tests for dotnet terminal gateway.
@@ -12,8 +10,6 @@ This repository is a multi-app monorepo:
 - `docs/`: architecture and implementation plans.
 
 ## Build, Test, and Development Commands
-- `dotnet run --project apps/orchestrator/src/PtyAgent.Api/PtyAgent.Api.csproj`: run orchestrator locally.
-- `dotnet test apps/orchestrator/src/PtyAgent.slnx -v minimal`: run all .NET tests.
 - `cd apps/terminal-gateway && npm install && npm start`: run terminal gateway.
 - `cd apps/terminal-gateway && npm test`: run Node test suite (`node --test`).
 - `dotnet run --project apps/terminal-gateway-dotnet/TerminalGateway.Api/TerminalGateway.Api.csproj`: run dotnet terminal gateway.
@@ -26,7 +22,7 @@ This repository is a multi-app monorepo:
 ## Coding Style & Naming Conventions
 - Follow existing formatting per language: C# uses 4-space indentation; JS/Vue uses 2 spaces.
 - Use `PascalCase` for C# types/methods, `camelCase` for JS variables/functions, and kebab-case file names in JS where already used (for example `pty-manager.js`).
-- Keep API/event naming consistent with current patterns (for example `task_done`, `hitl_waiting`).
+- Keep API/event naming consistent with current terminal protocol patterns (for example `term.snapshot`, `term.patch`, `term.exit`).
 - Prefer small, focused modules; colocate tests with the owning app.
 
 ## Testing Guidelines
@@ -37,10 +33,10 @@ This repository is a multi-app monorepo:
 
 ## Commit & Pull Request Guidelines
 - Current history uses concise imperative commit subjects (for example `Initial commit`). Continue with short, action-first messages.
-- PRs should include: purpose, scope, affected apps (`orchestrator`, `terminal-gateway`, `terminal-gateway-dotnet`, `secretary-web`), test evidence, and config changes.
+- PRs should include: purpose, scope, affected apps (`terminal-gateway`, `terminal-gateway-dotnet`, `secretary-web`), test evidence, and config changes.
 - Link related issues/tasks and include UI screenshots for web-console changes.
 
 ## Security & Configuration Tips
-- Review `apps/orchestrator/src/PtyAgent.Api/appsettings.json` for runtime settings (`Runtime:TerminalBackend`, gateway URL/token/timeouts).
+- Review `apps/terminal-gateway-dotnet/TerminalGateway.Api/appsettings.json` and env vars for runtime settings.
 - Nginx main config for this project is at `/www/server/nginx/conf/nginx.conf`.
 - Do not commit secrets or environment-specific tokens. Prefer environment variables and local overrides.

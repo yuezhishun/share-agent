@@ -8,7 +8,7 @@ public static class JsonOptionsSetup
 {
     public static void ConfigureHttpJson(JsonOptions options)
     {
-        options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+        options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower;
         options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
     }
 }

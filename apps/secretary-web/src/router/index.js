@@ -1,11 +1,13 @@
 import { createRouter, createWebHistory } from 'vue-router';
-import TaskBoard from '../views/TaskBoard.vue';
-import TerminalWorkspace from '../views/TerminalWorkspace.vue';
+import DesktopTerminalView from '../views/DesktopTerminalView.vue';
+import MobileTerminalView from '../views/MobileTerminalView.vue';
+import MobileFilesView from '../views/MobileFilesView.vue';
 
 export default createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', component: TaskBoard },
-    { path: '/terminal', component: TerminalWorkspace }
+    { path: '/', component: DesktopTerminalView },
+    { path: '/mobile', component: MobileTerminalView },
+    { path: '/mobile/files', component: MobileFilesView }
   ]
 });

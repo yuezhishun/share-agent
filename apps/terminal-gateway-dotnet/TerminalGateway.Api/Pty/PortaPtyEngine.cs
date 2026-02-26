@@ -1,107 +1,81 @@
-using System.Diagnostics;
 using System.Text;
+using Porta.Pty;
 
 namespace TerminalGateway.Api.Pty;
 
-// Process-based adapter with the same surface as the future Porta.Pty engine.
 public sealed class PortaPtyEngine : IPtyEngine
 {
-    public Task<IPtyRuntimeSession> CreateAsync(PtyLaunchOptions options, CancellationToken cancellationToken = default)
+    public async Task<IPtyRuntimeSession> CreateAsync(PtyLaunchOptions options, CancellationToken cancellationToken = default)
     {
-        var psi = new ProcessStartInfo
+        ArgumentNullException.ThrowIfNull(options);
+        if (string.IsNullOrWhiteSpace(options.Executable))
         {
-            FileName = options.Executable,
-            WorkingDirectory = options.Cwd,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
+            throw new ArgumentException("executable is required", nameof(options));
+        }
+        if (string.IsNullOrWhiteSpace(options.Cwd))
+        {
+            throw new ArgumentException("cwd is required", nameof(options));
+        }
+
+        var ptyOptions = new PtyOptions
+        {
+            App = options.Executable,
+            Cwd = options.Cwd,
+            Cols = options.Cols,
+            Rows = options.Rows,
+            CommandLine = options.Args.ToArray(),
+            Environment = new Dictionary<string, string>(options.Env, StringComparer.Ordinal)
         };
 
-        foreach (var arg in options.Args)
-        {
-            psi.ArgumentList.Add(arg);
-        }
-
-        foreach (var pair in options.Env)
-        {
-            psi.Environment[pair.Key] = pair.Value;
-        }
-
-        var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        process.Start();
-        var runtime = new ProcessPtyRuntimeSession(process);
-        runtime.StartBackgroundReaders();
-        return Task.FromResult<IPtyRuntimeSession>(runtime);
+        var conn = await PtyProvider.SpawnAsync(ptyOptions, cancellationToken);
+        return new PortaRuntimeSession(conn);
     }
 
-    private sealed class ProcessPtyRuntimeSession : IPtyRuntimeSession
+    private sealed class PortaRuntimeSession : IPtyRuntimeSession
     {
-        private readonly Process _process;
+        private static readonly UTF8Encoding Utf8 = new(encoderShouldEmitUTF8Identifier: false);
+
+        private readonly IPtyConnection _connection;
         private readonly CancellationTokenSource _cts = new();
+        private readonly SemaphoreSlim _writeLock = new(1, 1);
+        private readonly Task _readerLoop;
 
-        public ProcessPtyRuntimeSession(Process process)
+        public PortaRuntimeSession(IPtyConnection connection)
         {
-            _process = process;
-            _process.Exited += (_, _) => Exited?.Invoke(_process.HasExited ? _process.ExitCode : null);
-        }
-
-        public int Pid => _process.Id;
-        public event Action<string>? OutputReceived;
-        public event Action<int?>? Exited;
-
-        public void StartBackgroundReaders()
-        {
-            _ = ReadLoopAsync(_process.StandardOutput, _cts.Token);
-            _ = ReadLoopAsync(_process.StandardError, _cts.Token);
-        }
-
-        private async Task ReadLoopAsync(StreamReader reader, CancellationToken cancellationToken)
-        {
-            var buffer = new char[4096];
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                var read = await reader.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
-                if (read <= 0)
-                {
-                    break;
-                }
-
-                OutputReceived?.Invoke(new string(buffer, 0, read));
-            }
+            _connection = connection;
+            _connection.ProcessExited += (_, e) => Exited?.Invoke(e.ExitCode);
+            _readerLoop = Task.Run(ReadLoopAsync, CancellationToken.None);
         }
 
         public async Task WriteAsync(string data, CancellationToken cancellationToken = default)
         {
-            if (_process.HasExited)
+            if (string.IsNullOrEmpty(data))
             {
                 return;
             }
 
-            await _process.StandardInput.WriteAsync(data.AsMemory(), cancellationToken);
-            await _process.StandardInput.FlushAsync(cancellationToken);
+            await _writeLock.WaitAsync(cancellationToken);
+            try
+            {
+                var payload = Utf8.GetBytes(data);
+                await _connection.WriterStream.WriteAsync(payload.AsMemory(0, payload.Length), cancellationToken);
+                await _connection.WriterStream.FlushAsync(cancellationToken);
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
         }
 
         public Task ResizeAsync(int cols, int rows, CancellationToken cancellationToken = default)
         {
+            _connection.Resize(cols, rows);
             return Task.CompletedTask;
         }
 
         public Task TerminateAsync(string signal, CancellationToken cancellationToken = default)
         {
-            if (_process.HasExited)
-            {
-                return Task.CompletedTask;
-            }
-
-            try
-            {
-                _process.Kill(entireProcessTree: true);
-            }
-            catch
-            {
-            }
-
+            _connection.Kill();
             return Task.CompletedTask;
         }
 
@@ -110,18 +84,50 @@ public sealed class PortaPtyEngine : IPtyEngine
             _cts.Cancel();
             try
             {
-                if (!_process.HasExited)
-                {
-                    _process.Kill(entireProcessTree: true);
-                }
+                _readerLoop.GetAwaiter().GetResult();
             }
             catch
             {
             }
 
-            _process.Dispose();
+            _connection.Dispose();
+            _writeLock.Dispose();
             _cts.Dispose();
             return ValueTask.CompletedTask;
         }
+
+        public int Pid => _connection.Pid;
+
+        public event Action<string>? OutputReceived;
+        public event Action<int?>? Exited;
+
+        private async Task ReadLoopAsync()
+        {
+            var buffer = new byte[4096];
+            while (!_cts.IsCancellationRequested)
+            {
+                int read;
+                try
+                {
+                    read = await _connection.ReaderStream.ReadAsync(buffer.AsMemory(0, buffer.Length), _cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch
+                {
+                    break;
+                }
+
+                if (read <= 0)
+                {
+                    break;
+                }
+
+                OutputReceived?.Invoke(Utf8.GetString(buffer, 0, read));
+            }
+        }
     }
+
 }

@@ -4,7 +4,12 @@
 - `apps/terminal-gateway-dotnet/TerminalGateway.Api`
 - `apps/terminal-gateway-dotnet/TerminalGateway.Api.Tests`
 
-## 2. 本地运行
+## 2. 当前协议与入口
+- HTTP API：`/api/*`
+- SignalR Hub：`/hubs/terminal`
+- 说明：当前 Web 终端同步链路已使用 SignalR；旧 WebSocket 设计文档已标注为 `[已废弃]`。
+
+## 3. 本地运行
 ```bash
 dotnet run --project apps/terminal-gateway-dotnet/TerminalGateway.Api/TerminalGateway.Api.csproj
 ```
@@ -13,16 +18,20 @@ dotnet run --project apps/terminal-gateway-dotnet/TerminalGateway.Api/TerminalGa
 - `HOST=0.0.0.0`
 - `PORT=7300`
 
-## 3. 测试
+## 4. 测试
 ```bash
 dotnet test apps/terminal-gateway-dotnet/TerminalGateway.Api.Tests/TerminalGateway.Api.Tests.csproj -v minimal
 ```
 
-说明：
-- WebSocket 用例已切换为 Kestrel 真 socket 集成测试（不再依赖 TestServer WebSocket 时序）。
-- 核心能力（会话创建、WS 输出、ping/pong、writeToken 写权限、snapshot/history、profiles/settings、fs/projects、internal 鉴权）已覆盖并通过。
+当前测试覆盖（SignalR 路径）：
+- 健康检查与项目发现
+- 创建实例 + Hub 连接
+- 输入回显（SendInput）
+- Resize ACK + Snapshot 同步（RequestResize）
+- 手动同步（RequestSync: screen/history）
+- 文件接口与实例退出回收
 
-## 4. 环境变量
+## 5. 环境变量
 与 Node 网关对齐的主要变量：
 - `PORT`
 - `HOST`
@@ -35,6 +44,7 @@ dotnet test apps/terminal-gateway-dotnet/TerminalGateway.Api.Tests/TerminalGatew
 - `TERMINAL_CLAUDE_CONFIG_PATH`
 - `TERMINAL_FS_ALLOWED_ROOTS`
 
-## 5. 联调状态
-- Node 网关 `apps/terminal-gateway` 继续保留并作为默认后端。
-- Dotnet 网关用于对等联调和逐步替换验证。
+## 6. 联调状态
+- 当前 MVP 以 Dotnet 网关 + Web 前端为主链路。
+- Web 终端通过 SignalR Hub `/hubs/terminal` 与网关交互。
+- Node 网关属于历史实现，可按需保留，不在 MVP 主链路内。

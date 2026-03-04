@@ -5,8 +5,8 @@ test('desktop should keep output stable when resize ack/snapshot and scrolling h
   await installMockRuntime(page);
   await page.goto('/');
 
-  await page.getByRole('button', { name: 'Connect', exact: true }).first().click();
-  await expect(page.getByTestId('status')).toContainText('Connected:');
+  await page.locator('#instance-list .terminal-item').first().click();
+  await expect(page.getByTestId('status')).toContainText('Connected');
 
   for (let i = 0; i < 20; i += 1) {
     await page.getByTestId('terminal').click();
@@ -28,18 +28,15 @@ test('desktop should keep output stable when resize ack/snapshot and scrolling h
     });
     conn.emit('TerminalEvent', {
       v: 1,
-      type: 'term.snapshot',
+      type: 'term.raw',
       instance_id: 'mock-1',
-      seq: 100,
+      replay: true,
+      req_id: 'resize-replay',
+      to_seq: 999,
+      seq: 999,
+      reset: false,
       ts: Date.now(),
-      size: { cols: 120, rows: 40 },
-      cursor: { x: 0, y: 1, visible: true },
-      styles: { '0': {} },
-      rows: [
-        { y: 0, segs: [['after-resize-a', 0]] },
-        { y: 1, segs: [['after-resize-b', 0]] }
-      ],
-      history: { available: 0, newest_cursor: 'h-1' }
+      data: 'after-resize-a\\r\\nafter-resize-b\\r\\n'
     });
   });
 
@@ -51,13 +48,35 @@ test('desktop seq gap route should auto trigger resync request', async ({ page }
   await installMockRuntime(page);
   await page.goto('/');
 
-  await page.getByRole('button', { name: 'Connect', exact: true }).first().click();
+  await page.locator('#instance-list .terminal-item').first().click();
   const before = await page.evaluate(() => globalThis.__PW_MOCK_STATE__.invokes.filter((x) => x.method === 'RequestSync').length);
 
   await page.evaluate(() => globalThis.__PW_MOCK_STATE__.hubConnection.emitSeqGap());
-  await expect(page.getByTestId('status')).toContainText('Resync requested:');
+  await expect(page.getByTestId('status')).toContainText('Resync requested');
 
   await expect
     .poll(async () => page.evaluate(() => globalThis.__PW_MOCK_STATE__.invokes.filter((x) => x.method === 'RequestSync').length))
     .toBeGreaterThan(before);
+});
+
+test('desktop switch between two instances should use incremental raw sync after warm-up', async ({ page }) => {
+  await installMockRuntime(page);
+  await page.goto('/');
+
+  await page.locator('#instance-list .terminal-item').first().click();
+  await expect(page.getByTestId('status')).toContainText('Connected');
+
+  await page.getByTestId('create-button').click();
+  await expect(page.locator('#instance-list .terminal-item')).toHaveCount(2);
+
+  await page.locator('#instance-list .terminal-item').nth(1).click();
+  await expect(page.getByTestId('status')).toContainText('Connected');
+
+  const latestSyncSinceSeq = await page.evaluate(() => {
+    const syncs = globalThis.__PW_MOCK_STATE__.invokes.filter((x) => x.method === 'RequestSync');
+    const last = syncs.at(-1);
+    return Number(last?.payload?.sinceSeq || 0);
+  });
+
+  expect(latestSyncSinceSeq).toBeGreaterThan(0);
 });

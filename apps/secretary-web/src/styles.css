@@ -126,7 +126,7 @@ button:hover {
   gap: 8px;
 }
 
-#instance-list,
+.desktop-grid #instance-list,
 .files-list {
   list-style: none;
   padding: 0;
@@ -136,7 +136,7 @@ button:hover {
   gap: 8px;
 }
 
-#instance-list li {
+.desktop-grid #instance-list li {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 8px;
@@ -144,7 +144,7 @@ button:hover {
   gap: 6px;
 }
 
-#instance-list li.active {
+.desktop-grid #instance-list li.active {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px rgba(78, 163, 255, 0.3) inset;
 }

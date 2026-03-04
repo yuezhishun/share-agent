@@ -37,6 +37,17 @@ function createHubConnectionBuilder() {
   return new signalR.HubConnectionBuilder();
 }
 
+function parseSeq(value, fallback = 0) {
+  const seq = Number(value);
+  if (!Number.isFinite(seq)) {
+    return Math.max(0, Number(fallback) || 0);
+  }
+  return Math.max(0, Math.floor(seq));
+}
+
+const MAX_PLAIN_OUTPUT_CHARS = 12000;
+const DEFAULT_MAX_JOINED_INSTANCES = 2;
+
 export const useWebCliTerminalStore = defineStore('webcliTerminal', {
   state: () => ({
     instances: [],
@@ -49,12 +60,21 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
     isReconnecting: false,
     connection: null,
     joinedInstanceId: '',
+    joinedInstanceIds: [],
+    maxJoinedInstances: DEFAULT_MAX_JOINED_INSTANCES,
     listeners: [],
     resizeTimer: null,
     pendingResize: null,
     cachedScreens: {},
+    streamStates: {},
     routeResyncTimers: {},
-    routeResyncInFlight: {}
+    routeResyncInFlight: {},
+    plainOutput: '',
+    plainOutputByInstance: {},
+    uiSession: {
+      rightPanelCollapsed: false,
+      activeRightTab: 'files'
+    }
   }),
 
   getters: {
@@ -76,6 +96,16 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       this.status = String(value || 'Ready');
     },
 
+    setUiSession(patch) {
+      if (!patch || typeof patch !== 'object') {
+        return;
+      }
+      this.uiSession = {
+        ...this.uiSession,
+        ...patch
+      };
+    },
+
     subscribe(listener) {
       if (typeof listener !== 'function') {
         return () => {};
@@ -88,9 +118,72 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
 
     emitMessage(message) {
       this.rememberScreenFrame(message);
+      this.rememberPlainOutput(message);
+      if (!this.isMessageForSelected(message)) {
+        return;
+      }
       for (const listener of this.listeners) {
         listener(message);
       }
+    },
+
+    syncPlainOutputForSelected() {
+      const id = String(this.selectedInstanceId || '').trim();
+      if (!id) {
+        this.plainOutput = '';
+        return;
+      }
+      this.plainOutput = String(this.plainOutputByInstance[id] || '');
+    },
+
+    rememberPlainOutput(message, options = {}) {
+      if (!message || typeof message !== 'object') {
+        return;
+      }
+      const cacheOnly = options?.cacheOnly === true;
+      const instanceId = String(message.instance_id || (cacheOnly ? '' : this.selectedInstanceId) || '').trim();
+      if (!instanceId) {
+        return;
+      }
+
+      if (message.type === 'term.raw') {
+        const chunk = String(message.data || '');
+        const previous = String(this.plainOutputByInstance[instanceId] || '');
+        let next = previous;
+        if (message.replay === true && message.reset === true) {
+          next = chunk;
+        } else if (chunk) {
+          next = `${previous}${chunk}`;
+        } else {
+          return;
+        }
+        const normalized = next.slice(-MAX_PLAIN_OUTPUT_CHARS);
+        this.plainOutputByInstance[instanceId] = normalized;
+        if (!cacheOnly && instanceId === String(this.selectedInstanceId || '').trim()) {
+          this.plainOutput = normalized;
+        }
+        return;
+      }
+
+      if (message.type === 'term.exit') {
+        const previous = String(this.plainOutputByInstance[instanceId] || '');
+        const next = `${previous}\n[exit] code=${String(message.code ?? '')}`.slice(-MAX_PLAIN_OUTPUT_CHARS);
+        this.plainOutputByInstance[instanceId] = next;
+        if (!cacheOnly && instanceId === String(this.selectedInstanceId || '').trim()) {
+          this.plainOutput = next;
+        }
+      }
+    },
+
+    isMessageForSelected(message) {
+      if (!message || typeof message !== 'object') {
+        return false;
+      }
+      const instanceId = String(message.instance_id || '').trim();
+      if (!instanceId) {
+        return true;
+      }
+      return instanceId === String(this.selectedInstanceId || '').trim();
     },
 
     cloneFrame(message) {
@@ -113,6 +206,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       }
       if (message.type === 'term.snapshot') {
         this.cachedScreens[instanceId] = this.cloneFrame(message);
+        this.syncStreamSeq(instanceId, parseSeq(message.seq, parseSeq(message.base_seq, 0)));
         return;
       }
       if (message.type !== 'term.patch') {
@@ -138,6 +232,275 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       next.cursor = message.cursor || next.cursor;
       next.seq = message.seq || next.seq;
       this.cachedScreens[instanceId] = next;
+      this.syncStreamSeq(instanceId, message.seq);
+    },
+
+    ensureStreamState(instanceId) {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return null;
+      }
+      if (!this.streamStates[id]) {
+        this.streamStates[id] = {
+          lastSeq: 0,
+          syncInFlight: false,
+          activeReqId: '',
+          pendingRaw: [],
+          syncTimeout: null
+        };
+      }
+      return this.streamStates[id];
+    },
+
+    syncStreamSeq(instanceId, value) {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return;
+      }
+      const seq = parseSeq(value, 0);
+      if (seq <= 0) {
+        return;
+      }
+      const stream = this.ensureStreamState(id);
+      if (!stream) {
+        return;
+      }
+      if (seq > stream.lastSeq) {
+        stream.lastSeq = seq;
+      }
+    },
+
+    resetStreamState(instanceId, lastSeq = 0) {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return;
+      }
+      this.streamStates[id] = {
+        lastSeq: Math.max(0, Number(lastSeq) || 0),
+        syncInFlight: false,
+        activeReqId: '',
+        pendingRaw: [],
+        syncTimeout: null
+      };
+    },
+
+    queuePendingRaw(stream, message) {
+      const seq = parseSeq(message?.seq, 0);
+      if (seq > 0 && stream.pendingRaw.some((x) => parseSeq(x?.seq, 0) === seq)) {
+        return;
+      }
+      stream.pendingRaw = [...stream.pendingRaw, this.cloneFrame(message)];
+    },
+
+    flushPendingRaw(instanceId) {
+      const stream = this.ensureStreamState(instanceId);
+      if (!stream || stream.pendingRaw.length === 0) {
+        return [];
+      }
+
+      const sorted = [...stream.pendingRaw].sort((a, b) => parseSeq(a?.seq, 0) - parseSeq(b?.seq, 0));
+      const emitted = [];
+      const remaining = [];
+
+      for (const message of sorted) {
+        const seq = parseSeq(message?.seq, 0);
+        if (seq <= 0) {
+          emitted.push(message);
+          continue;
+        }
+        if (seq <= stream.lastSeq) {
+          continue;
+        }
+        if (seq === stream.lastSeq + 1) {
+          stream.lastSeq = seq;
+          emitted.push(message);
+          continue;
+        }
+        remaining.push(message);
+      }
+
+      stream.pendingRaw = remaining;
+      return emitted;
+    },
+
+    async requestRawSync(instanceId, reason = 'manual', options = {}) {
+      const id = String(instanceId || '').trim();
+      if (!id || !this.connection || !this.wsConnected) {
+        return;
+      }
+
+      const stream = this.ensureStreamState(id);
+      if (!stream || stream.syncInFlight) {
+        return;
+      }
+
+      stream.syncInFlight = true;
+      stream.activeReqId = `raw-sync-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+      if (stream.syncTimeout) {
+        clearTimeout(stream.syncTimeout);
+      }
+      const activeReqId = stream.activeReqId;
+      stream.syncTimeout = setTimeout(() => {
+        const latest = this.streamStates[id];
+        if (!latest || !latest.syncInFlight || latest.activeReqId !== activeReqId) {
+          return;
+        }
+        latest.syncInFlight = false;
+        latest.activeReqId = '';
+        latest.syncTimeout = null;
+        for (const item of this.flushPendingRaw(id)) {
+          this.emitMessage(item);
+        }
+      }, 1500);
+      this.emitMessage({
+        type: 'term.sync.start',
+        instance_id: id,
+        reason
+      });
+
+      try {
+        const fromStart = options?.fromStart === true;
+        const sinceSeq = fromStart
+          ? 0
+          : Math.max(0, Number(stream.lastSeq) || 0);
+        await this.connection.invoke('RequestSync', {
+          instanceId: id,
+          type: 'raw',
+          sinceSeq,
+          reqId: stream.activeReqId
+        });
+      } catch (error) {
+        stream.syncInFlight = false;
+        stream.activeReqId = '';
+        if (stream.syncTimeout) {
+          clearTimeout(stream.syncTimeout);
+          stream.syncTimeout = null;
+        }
+        throw error;
+      }
+    },
+
+    handleIncomingRaw(message) {
+      const id = String(message?.instance_id || '').trim();
+      const stream = this.ensureStreamState(id);
+      if (!stream) {
+        return [message];
+      }
+
+      const isReplay = message?.replay === true;
+      const seq = parseSeq(message?.seq, 0);
+      if (isReplay) {
+        const toSeq = parseSeq(message?.to_seq, seq);
+        if (toSeq > stream.lastSeq) {
+          stream.lastSeq = toSeq;
+        }
+        if (stream.syncTimeout) {
+          clearTimeout(stream.syncTimeout);
+          stream.syncTimeout = null;
+        }
+        stream.syncInFlight = false;
+        stream.activeReqId = '';
+        if (message?.reset === true) {
+          stream.pendingRaw = stream.pendingRaw.filter((x) => parseSeq(x?.seq, 0) > stream.lastSeq);
+        }
+        return [message, ...this.flushPendingRaw(id)];
+      }
+
+      if (seq <= 0) {
+        return [message];
+      }
+
+      if (stream.syncInFlight) {
+        this.queuePendingRaw(stream, message);
+        return [];
+      }
+
+      if (seq <= stream.lastSeq) {
+        return [];
+      }
+
+      if (seq > stream.lastSeq + 1) {
+        this.queuePendingRaw(stream, message);
+        if (id === String(this.selectedInstanceId || '').trim()) {
+          this.setStatus('Resync requested');
+          this.requestRawSync(id, 'seq_gap').catch(() => {
+            this.setStatus(`Auto resync failed: ${id}`);
+          });
+        }
+        return [];
+      }
+
+      stream.lastSeq = seq;
+      return [message];
+    },
+
+    handleIncomingSyncComplete(message) {
+      const id = String(message?.instance_id || '').trim();
+      const stream = this.ensureStreamState(id);
+      if (!stream) {
+        return [message];
+      }
+
+      const reqId = String(message?.req_id || '').trim();
+      if (stream.activeReqId && reqId && reqId !== stream.activeReqId) {
+        return [];
+      }
+
+      const toSeq = parseSeq(message?.to_seq, stream.lastSeq);
+      if (toSeq > stream.lastSeq) {
+        stream.lastSeq = toSeq;
+      }
+
+      stream.syncInFlight = false;
+      stream.activeReqId = '';
+      if (stream.syncTimeout) {
+        clearTimeout(stream.syncTimeout);
+        stream.syncTimeout = null;
+      }
+      const drained = this.flushPendingRaw(id);
+      if (stream.pendingRaw.length > 0) {
+        this.requestRawSync(id, 'post_sync_gap').catch(() => {
+          this.setStatus(`Auto resync failed: ${id}`);
+        });
+      }
+
+      return [message, ...drained];
+    },
+
+    processIncomingMessage(message) {
+      if (!message || typeof message !== 'object') {
+        return [];
+      }
+      const isSelected = this.isMessageForSelected(message);
+      if (message.type === 'term.raw') {
+        const items = this.handleIncomingRaw(message);
+        if (!isSelected) {
+          for (const item of items) {
+            this.rememberPlainOutput(item, { cacheOnly: true });
+          }
+          return [];
+        }
+        return items;
+      }
+      if (message.type === 'term.sync.complete') {
+        const items = this.handleIncomingSyncComplete(message);
+        if (!isSelected) {
+          for (const item of items) {
+            this.rememberPlainOutput(item, { cacheOnly: true });
+          }
+          return [];
+        }
+        return items;
+      }
+      if (!isSelected && message.type === 'term.exit') {
+        this.rememberPlainOutput(message, { cacheOnly: true });
+        return [];
+      }
+      if (!isSelected && (message.type === 'term.snapshot' || message.type === 'term.patch')) {
+        this.rememberScreenFrame(message);
+        return [];
+      }
+      return isSelected ? [message] : [];
     },
 
     async fetchInstances() {
@@ -147,11 +510,29 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       }
       const body = await response.json();
       this.instances = Array.isArray(body?.items) ? body.items : [];
+      const activeIds = new Set(this.instances.map((x) => String(x?.id || '').trim()).filter(Boolean));
+      this.joinedInstanceIds = this.joinedInstanceIds.filter((id) => activeIds.has(id));
+      this.joinedInstanceId = this.joinedInstanceIds[this.joinedInstanceIds.length - 1] || '';
+      for (const id of Object.keys(this.streamStates)) {
+        if (!activeIds.has(id)) {
+          delete this.streamStates[id];
+        }
+      }
+      for (const id of Object.keys(this.cachedScreens)) {
+        if (!activeIds.has(id)) {
+          delete this.cachedScreens[id];
+        }
+      }
+      for (const id of Object.keys(this.plainOutputByInstance)) {
+        if (!activeIds.has(id)) {
+          delete this.plainOutputByInstance[id];
+        }
+      }
       if (this.selectedInstanceId && !this.instances.some((x) => x.id === this.selectedInstanceId)) {
         this.selectedInstanceId = '';
-        this.wsConnected = false;
         this.setStatus('Current instance exited');
       }
+      this.syncPlainOutputForSelected();
       return this.instances;
     },
 
@@ -214,7 +595,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
 
         this.routeResyncInFlight[id] = true;
         try {
-          await this.connection.invoke('RequestSync', { instanceId: id, type: 'screen' });
+          await this.requestRawSync(id, 'route_seq_gap');
         } catch {
           this.setStatus(`Auto resync failed: ${id}`);
         } finally {
@@ -249,7 +630,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       const created = await response.json();
       await this.fetchInstances();
       this.selectedInstanceId = String(created.instance_id || '');
-      this.setStatus(`Created ${this.selectedInstanceId}`);
+      this.setStatus('Created');
       return created;
     },
 
@@ -261,8 +642,10 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       this.pendingResize = null;
 
       if (this.connection) {
-        if (this.selectedInstanceId && this.wsConnected) {
-          this.connection.invoke('LeaveInstance', { instanceId: this.selectedInstanceId }).catch(() => {});
+        if (this.wsConnected) {
+          for (const joinedId of this.joinedInstanceIds) {
+            this.connection.invoke('LeaveInstance', { instanceId: joinedId }).catch(() => {});
+          }
         }
         this.connection.stop().catch(() => {});
       }
@@ -273,8 +656,69 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       this.routeResyncInFlight = {};
       this.connection = null;
       this.joinedInstanceId = '';
+      this.joinedInstanceIds = [];
+      for (const stream of Object.values(this.streamStates)) {
+        if (stream?.syncTimeout) {
+          clearTimeout(stream.syncTimeout);
+        }
+      }
+      this.streamStates = {};
       this.wsConnected = false;
       this.isReconnecting = false;
+      this.plainOutput = '';
+      this.plainOutputByInstance = {};
+    },
+
+    touchJoinedInstance(instanceId) {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return;
+      }
+      const withoutCurrent = this.joinedInstanceIds.filter((item) => item !== id);
+      withoutCurrent.push(id);
+      this.joinedInstanceIds = withoutCurrent;
+      this.joinedInstanceId = id;
+    },
+
+    async leaveJoinedInstance(instanceId, options = {}) {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return;
+      }
+      this.joinedInstanceIds = this.joinedInstanceIds.filter((item) => item !== id);
+      this.joinedInstanceId = this.joinedInstanceIds[this.joinedInstanceIds.length - 1] || '';
+
+      const callRemote = options?.callRemote !== false;
+      if (!callRemote || !this.connection || !this.wsConnected) {
+        return;
+      }
+      try {
+        await this.connection.invoke('LeaveInstance', { instanceId: id });
+      } catch {
+      }
+    },
+
+    async trimJoinedInstances() {
+      const limit = Math.max(1, Number(this.maxJoinedInstances) || DEFAULT_MAX_JOINED_INSTANCES);
+      while (this.joinedInstanceIds.length > limit) {
+        const stale = this.joinedInstanceIds[0];
+        await this.leaveJoinedInstance(stale, { callRemote: true });
+      }
+    },
+
+    async joinInstance(instanceId) {
+      const id = String(instanceId || '').trim();
+      if (!id || !this.connection || !this.wsConnected) {
+        return;
+      }
+
+      if (this.joinedInstanceIds.includes(id)) {
+        this.touchJoinedInstance(id);
+        return;
+      }
+      await this.connection.invoke('JoinInstance', { instanceId: id });
+      this.touchJoinedInstance(id);
+      await this.trimJoinedInstances();
     },
 
     async ensureConnection() {
@@ -290,21 +734,30 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       this.connection = connection;
 
       connection.on('TerminalEvent', (message) => {
-        this.emitMessage(message);
+        const messageInstanceId = String(message?.instance_id || '').trim();
+        const isSelectedMessage = !messageInstanceId || messageInstanceId === String(this.selectedInstanceId || '').trim();
         if (message?.type === 'term.exit') {
-          this.wsConnected = false;
-          this.setStatus('Instance exited');
+          if (isSelectedMessage) {
+            this.setStatus('Instance exited');
+          }
         }
         if (message?.type === 'term.route') {
           const reason = String(message?.reason || '');
-          const routeInstanceId = String(message?.instance_id || '');
+          const routeInstanceId = messageInstanceId;
           if (reason === 'seq_gap' && routeInstanceId) {
-            this.setStatus(`Resync requested: ${routeInstanceId}`);
+            if (isSelectedMessage) {
+              this.setStatus('Resync requested');
+            }
             this.scheduleRouteResync(routeInstanceId);
           }
         }
         if (message?.type === 'error') {
-          this.setStatus(String(message?.error || message?.message || 'error'));
+          if (isSelectedMessage) {
+            this.setStatus(String(message?.error || message?.message || 'error'));
+          }
+        }
+        for (const item of this.processIncomingMessage(message)) {
+          this.emitMessage(item);
         }
       });
 
@@ -317,11 +770,22 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       connection.onreconnected(async () => {
         this.wsConnected = true;
         this.isReconnecting = false;
-        this.setStatus(`Connected: ${this.selectedInstanceId}`);
+        this.setStatus('Connected');
         try {
-          await connection.invoke('JoinInstance', { instanceId: this.selectedInstanceId });
-          this.joinedInstanceId = this.selectedInstanceId;
-          await connection.invoke('RequestSync', { instanceId: this.selectedInstanceId, type: 'screen' });
+          const selected = String(this.selectedInstanceId || '').trim();
+          const previous = [...this.joinedInstanceIds];
+          this.joinedInstanceId = '';
+          this.joinedInstanceIds = [];
+          const targets = [selected, ...previous]
+            .map((id) => String(id || '').trim())
+            .filter((id, index, array) => id.length > 0 && array.indexOf(id) === index)
+            .slice(0, Math.max(1, Number(this.maxJoinedInstances) || DEFAULT_MAX_JOINED_INSTANCES));
+          for (const id of targets) {
+            await this.joinInstance(id);
+          }
+          if (selected) {
+            await this.requestRawSync(selected, 'reconnect');
+          }
         } catch (error) {
           this.setStatus(String(error?.message || error || 'reconnect sync failed'));
         }
@@ -329,8 +793,8 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
 
       connection.onclose(() => {
         this.wsConnected = false;
-        this.joinedInstanceId = '';
         this.isReconnecting = false;
+        this.connection = null;
         this.setStatus('disconnected');
       });
 
@@ -355,43 +819,31 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
         return;
       }
 
-      const previousId = String(this.joinedInstanceId || '').trim();
       this.selectedInstanceId = nextId;
-
+      this.ensureStreamState(nextId);
+      this.syncPlainOutputForSelected();
       const cached = this.cachedScreens[nextId];
-      if (cached) {
+      if (cached && cached.type === 'term.snapshot') {
         this.emitMessage(this.cloneFrame(cached));
       }
 
-      if (previousId && previousId !== nextId) {
-        await this.connection.invoke('LeaveInstance', { instanceId: previousId });
-      }
+      this.setStatus('Connected');
 
-      let connected = false;
       let lastError = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
-          if (previousId !== nextId || this.joinedInstanceId !== nextId) {
-            await this.connection.invoke('JoinInstance', { instanceId: nextId });
-            this.joinedInstanceId = nextId;
-          }
-          await this.connection.invoke('RequestSync', { instanceId: nextId, type: 'screen' });
-          connected = true;
-          break;
+          await this.joinInstance(nextId);
+          await this.requestRawSync(nextId, 'connect');
+          return;
         } catch (error) {
           lastError = error;
-          this.joinedInstanceId = '';
           if (attempt < 2) {
             await new Promise((resolve) => setTimeout(resolve, 300));
           }
         }
       }
 
-      if (!connected) {
-        throw lastError || new Error(`connect failed: ${nextId}`);
-      }
-
-      this.setStatus(`Connected: ${nextId}`);
+      throw lastError || new Error(`connect failed: ${nextId}`);
     },
 
     async sendInput(data) {
@@ -449,10 +901,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
         return;
       }
 
-      await this.connection.invoke('RequestSync', {
-        instanceId: this.selectedInstanceId,
-        type: 'screen'
-      });
+      await this.requestRawSync(this.selectedInstanceId, 'manual');
     },
 
     async terminateSelected() {

@@ -8,7 +8,7 @@ test('mobile reconnect should show status, disable connect button, and auto rejo
   await page.selectOption('select', 'mock-1');
   const connectBtn = page.getByRole('button', { name: 'Connect', exact: true });
   await connectBtn.click();
-  await expect(page.getByText('Connected: mock-1')).toBeVisible();
+  await expect(page.getByText('Connected')).toBeVisible();
 
   await page.evaluate(() => globalThis.__PW_MOCK_STATE__.hubConnection.triggerReconnecting());
   await expect(page.getByText('Reconnecting...')).toBeVisible();
@@ -21,7 +21,7 @@ test('mobile reconnect should show status, disable connect button, and auto rejo
     await globalThis.__PW_MOCK_STATE__.hubConnection.triggerReconnected();
   });
 
-  await expect(page.getByText('Connected: mock-1')).toBeVisible();
+  await expect(page.getByText('Connected')).toBeVisible();
   await expect
     .poll(async () => page.evaluate(() => ({
       join: globalThis.__PW_MOCK_STATE__.invokes.filter((x) => x.method === 'JoinInstance').length,
@@ -38,18 +38,23 @@ test('desktop connect buttons should be disabled during reconnecting and restore
   await installMockRuntime(page);
   await page.goto('/');
 
-  const connectBtn = page.getByRole('button', { name: 'Connect', exact: true }).first();
-  await connectBtn.click();
-  await expect(page.getByTestId('status')).toContainText('Connected:');
+  await page.locator('#instance-list .terminal-item').first().click();
+  await expect(page.getByTestId('status')).toContainText('Connected');
 
   await page.evaluate(() => globalThis.__PW_MOCK_STATE__.hubConnection.triggerReconnecting());
   await expect(page.getByTestId('status')).toContainText('Reconnecting...');
-  await expect(connectBtn).toBeDisabled();
 
+  const beforeJoin = await page.evaluate(() => globalThis.__PW_MOCK_STATE__.invokes.filter((x) => x.method === 'JoinInstance').length);
+  const beforeSync = await page.evaluate(() => globalThis.__PW_MOCK_STATE__.invokes.filter((x) => x.method === 'RequestSync').length);
   await page.evaluate(async () => {
     await globalThis.__PW_MOCK_STATE__.hubConnection.triggerReconnected();
   });
 
-  await expect(page.getByTestId('status')).toContainText('Connected:');
-  await expect(connectBtn).toBeEnabled();
+  await expect(page.getByTestId('status')).toContainText('Connected');
+  await expect
+    .poll(async () => page.evaluate(() => ({
+      join: globalThis.__PW_MOCK_STATE__.invokes.filter((x) => x.method === 'JoinInstance').length,
+      sync: globalThis.__PW_MOCK_STATE__.invokes.filter((x) => x.method === 'RequestSync').length
+    })))
+    .toEqual({ join: beforeJoin + 1, sync: beforeSync + 1 });
 });

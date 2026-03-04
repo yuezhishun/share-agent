@@ -35,7 +35,7 @@ public sealed class SlaveClusterBridgeService : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             HubConnection? connection = null;
-            Action<string, object>? patchHandler = null;
+            Action<string, object>? rawHandler = null;
             Action<string, object>? exitHandler = null;
             try
             {
@@ -62,9 +62,9 @@ public sealed class SlaveClusterBridgeService : BackgroundService
                     InstanceCount = _instances.List().Count
                 }, stoppingToken);
 
-                patchHandler = (instanceId, payload) => _ = PublishRuntimeEventAsync(connection, payload, stoppingToken);
+                rawHandler = (instanceId, payload) => _ = PublishRuntimeEventAsync(connection, payload, stoppingToken);
                 exitHandler = (instanceId, payload) => _ = PublishRuntimeEventAsync(connection, payload, stoppingToken);
-                _instances.Patch += patchHandler;
+                _instances.Raw += rawHandler;
                 _instances.Exited += exitHandler;
 
                 while (!stoppingToken.IsCancellationRequested && connection.State == HubConnectionState.Connected)
@@ -89,9 +89,9 @@ public sealed class SlaveClusterBridgeService : BackgroundService
             }
             finally
             {
-                if (patchHandler is not null)
+                if (rawHandler is not null)
                 {
-                    _instances.Patch -= patchHandler;
+                    _instances.Raw -= rawHandler;
                 }
 
                 if (exitHandler is not null)
@@ -200,7 +200,27 @@ public sealed class SlaveClusterBridgeService : BackgroundService
                         return Fail(command, "instance_id is required");
                     }
 
-                    var syncType = (ReadString(command.Payload, "type") ?? "screen").Trim().ToLowerInvariant();
+                    var syncType = (ReadString(command.Payload, "type") ?? "raw").Trim().ToLowerInvariant();
+                    if (syncType == "raw")
+                    {
+                        var reqId = ReadString(command.Payload, "req_id")
+                            ?? ReadString(command.Payload, "reqId")
+                            ?? $"raw-sync-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+                        var sinceSeq = ReadInt(command.Payload, "since_seq");
+                        if (sinceSeq <= 0)
+                        {
+                            sinceSeq = ReadInt(command.Payload, "sinceSeq");
+                        }
+
+                        var replay = _instances.RawReplayEvent(instanceId, sinceSeq > 0 ? sinceSeq : null, reqId);
+                        if (replay is null)
+                        {
+                            return Fail(command, "instance not found");
+                        }
+
+                        return Ok(command, replay);
+                    }
+
                     if (syncType == "history")
                     {
                         var before = ReadString(command.Payload, "before") ?? "h-1";

@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -77,7 +78,7 @@ public class GatewayApiTests
 
         await hub.InvokeAsync("SendInput", new { instanceId, data = "echo hello-webcli-dotnet\r" });
         _ = await WaitForMessageAsync(messages, gate,
-            msg => GetType(msg) == "term.patch" && JsonSerializer.Serialize(msg).Contains("hello-webcli-dotnet", StringComparison.Ordinal),
+            msg => GetType(msg) == "term.raw" && JsonSerializer.Serialize(msg).Contains("hello-webcli-dotnet", StringComparison.Ordinal),
             TimeSpan.FromSeconds(8));
     }
 
@@ -130,6 +131,31 @@ public class GatewayApiTests
             TimeSpan.FromSeconds(8));
         Assert.Equal("term.snapshot", GetType(resizedSnapshot));
 
+        await hub.InvokeAsync("SendInput", new { instanceId, data = "echo raw-sync-check\r" });
+        _ = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.raw"
+                && (!msg.TryGetProperty("replay", out var replayFlag) || replayFlag.ValueKind != JsonValueKind.True)
+                && JsonSerializer.Serialize(msg).Contains("raw-sync-check", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(8));
+        var liveRaw = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.raw"
+                && (!msg.TryGetProperty("replay", out var replayFlag) || replayFlag.ValueKind != JsonValueKind.True)
+                && JsonSerializer.Serialize(msg).Contains("raw-sync-check", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(8));
+        Assert.True(liveRaw.TryGetProperty("seq", out var liveRawSeqProp) && liveRawSeqProp.GetInt32() > 0, "live term.raw missing seq");
+
+        await hub.InvokeAsync("RequestSync", new { instanceId, type = "raw" });
+        var rawReplay = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.raw"
+                && msg.TryGetProperty("replay", out var replay)
+                && replay.ValueKind == JsonValueKind.True
+                && JsonSerializer.Serialize(msg).Contains("raw-sync-check", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(8));
+        Assert.Equal("term.raw", GetType(rawReplay));
+        Assert.True(rawReplay.TryGetProperty("to_seq", out var toSeqProp), "raw replay missing to_seq");
+        Assert.True(rawReplay.TryGetProperty("seq", out var replaySeqProp), "raw replay missing seq");
+        Assert.Equal(toSeqProp.GetInt32(), replaySeqProp.GetInt32());
+
         await hub.InvokeAsync("RequestSync", new { instanceId, type = "history", reqId = "history-test", before = "h-1", limit = 20 });
         var history = await WaitForMessageAsync(messages, gate,
             msg => GetType(msg) == "term.history.chunk" && GetString(msg, "req_id") == "history-test",
@@ -158,6 +184,84 @@ public class GatewayApiTests
         Assert.Equal(HttpStatusCode.OK, readRes.StatusCode);
         var payload = JsonDocument.Parse(await readRes.Content.ReadAsStringAsync()).RootElement;
         Assert.True(payload.GetProperty("truncated").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Files_Mutate_And_Download_Endpoints_Work()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tg-files-ops-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["FILES_BASE_PATH"] = tempDir
+        });
+        using var client = app.CreateClient();
+
+        var mkdirRes = await client.PostAsJsonAsync("/api/files/mkdir", new
+        {
+            path = tempDir,
+            name = "docs"
+        });
+        Assert.Equal(HttpStatusCode.OK, mkdirRes.StatusCode);
+        var mkdirPayload = JsonDocument.Parse(await mkdirRes.Content.ReadAsStringAsync()).RootElement;
+        var docsDir = mkdirPayload.GetProperty("item").GetProperty("path").GetString()!;
+        Assert.True(Directory.Exists(docsDir));
+
+        using var uploadBody = new MultipartFormDataContent();
+        uploadBody.Add(new StringContent(docsDir), "path");
+        var textContent = new ByteArrayContent(Encoding.UTF8.GetBytes("hello file api"));
+        textContent.Headers.ContentType = new MediaTypeHeaderValue("text/plain");
+        uploadBody.Add(textContent, "file", "note.txt");
+        var uploadRes = await client.PostAsync("/api/files/upload", uploadBody);
+        Assert.Equal(HttpStatusCode.OK, uploadRes.StatusCode);
+        var uploadPayload = JsonDocument.Parse(await uploadRes.Content.ReadAsStringAsync()).RootElement;
+        var uploadedPath = uploadPayload.GetProperty("upload").GetProperty("path").GetString()!;
+        Assert.True(File.Exists(uploadedPath));
+
+        var renameRes = await client.PostAsJsonAsync("/api/files/rename", new
+        {
+            path = uploadedPath,
+            new_name = "renamed.txt"
+        });
+        Assert.Equal(HttpStatusCode.OK, renameRes.StatusCode);
+        var renamePayload = JsonDocument.Parse(await renameRes.Content.ReadAsStringAsync()).RootElement;
+        var renamedPath = renamePayload.GetProperty("item").GetProperty("path").GetString()!;
+        Assert.True(File.Exists(renamedPath));
+
+        var writeRes = await client.PostAsJsonAsync("/api/files/write", new
+        {
+            path = renamedPath,
+            content = "updated text body"
+        });
+        Assert.Equal(HttpStatusCode.OK, writeRes.StatusCode);
+
+        var readAfterWriteRes = await client.GetAsync($"/api/files/read?path={Uri.EscapeDataString(renamedPath)}&max_lines=20");
+        Assert.Equal(HttpStatusCode.OK, readAfterWriteRes.StatusCode);
+        var readAfterWritePayload = JsonDocument.Parse(await readAfterWriteRes.Content.ReadAsStringAsync()).RootElement;
+        Assert.Contains("updated text body", readAfterWritePayload.GetProperty("content").GetString() ?? string.Empty);
+
+        var downloadRes = await client.GetAsync($"/api/files/download?path={Uri.EscapeDataString(renamedPath)}");
+        Assert.Equal(HttpStatusCode.OK, downloadRes.StatusCode);
+        var downloaded = await downloadRes.Content.ReadAsStringAsync();
+        Assert.Equal("updated text body", downloaded);
+
+        var downloadDirRes = await client.GetAsync($"/api/files/download?path={Uri.EscapeDataString(docsDir)}");
+        Assert.Equal(HttpStatusCode.OK, downloadDirRes.StatusCode);
+        Assert.Equal("application/zip", downloadDirRes.Content.Headers.ContentType?.MediaType);
+        var zipBytes = await downloadDirRes.Content.ReadAsByteArrayAsync();
+        using var zipStream = new MemoryStream(zipBytes, writable: false);
+        using var archive = new ZipArchive(zipStream, ZipArchiveMode.Read);
+        var entryNames = archive.Entries.Select(entry => entry.FullName.Replace('\\', '/')).ToList();
+        Assert.Contains(entryNames, name => name.EndsWith("/renamed.txt", StringComparison.Ordinal));
+
+        var removeFileRes = await client.DeleteAsync($"/api/files/remove?path={Uri.EscapeDataString(renamedPath)}");
+        Assert.Equal(HttpStatusCode.OK, removeFileRes.StatusCode);
+        Assert.False(File.Exists(renamedPath));
+
+        var removeDirRes = await client.DeleteAsync($"/api/files/remove?path={Uri.EscapeDataString(docsDir)}");
+        Assert.Equal(HttpStatusCode.OK, removeDirRes.StatusCode);
+        Assert.False(Directory.Exists(docsDir));
     }
 
     [Fact]
@@ -637,8 +741,8 @@ public class GatewayApiTests
 
         const string input = "oracle-gateway-sync\n";
         await hub.InvokeAsync("SendInput", new { instanceId, data = input });
-        var patch = await WaitForMessageAsync(messages, gate,
-            msg => GetType(msg) == "term.patch" && JsonSerializer.Serialize(msg).Contains("oracle-gateway-sync", StringComparison.Ordinal),
+        var liveRaw = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.raw" && JsonSerializer.Serialize(msg).Contains("oracle-gateway-sync", StringComparison.Ordinal),
             TimeSpan.FromSeconds(8));
 
         await hub.InvokeAsync("RequestSync", new { instanceId, type = "screen" });
@@ -654,7 +758,7 @@ public class GatewayApiTests
         }
 
         Assert.True(snapshot.ValueKind == JsonValueKind.Object, "missing term.snapshot");
-        Assert.True(snapshot.GetProperty("ts").GetInt64() >= patch.GetProperty("ts").GetInt64(), "snapshot did not refresh after sync");
+        Assert.True(snapshot.GetProperty("ts").GetInt64() >= liveRaw.GetProperty("ts").GetInt64(), "snapshot did not refresh after sync");
 
         using var oracle = new XTermOracleAdapter(80, 25);
         oracle.Feed(input);
@@ -720,7 +824,13 @@ public class GatewayApiTests
 
         lock (gate)
         {
-            var summary = string.Join(", ", messages.Select(msg => GetType(msg) ?? "<unknown>"));
+            var summary = string.Join(", ", messages.Select(msg =>
+            {
+                var type = GetType(msg) ?? "<unknown>";
+                var replay = msg.TryGetProperty("replay", out var replayValue) ? replayValue.ToString() : "-";
+                var reqId = GetString(msg, "req_id") ?? "-";
+                return $"{type}(replay={replay},req={reqId})";
+            }));
             throw new TimeoutException($"timed out waiting signalr frame; received: [{summary}]");
         }
     }

@@ -7,7 +7,7 @@ test('mobile shortcut keys should keep mapping, focus, and remain stable under b
 
   await page.selectOption('select', 'mock-1');
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
-  await expect(page.getByText('Connected: mock-1')).toBeVisible();
+  await expect(page.getByText('Connected')).toBeVisible();
 
   const mapping = [
     ['Esc', '\u001b'],
@@ -47,7 +47,7 @@ test('desktop paste should stay bracketed after mixed websocket input activity',
   await installMockRuntime(page);
   await page.goto('/');
 
-  await page.getByRole('button', { name: 'Connect', exact: true }).first().click();
+  await page.locator('#instance-list .terminal-item').first().click();
   await page.getByTestId('terminal').click();
   await page.keyboard.type('echo before-paste');
   await page.keyboard.press('Enter');

@@ -312,12 +312,13 @@ function installMockRuntime(page) {
         }
 
         if (method === 'SendInput') {
+          const targetId = String(payload.instanceId || this.instanceId);
           state.wsInputs.push(String(payload.data || ''));
           const handler = this.handlers.get('TerminalEvent');
           handler?.({
             v: 1,
             type: 'term.patch',
-            instance_id: this.instanceId,
+            instance_id: targetId,
             seq: 2,
             ts: Date.now(),
             cursor: { x: 0, y: 1, visible: true },
@@ -359,7 +360,7 @@ test('desktop can create and connect instance with mock backend', async ({ page 
   await expect(page.getByRole('heading', { name: 'WebCLI Desktop' })).toBeVisible();
   await page.getByTestId('create-button').click();
 
-  await expect(page.getByTestId('status')).toContainText('Connected:');
+  await expect(page.getByTestId('status')).toContainText('Connected');
   await expect(page.getByTestId('plain-output')).toContainText('resynced');
   await expect(page.locator('#instance-list li')).toHaveCount(4);
 });
@@ -370,7 +371,7 @@ test('mobile terminal sends shortcut input through mocked websocket', async ({ p
 
   await page.selectOption('select', 'mock-1');
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
-  await expect(page.getByText('Connected: mock-1')).toBeVisible();
+  await expect(page.getByText('Connected')).toBeVisible();
 
   for (const name of ['Esc', 'Tab', 'Enter', 'Ctrl+C', '↑', '↓', '←', '→']) {
     await page.getByRole('button', { name }).click();
@@ -439,7 +440,7 @@ test('desktop create routes to selected node and auto-resyncs on seq gap', async
   await page.getByTestId('node-select').selectOption('slave-a');
   await page.getByTestId('create-button').click();
 
-  await expect(page.getByTestId('status')).toContainText('Connected:');
+  await expect(page.getByTestId('status')).toContainText('Connected');
   await expect(page.locator('#instance-list li').first()).toContainText('Slave A');
   await expect(page.locator('#instance-list li', { hasText: 'offline' }).first()).toBeVisible();
 

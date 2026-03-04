@@ -26,7 +26,9 @@ export function installMockRuntime(page) {
           cols: 80,
           rows: 25,
           lines: ['mock ready'],
-          seq: 1
+          seq: 1,
+          inputBuffer: '',
+          rawChunks: [{ seq: 1, data: 'mock ready\r\n' }]
         }
       }
     };
@@ -91,7 +93,14 @@ export function installMockRuntime(page) {
           node_role: 'master',
           node_online: true
         });
-        state.screenByInstance[id] = { cols, rows, lines: ['mock ready'], seq: 1 };
+        state.screenByInstance[id] = {
+          cols,
+          rows,
+          lines: ['mock ready'],
+          seq: 1,
+          inputBuffer: '',
+          rawChunks: [{ seq: 1, data: 'mock ready\r\n' }]
+        };
         return json({ instance_id: id, node_id: 'master-mock', hub_url: `${globalThis.location.origin}/hubs/terminal` });
       }
 
@@ -112,9 +121,33 @@ export function installMockRuntime(page) {
     function getScreen(instanceId) {
       const key = String(instanceId || 'mock-1');
       if (!state.screenByInstance[key]) {
-        state.screenByInstance[key] = { cols: 80, rows: 25, lines: ['mock ready'], seq: 1, inputBuffer: '' };
+        state.screenByInstance[key] = {
+          cols: 80,
+          rows: 25,
+          lines: ['mock ready'],
+          seq: 1,
+          inputBuffer: '',
+          rawChunks: [{ seq: 1, data: 'mock ready\r\n' }]
+        };
       }
       return state.screenByInstance[key];
+    }
+
+    function pushRaw(screen, data) {
+      const text = String(data || '');
+      if (!text) {
+        return null;
+      }
+      screen.seq += 1;
+      const seq = screen.seq;
+      if (!Array.isArray(screen.rawChunks)) {
+        screen.rawChunks = [];
+      }
+      screen.rawChunks.push({ seq, data: text });
+      if (screen.rawChunks.length > 400) {
+        screen.rawChunks = screen.rawChunks.slice(screen.rawChunks.length - 400);
+      }
+      return seq;
     }
 
     function toSnapshot(instanceId) {
@@ -137,10 +170,13 @@ export function installMockRuntime(page) {
     function appendInput(instanceId, data) {
       const screen = getScreen(instanceId);
       const body = String(data || '');
+      let output = '';
       for (const ch of body) {
         if (ch === '\r' || ch === '\n') {
           if (screen.inputBuffer.length > 0) {
-            screen.lines.push(`echo:${screen.inputBuffer}`);
+            const line = `echo:${screen.inputBuffer}`;
+            screen.lines.push(line);
+            output += `${line}\r\n`;
             screen.inputBuffer = '';
           }
         } else {
@@ -150,16 +186,51 @@ export function installMockRuntime(page) {
       if (screen.lines.length > screen.rows) {
         screen.lines = screen.lines.slice(screen.lines.length - screen.rows);
       }
-      screen.seq += 1;
+      const seq = pushRaw(screen, output);
+      if (!seq) {
+        return null;
+      }
       return {
         v: 1,
-        type: 'term.patch',
+        type: 'term.raw',
         instance_id: instanceId,
-        seq: screen.seq,
+        replay: false,
+        seq,
         ts: Date.now(),
-        cursor: { x: 0, y: Math.max(0, screen.lines.length - 1), visible: true },
-        styles: { '0': {} },
-        rows: screen.lines.map((line, y) => ({ y, segs: [[line, 0]] }))
+        data: output
+      };
+    }
+
+    function toRawReplay(instanceId, reqId, sinceSeq) {
+      const screen = getScreen(instanceId);
+      const requestedSince = Math.max(0, Number(sinceSeq || 0));
+      const chunks = Array.isArray(screen.rawChunks) ? screen.rawChunks : [];
+      const oldestSeq = chunks.length > 0 ? Number(chunks[0].seq || 0) : 0;
+      let effectiveSince = requestedSince;
+      let truncated = false;
+      if (requestedSince > 0 && oldestSeq > 0 && requestedSince < oldestSeq - 1) {
+        truncated = true;
+        effectiveSince = oldestSeq - 1;
+      }
+      const selected = chunks.filter((chunk) => Number(chunk.seq || 0) > effectiveSince);
+      const data = selected.map((chunk) => String(chunk.data || '')).join('');
+      const fromSeq = selected.length > 0 ? Number(selected[0].seq || 0) : Math.max(0, effectiveSince + 1);
+      const toSeq = Math.max(0, Number(screen.seq || 0));
+      return {
+        v: 1,
+        type: 'term.raw',
+        instance_id: instanceId,
+        replay: true,
+        req_id: reqId,
+        since_seq: requestedSince,
+        from_seq: fromSeq,
+        to_seq: toSeq,
+        seq: toSeq,
+        reset: requestedSince <= 0 || truncated,
+        truncated,
+        oldest_seq: oldestSeq,
+        ts: Date.now(),
+        data
       };
     }
 
@@ -238,13 +309,31 @@ export function installMockRuntime(page) {
 
         if (method === 'RequestSync') {
           const id = String(payload.instanceId || this.instanceId);
+          if (String(payload.type || 'raw').toLowerCase() === 'raw') {
+            const reqId = String(payload.reqId || `raw-sync-${Date.now()}`);
+            const replay = toRawReplay(id, reqId, payload.sinceSeq);
+            this.emit('TerminalEvent', replay);
+            this.emit('TerminalEvent', {
+              v: 1,
+              type: 'term.sync.complete',
+              instance_id: id,
+              req_id: reqId,
+              to_seq: replay.to_seq,
+              ts: Date.now()
+            });
+            return;
+          }
           this.emit('TerminalEvent', toSnapshot(id));
           return;
         }
 
         if (method === 'SendInput') {
+          const id = String(payload.instanceId || this.instanceId);
           state.wsInputs.push(String(payload.data || ''));
-          this.emit('TerminalEvent', appendInput(this.instanceId, payload.data));
+          const raw = appendInput(id, payload.data);
+          if (raw) {
+            this.emit('TerminalEvent', raw);
+          }
           return;
         }
 

@@ -38,14 +38,12 @@ public sealed class TerminalHub : Hub
         }
 
         var connectionId = Context.ConnectionId;
-        var previous = _registry.GetInstance(connectionId);
-        if (!string.IsNullOrWhiteSpace(previous) && !string.Equals(previous, instanceId, StringComparison.Ordinal))
+        var joined = _registry.GetInstances(connectionId);
+        if (!joined.Contains(instanceId, StringComparer.Ordinal))
         {
-            await Groups.RemoveFromGroupAsync(connectionId, BuildInstanceGroup(previous));
+            await Groups.AddToGroupAsync(connectionId, BuildInstanceGroup(instanceId));
+            _registry.Bind(connectionId, instanceId);
         }
-
-        await Groups.AddToGroupAsync(connectionId, BuildInstanceGroup(instanceId));
-        _registry.Bind(connectionId, instanceId);
 
         var snapshot = _manager.Snapshot(instanceId, advanceSeq: false);
         if (snapshot is not null)
@@ -72,14 +70,15 @@ public sealed class TerminalHub : Hub
         var connectionId = Context.ConnectionId;
         if (instanceId.Length == 0)
         {
-            instanceId = _registry.Unbind(connectionId) ?? string.Empty;
-        }
-        else
-        {
-            _registry.Unbind(connectionId);
+            var bound = _registry.UnbindAll(connectionId);
+            foreach (var item in bound)
+            {
+                await Groups.RemoveFromGroupAsync(connectionId, BuildInstanceGroup(item));
+            }
+            return;
         }
 
-        if (instanceId.Length > 0)
+        if (_registry.Unbind(connectionId, instanceId))
         {
             await Groups.RemoveFromGroupAsync(connectionId, BuildInstanceGroup(instanceId));
         }
@@ -184,7 +183,38 @@ public sealed class TerminalHub : Hub
             throw new HubException("instance_id is required");
         }
 
-        var syncType = (request.Type ?? "screen").Trim().ToLowerInvariant();
+        var syncType = (request.Type ?? "raw").Trim().ToLowerInvariant();
+        if (syncType == "raw")
+        {
+            var reqId = string.IsNullOrWhiteSpace(request.ReqId) ? $"raw-sync-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}" : request.ReqId;
+            request.ReqId = reqId;
+            var sinceSeq = request.SinceSeq is null
+                ? (int?)null
+                : Math.Max(0, (int)Math.Min(int.MaxValue, request.SinceSeq.Value));
+            var replay = _manager.RawReplayEvent(instanceId, sinceSeq, reqId);
+            if (replay is not null)
+            {
+                await Clients.Caller.SendAsync("TerminalEvent", replay);
+                await Clients.Caller.SendAsync("TerminalEvent", BuildRawSyncComplete(instanceId, reqId, ReadLong(System.Text.Json.JsonSerializer.SerializeToElement(replay), "to_seq")));
+                return;
+            }
+
+            if (!TryResolveRemoteNode(instanceId, out var nodeId))
+            {
+                throw new HubException("instance not found");
+            }
+
+            var remoteRaw = await RequestRemoteSyncAsync(nodeId, instanceId, request, Context.ConnectionAborted);
+            if (IsRawEvent(remoteRaw))
+            {
+                await Clients.Caller.SendAsync("TerminalEvent", remoteRaw);
+                await Clients.Caller.SendAsync("TerminalEvent", BuildRawSyncComplete(instanceId, reqId, ReadLong(remoteRaw, "to_seq") ?? ReadLong(remoteRaw, "seq")));
+                return;
+            }
+
+            throw new HubException("remote raw sync failed");
+        }
+
         if (syncType == "history")
         {
             var before = string.IsNullOrWhiteSpace(request.Before) ? "h-1" : request.Before;
@@ -233,8 +263,8 @@ public sealed class TerminalHub : Hub
 
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
-        var instanceId = _registry.Unbind(Context.ConnectionId);
-        if (!string.IsNullOrWhiteSpace(instanceId))
+        var bound = _registry.UnbindAll(Context.ConnectionId);
+        foreach (var instanceId in bound)
         {
             await Groups.RemoveFromGroupAsync(Context.ConnectionId, BuildInstanceGroup(instanceId));
         }
@@ -255,10 +285,13 @@ public sealed class TerminalHub : Hub
 
     private async Task<System.Text.Json.JsonElement> RequestRemoteSyncAsync(string nodeId, string instanceId, TerminalSyncRequest request, CancellationToken cancellationToken)
     {
-        var syncType = (request.Type ?? "screen").Trim().ToLowerInvariant();
+        var syncType = (request.Type ?? "raw").Trim().ToLowerInvariant();
         var before = string.IsNullOrWhiteSpace(request.Before) ? "h-1" : request.Before;
         var limit = Math.Clamp(request.Limit ?? 50, 1, 500);
         var reqId = string.IsNullOrWhiteSpace(request.ReqId) ? $"sync-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}" : request.ReqId;
+        var sinceSeq = request.SinceSeq is null
+            ? (long?)null
+            : Math.Max(0, request.SinceSeq.Value);
 
         var result = await _broker.SendAsync(nodeId, "instance.sync", new
         {
@@ -266,7 +299,8 @@ public sealed class TerminalHub : Hub
             type = syncType,
             before,
             limit,
-            req_id = reqId
+            req_id = reqId,
+            since_seq = sinceSeq
         }, cancellationToken);
         if (!result.Ok)
         {
@@ -274,5 +308,55 @@ public sealed class TerminalHub : Hub
         }
 
         return result.Payload;
+    }
+
+    private static bool IsRawEvent(System.Text.Json.JsonElement payload)
+    {
+        if (payload.ValueKind != System.Text.Json.JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (!string.Equals(ReadString(payload, "type"), "term.raw", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static object BuildRawSyncComplete(string instanceId, string reqId, long? toSeq)
+    {
+        return new
+        {
+            v = 1,
+            type = "term.sync.complete",
+            instance_id = instanceId,
+            req_id = reqId,
+            to_seq = toSeq ?? 0,
+            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
+    }
+
+    private static string? ReadString(System.Text.Json.JsonElement payload, string propertyName)
+    {
+        return payload.TryGetProperty(propertyName, out var value) && value.ValueKind == System.Text.Json.JsonValueKind.String
+            ? value.GetString()
+            : null;
+    }
+
+    private static long? ReadLong(System.Text.Json.JsonElement payload, string propertyName)
+    {
+        if (!payload.TryGetProperty(propertyName, out var value))
+        {
+            return null;
+        }
+
+        return value.ValueKind switch
+        {
+            System.Text.Json.JsonValueKind.Number => value.GetInt64(),
+            System.Text.Json.JsonValueKind.String when long.TryParse(value.GetString(), out var number) => number,
+            _ => null
+        };
     }
 }

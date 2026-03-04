@@ -13,27 +13,29 @@ public sealed class TerminalEventRelay
     {
         _hub = hub;
 
-        manager.Patch += (instanceId, payload) => Enqueue(instanceId, payload);
+        manager.Raw += (instanceId, payload) => Enqueue(instanceId, payload);
         manager.Exited += (instanceId, payload) => Enqueue(instanceId, payload);
     }
 
     private void Enqueue(string instanceId, object payload)
     {
-        _ = Task.Run(async () =>
+        _ = EnqueueAsync(instanceId, payload);
+    }
+
+    private async Task EnqueueAsync(string instanceId, object payload)
+    {
+        var gate = _instanceGates.GetOrAdd(instanceId, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync();
+        try
         {
-            var gate = _instanceGates.GetOrAdd(instanceId, static _ => new SemaphoreSlim(1, 1));
-            await gate.WaitAsync();
-            try
-            {
-                await _hub.Clients.Group(TerminalHub.BuildInstanceGroup(instanceId)).SendAsync("TerminalEvent", payload);
-            }
-            catch
-            {
-            }
-            finally
-            {
-                gate.Release();
-            }
-        });
+            await _hub.Clients.Group(TerminalHub.BuildInstanceGroup(instanceId)).SendAsync("TerminalEvent", payload);
+        }
+        catch
+        {
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 }

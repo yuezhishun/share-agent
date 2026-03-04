@@ -31,4 +31,5 @@ public sealed class TerminalSyncRequest
     public string? Before { get; set; }
     public int? Limit { get; set; }
     public string? ReqId { get; set; }
+    public long? SinceSeq { get; set; }
 }

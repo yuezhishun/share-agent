@@ -39,4 +39,34 @@ public class TerminalStateBufferTests
 
         Assert.Equal("a       b", buffer.VisibleLines.Single());
     }
+
+    [Fact]
+    public void EraseLineCsi_ShouldRemoveStaleTailAfterCarriageReturn()
+    {
+        var buffer = new TerminalStateBuffer();
+        buffer.ApplyChunk("welcome to openai codex\r\u001b[2Kok\n");
+
+        Assert.Equal("ok", buffer.VisibleLines.Single());
+    }
+
+    [Fact]
+    public void EraseDisplayCsi_ShouldClearPreviousVisibleLines()
+    {
+        var buffer = new TerminalStateBuffer();
+        buffer.ApplyChunk("line-1\nline-2\n\u001b[2Jfresh\n");
+
+        Assert.Single(buffer.VisibleLines);
+        Assert.Equal("fresh", buffer.VisibleLines.Single());
+    }
+
+    [Fact]
+    public void EraseCharsCsi_ShouldBlankCellsWithoutShiftingTail()
+    {
+        var buffer = new TerminalStateBuffer();
+        buffer.ApplyChunk("abcdef\u001b[3G\u001b[2X");
+
+        Assert.Single(buffer.VisibleLines);
+        Assert.Equal("ab  ef", buffer.VisibleLines.Single());
+        Assert.Equal(2, buffer.CursorColumn);
+    }
 }

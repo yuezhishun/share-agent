@@ -2,6 +2,8 @@ namespace TerminalGateway.Api.Infrastructure;
 
 public sealed class GatewayOptions
 {
+    private static readonly string[] DefaultFsAllowedRoots = ["/home", "/workspace", "/www"];
+
     public string GatewayRole { get; init; } = "master";
     public string? MasterUrl { get; init; }
     public string NodeId { get; init; } = "master-local";
@@ -23,45 +25,63 @@ public sealed class GatewayOptions
     public int MaxOutputBufferBytes { get; init; } = 8 * 1024 * 1024;
     public string CodexConfigPath { get; init; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "config.toml");
     public string ClaudeConfigPath { get; init; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "config.json");
-    public IReadOnlyList<string> FsAllowedRoots { get; init; } = ["/home", "/workspace", "/www"];
+    public IReadOnlyList<string> FsAllowedRoots { get; init; } = DefaultFsAllowedRoots;
 
     public static GatewayOptions FromConfiguration(IConfiguration config)
     {
-        var role = NormalizeRole(config["GATEWAY_ROLE"]);
-        var nodeId = string.IsNullOrWhiteSpace(config["NODE_ID"]) ? $"node-{Environment.MachineName}".ToLowerInvariant() : config["NODE_ID"]!.Trim();
-        var nodeName = string.IsNullOrWhiteSpace(config["NODE_NAME"]) ? nodeId : config["NODE_NAME"]!.Trim();
+        var role = NormalizeRole(Read(config, "GATEWAY_ROLE", "Gateway:GatewayRole", "Gateway:Role"));
+        var nodeId = Read(config, "NODE_ID", "Gateway:NodeId");
+        nodeId = string.IsNullOrWhiteSpace(nodeId) ? $"node-{Environment.MachineName}".ToLowerInvariant() : nodeId;
+
+        var nodeName = Read(config, "NODE_NAME", "Gateway:NodeName");
+        nodeName = string.IsNullOrWhiteSpace(nodeName) ? nodeId : nodeName;
 
         return new GatewayOptions
         {
             GatewayRole = role,
-            MasterUrl = config["MASTER_URL"],
+            MasterUrl = Read(config, "MASTER_URL", "Gateway:MasterUrl"),
             NodeId = nodeId,
             NodeName = nodeName,
-            NodeLabel = string.IsNullOrWhiteSpace(config["NODE_LABEL"]) ? null : config["NODE_LABEL"]!.Trim(),
-            ClusterToken = config["CLUSTER_TOKEN"] ?? "dev-cluster-token",
-            NodeHeartbeatTimeoutSeconds = ParseInt(config["NODE_HEARTBEAT_TIMEOUT_SECONDS"], 15),
-            Host = config["HOST"] ?? "0.0.0.0",
-            Port = ParseInt(config["PORT"], 8080),
-            HistoryLimit = ParseInt(config["HISTORY_LIMIT"], 1000),
-            FilesBasePath = config["FILES_BASE_PATH"] ?? "/home/yueyuan",
-            RawReplayMaxBytes = ParseInt(config["RAW_REPLAY_MAX_BYTES"], 512 * 1024),
-            DefaultCols = ParseInt(config["DEFAULT_COLS"], 80),
-            DefaultRows = ParseInt(config["DEFAULT_ROWS"], 25),
-            InternalToken = config["TERMINAL_GATEWAY_TOKEN"] ?? "dev-terminal-token",
-            WsToken = config["TERMINAL_WS_TOKEN"] ?? "dev-ws-token",
-            ProfileStoreFile = config["TERMINAL_PROFILE_STORE_FILE"] ?? string.Empty,
-            SettingsStoreFile = config["TERMINAL_SETTINGS_STORE_FILE"] ?? "/tmp/pty-agent-terminal-settings.json",
-            MaxOutputBufferBytes = ParseInt(config["TERMINAL_MAX_OUTPUT_BUFFER_BYTES"], 8 * 1024 * 1024),
-            CodexConfigPath = config["TERMINAL_CODEX_CONFIG_PATH"] ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "config.toml"),
-            ClaudeConfigPath = config["TERMINAL_CLAUDE_CONFIG_PATH"] ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "config.json"),
-            FsAllowedRoots = ParseRoots(config["TERMINAL_FS_ALLOWED_ROOTS"])
+            NodeLabel = Read(config, "NODE_LABEL", "Gateway:NodeLabel"),
+            ClusterToken = Read(config, "CLUSTER_TOKEN", "Gateway:ClusterToken") ?? "dev-cluster-token",
+            NodeHeartbeatTimeoutSeconds = ParseInt(config, 15, "NODE_HEARTBEAT_TIMEOUT_SECONDS", "Gateway:NodeHeartbeatTimeoutSeconds"),
+            Host = Read(config, "HOST", "Gateway:Host") ?? "0.0.0.0",
+            Port = ParseInt(config, 8080, "PORT", "Gateway:Port"),
+            HistoryLimit = ParseInt(config, 1000, "HISTORY_LIMIT", "Gateway:HistoryLimit"),
+            FilesBasePath = Read(config, "FILES_BASE_PATH", "Gateway:FilesBasePath") ?? "/home/yueyuan",
+            RawReplayMaxBytes = ParseInt(config, 512 * 1024, "RAW_REPLAY_MAX_BYTES", "Gateway:RawReplayMaxBytes"),
+            DefaultCols = ParseInt(config, 80, "DEFAULT_COLS", "Gateway:DefaultCols"),
+            DefaultRows = ParseInt(config, 25, "DEFAULT_ROWS", "Gateway:DefaultRows"),
+            InternalToken = Read(config, "TERMINAL_GATEWAY_TOKEN", "Gateway:InternalToken") ?? "dev-terminal-token",
+            WsToken = Read(config, "TERMINAL_WS_TOKEN", "Gateway:WsToken") ?? "dev-ws-token",
+            ProfileStoreFile = Read(config, "TERMINAL_PROFILE_STORE_FILE", "Gateway:ProfileStoreFile") ?? string.Empty,
+            SettingsStoreFile = Read(config, "TERMINAL_SETTINGS_STORE_FILE", "Gateway:SettingsStoreFile") ?? "/tmp/pty-agent-terminal-settings.json",
+            MaxOutputBufferBytes = ParseInt(config, 8 * 1024 * 1024, "TERMINAL_MAX_OUTPUT_BUFFER_BYTES", "Gateway:MaxOutputBufferBytes"),
+            CodexConfigPath = Read(config, "TERMINAL_CODEX_CONFIG_PATH", "Gateway:CodexConfigPath") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "config.toml"),
+            ClaudeConfigPath = Read(config, "TERMINAL_CLAUDE_CONFIG_PATH", "Gateway:ClaudeConfigPath") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "config.json"),
+            FsAllowedRoots = ParseRoots(config)
         };
     }
 
     public static GatewayOptions FromEnvironment(IConfiguration config) => FromConfiguration(config);
 
-    private static int ParseInt(string? raw, int fallback)
+    private static string? Read(IConfiguration config, params string[] keys)
     {
+        foreach (var key in keys)
+        {
+            var value = config[key];
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return value.Trim();
+            }
+        }
+
+        return null;
+    }
+
+    private static int ParseInt(IConfiguration config, int fallback, params string[] keys)
+    {
+        var raw = Read(config, keys);
         return int.TryParse(raw, out var value) && value > 0 ? value : fallback;
     }
 
@@ -70,14 +90,36 @@ public sealed class GatewayOptions
         return string.Equals(raw, "slave", StringComparison.OrdinalIgnoreCase) ? "slave" : "master";
     }
 
-    private static IReadOnlyList<string> ParseRoots(string? raw)
+    private static IReadOnlyList<string> ParseRoots(IConfiguration config)
     {
-        var rows = (raw ?? string.Empty)
+        var raw = Read(config, "TERMINAL_FS_ALLOWED_ROOTS", "Gateway:FsAllowedRoots");
+        var parsedRaw = ParseRootsString(raw);
+        if (parsedRaw.Count > 0)
+        {
+            return parsedRaw;
+        }
+
+        var parsedSection = ParseRootsValues(config.GetSection("Gateway:FsAllowedRoots")
+            .GetChildren()
+            .Select(x => x.Value));
+        return parsedSection.Count > 0 ? parsedSection : DefaultFsAllowedRoots;
+    }
+
+    private static IReadOnlyList<string> ParseRootsString(string? raw)
+    {
+        return ParseRootsValues((raw ?? string.Empty)
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(x => x.Trim()));
+    }
+
+    private static IReadOnlyList<string> ParseRootsValues(IEnumerable<string?> roots)
+    {
+        return roots
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => x!.Trim())
             .Where(Path.IsPathRooted)
             .Select(Path.GetFullPath)
             .Distinct(StringComparer.Ordinal)
             .ToList();
-        return rows.Count > 0 ? rows : ["/home", "/workspace", "/www"];
     }
 }

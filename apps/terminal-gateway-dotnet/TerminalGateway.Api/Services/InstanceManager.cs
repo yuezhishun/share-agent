@@ -215,8 +215,65 @@ public sealed class InstanceManager
 
         lock (state.Sync)
         {
-            return string.Concat(state.RawChunks);
+            return string.Concat(state.RawChunks.Select(x => x.Data));
         }
+    }
+
+    public object? RawReplayEvent(string instanceId, int? sinceSeq = null, string? reqId = null)
+    {
+        var state = Get(instanceId);
+        if (state is null)
+        {
+            return null;
+        }
+
+        string replay;
+        var requestedSince = Math.Max(0, sinceSeq ?? 0);
+        var effectiveSince = requestedSince;
+        var oldestSeq = 0;
+        var latestSeq = 0;
+        var fromSeq = 0;
+        var truncated = false;
+        lock (state.Sync)
+        {
+            if (state.RawChunks.Count > 0)
+            {
+                oldestSeq = state.RawChunks[0].Seq;
+            }
+            latestSeq = Math.Max(0, state.Seq);
+
+            if (requestedSince > 0 && oldestSeq > 0 && requestedSince < oldestSeq - 1)
+            {
+                truncated = true;
+                effectiveSince = oldestSeq - 1;
+            }
+
+            var selected = state.RawChunks.Where(x => x.Seq > effectiveSince).ToList();
+            replay = string.Concat(selected.Select(x => x.Data));
+            fromSeq = selected.Count > 0
+                ? selected[0].Seq
+                : Math.Max(0, effectiveSince + 1);
+        }
+
+        return new
+        {
+            v = 1,
+            type = "term.raw",
+            instance_id = state.Id,
+            node_id = _nodeId,
+            node_name = _nodeName,
+            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            replay = true,
+            req_id = reqId,
+            since_seq = requestedSince,
+            from_seq = fromSeq,
+            to_seq = latestSeq,
+            seq = latestSeq,
+            reset = requestedSince <= 0 || truncated,
+            truncated,
+            oldest_seq = oldestSeq,
+            data = replay
+        };
     }
 
     public bool Terminate(string instanceId)
@@ -241,9 +298,14 @@ public sealed class InstanceManager
         List<WebSocket> peers;
         object patch;
         object raw;
+        int seq;
+        long ts;
         lock (state.Sync)
         {
-            PushRaw(state, data);
+            state.Seq++;
+            seq = state.Seq;
+            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            PushRaw(state, seq, data, ts);
 
             var committed = state.Buffer.ApplyChunk(data);
             foreach (var line in committed)
@@ -258,7 +320,8 @@ public sealed class InstanceManager
                 instance_id = state.Id,
                 node_id = _nodeId,
                 node_name = _nodeName,
-                ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                seq,
+                ts,
                 data
             };
 
@@ -313,22 +376,29 @@ public sealed class InstanceManager
         await state.Pty.DisposeAsync();
     }
 
-    private void PushRaw(InstanceState state, string chunk)
+    private void PushRaw(InstanceState state, int seq, string chunk, long ts)
     {
-        state.RawChunks.Add(chunk);
-        state.RawBytes += Encoding.UTF8.GetByteCount(chunk);
+        var bytes = Encoding.UTF8.GetByteCount(chunk);
+        state.RawChunks.Add(new InstanceState.RawChunk
+        {
+            Seq = seq,
+            Ts = ts,
+            Data = chunk,
+            Bytes = bytes
+        });
+        state.RawBytes += bytes;
         while (state.RawBytes > _rawReplayMaxBytes && state.RawChunks.Count > 1)
         {
             var removed = state.RawChunks[0];
             state.RawChunks.RemoveAt(0);
-            state.RawBytes -= Encoding.UTF8.GetByteCount(removed);
+            state.RawBytes -= removed.Bytes;
         }
     }
 
     private object BuildPatch(InstanceState state)
     {
-        state.Seq++;
         var lines = GetVisibleTail(state.Buffer.VisibleLines, state.Rows);
+        var cursor = BuildCursor(state, lines);
         var changed = new List<object>();
 
         for (var i = 0; i < lines.Count; i++)
@@ -353,7 +423,7 @@ public sealed class InstanceManager
             node_name = _nodeName,
             seq = state.Seq,
             ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            cursor = new { x = 0, y = Math.Max(0, lines.Count - 1), visible = true },
+            cursor,
             styles = new Dictionary<string, object>
             {
                 ["0"] = new { fg = (int?)null, bg = (int?)null, bold = false, italic = false, underline = false, inverse = false }
@@ -366,12 +436,8 @@ public sealed class InstanceManager
     {
         lock (state.Sync)
         {
-            if (advanceSeq)
-            {
-                state.Seq++;
-            }
-
             var lines = GetVisibleTail(state.Buffer.VisibleLines, state.Rows);
+            var cursor = BuildCursor(state, lines);
             state.LastVisibleSignatures = lines;
 
             return new
@@ -382,9 +448,10 @@ public sealed class InstanceManager
                 node_id = _nodeId,
                 node_name = _nodeName,
                 seq = state.Seq,
+                base_seq = state.Seq,
                 ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 size = new { cols = state.Cols, rows = state.Rows },
-                cursor = new { x = 0, y = Math.Max(0, lines.Count - 1), visible = true },
+                cursor,
                 styles = new Dictionary<string, object>
                 {
                     ["0"] = new { fg = (int?)null, bg = (int?)null, bold = false, italic = false, underline = false, inverse = false }
@@ -393,6 +460,24 @@ public sealed class InstanceManager
                 history = new { available = state.History.Count, newest_cursor = state.History.NewestCursor() }
             };
         }
+    }
+
+    private static object BuildCursor(InstanceState state, IReadOnlyList<string> lines)
+    {
+        var safeCols = Math.Max(1, state.Cols);
+        var safeRows = Math.Max(1, state.Rows);
+
+        var y = lines.Count <= 0 ? 0 : lines.Count - 1;
+        if (state.Buffer.IsOnFreshLine && lines.Count < safeRows)
+        {
+            y = lines.Count;
+        }
+
+        var x = state.Buffer.IsOnFreshLine
+            ? 0
+            : Math.Clamp(state.Buffer.CursorColumn, 0, safeCols - 1);
+        y = Math.Clamp(y, 0, safeRows - 1);
+        return new { x, y, visible = true };
     }
 
     private static List<string> GetVisibleTail(IReadOnlyList<string> lines, int rows)
@@ -481,8 +566,16 @@ public sealed class InstanceManager
         public required HistoryRing History { get; init; }
         public required TerminalStateBuffer Buffer { get; init; }
         public HashSet<WebSocket> Clients { get; } = [];
-        public List<string> RawChunks { get; } = [];
+        public List<RawChunk> RawChunks { get; } = [];
         public int RawBytes { get; set; }
         public List<string> LastVisibleSignatures { get; set; } = [];
+
+        public sealed class RawChunk
+        {
+            public required int Seq { get; init; }
+            public required long Ts { get; init; }
+            public required string Data { get; init; }
+            public required int Bytes { get; init; }
+        }
     }
 }

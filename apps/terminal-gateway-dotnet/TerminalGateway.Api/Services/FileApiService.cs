@@ -1,4 +1,6 @@
+using System.IO.Compression;
 using System.Text;
+using Microsoft.AspNetCore.StaticFiles;
 
 namespace TerminalGateway.Api.Services;
 
@@ -7,6 +9,8 @@ public sealed class FileApiService
     private const int FilePreviewMaxBytes = 1024 * 1024;
     private const int TextProbeBytes = 8192;
     public const int UploadMaxBytes = 10 * 1024 * 1024;
+    public const int GenericUploadMaxBytes = 25 * 1024 * 1024;
+    private static readonly FileExtensionContentTypeProvider ContentTypeProvider = new();
     private static readonly HashSet<string> UploadAllowedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".png", ".jpg", ".jpeg", ".webp", ".gif"
@@ -92,6 +96,49 @@ public sealed class FileApiService
         };
     }
 
+    public async Task<object> WriteAsync(string basePath, string? inputPath, string? content, CancellationToken cancellationToken)
+    {
+        var root = Path.GetFullPath(basePath);
+        var targetPath = ResolveWithinBase(root, inputPath);
+        if (targetPath is null)
+        {
+            throw new UnauthorizedAccessException("Path is outside allowed base");
+        }
+
+        if (Directory.Exists(targetPath))
+        {
+            throw new InvalidDataException("Path is a directory");
+        }
+
+        var parentPath = Path.GetDirectoryName(targetPath);
+        if (string.IsNullOrWhiteSpace(parentPath) || !Directory.Exists(parentPath))
+        {
+            throw new DirectoryNotFoundException("Path not found");
+        }
+
+        if (File.Exists(targetPath) && !await IsLikelyTextFileAsync(targetPath, cancellationToken))
+        {
+            throw new InvalidDataException("File is not a supported text file");
+        }
+
+        var text = content ?? string.Empty;
+        var bytes = Encoding.UTF8.GetByteCount(text);
+        if (bytes > FilePreviewMaxBytes * 2)
+        {
+            throw new InvalidDataException("content too large");
+        }
+
+        await File.WriteAllTextAsync(targetPath, text, new UTF8Encoding(false), cancellationToken);
+        var info = new FileInfo(targetPath);
+        return new
+        {
+            path = targetPath,
+            size = info.Length,
+            mtime = info.LastWriteTimeUtc.ToString("O"),
+            encoding = "utf-8"
+        };
+    }
+
     public async Task<object> SaveUploadAsync(
         string basePath,
         string? targetCwd,
@@ -146,10 +193,207 @@ public sealed class FileApiService
         return SaveUploadAsync(basePath, targetCwd, fileName, stream, bytes.Length, cancellationToken);
     }
 
+    public object CreateDirectory(string basePath, string? parentPath, string? name)
+    {
+        var root = Path.GetFullPath(basePath);
+        var parent = ResolveWithinBase(root, parentPath);
+        if (parent is null)
+        {
+            throw new UnauthorizedAccessException("Path is outside allowed base");
+        }
+
+        if (!Directory.Exists(parent))
+        {
+            throw new DirectoryNotFoundException("Path not found");
+        }
+
+        var directoryName = NormalizeName(name, "name");
+        var target = Path.GetFullPath(Path.Combine(parent, directoryName));
+        if (!IsWithinBase(root, target))
+        {
+            throw new UnauthorizedAccessException("Path is outside allowed base");
+        }
+
+        if (File.Exists(target))
+        {
+            throw new IOException("A file with the same name already exists");
+        }
+
+        Directory.CreateDirectory(target);
+        return BuildEntryPayload(target);
+    }
+
+    public object RenameEntry(string basePath, string? inputPath, string? newName)
+    {
+        var root = Path.GetFullPath(basePath);
+        var targetPath = ResolveWithinBase(root, inputPath);
+        if (targetPath is null)
+        {
+            throw new UnauthorizedAccessException("Path is outside allowed base");
+        }
+
+        var existsAsFile = File.Exists(targetPath);
+        var existsAsDir = Directory.Exists(targetPath);
+        if (!existsAsFile && !existsAsDir)
+        {
+            throw new FileNotFoundException("Path not found", targetPath);
+        }
+
+        var parent = Directory.GetParent(targetPath)?.FullName;
+        if (string.IsNullOrWhiteSpace(parent) || !IsWithinBase(root, parent))
+        {
+            throw new UnauthorizedAccessException("Path is outside allowed base");
+        }
+
+        var normalizedName = NormalizeName(newName, "new_name");
+        var destination = Path.GetFullPath(Path.Combine(parent, normalizedName));
+        if (!IsWithinBase(root, destination))
+        {
+            throw new UnauthorizedAccessException("Path is outside allowed base");
+        }
+
+        if (string.Equals(targetPath, destination, StringComparison.Ordinal))
+        {
+            return BuildEntryPayload(targetPath);
+        }
+
+        if (File.Exists(destination) || Directory.Exists(destination))
+        {
+            throw new IOException("Target already exists");
+        }
+
+        if (existsAsFile)
+        {
+            File.Move(targetPath, destination);
+        }
+        else
+        {
+            Directory.Move(targetPath, destination);
+        }
+
+        return BuildEntryPayload(destination);
+    }
+
+    public object RemoveEntry(string basePath, string? inputPath, bool recursive)
+    {
+        var root = Path.GetFullPath(basePath);
+        var targetPath = ResolveWithinBase(root, inputPath);
+        if (targetPath is null)
+        {
+            throw new UnauthorizedAccessException("Path is outside allowed base");
+        }
+
+        if (string.Equals(targetPath, root, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Cannot remove base path");
+        }
+
+        if (File.Exists(targetPath))
+        {
+            File.Delete(targetPath);
+            return new { ok = true, path = targetPath, kind = "file" };
+        }
+
+        if (Directory.Exists(targetPath))
+        {
+            Directory.Delete(targetPath, recursive);
+            return new { ok = true, path = targetPath, kind = "dir" };
+        }
+
+        throw new FileNotFoundException("Path not found", targetPath);
+    }
+
+    public async Task<object> UploadToPathAsync(
+        string basePath,
+        string? targetPath,
+        string fileName,
+        Stream content,
+        long? expectedLength,
+        CancellationToken cancellationToken)
+    {
+        var root = Path.GetFullPath(basePath);
+        var directory = ResolveWithinBase(root, targetPath);
+        if (directory is null)
+        {
+            throw new UnauthorizedAccessException("Path is outside allowed base");
+        }
+
+        if (!Directory.Exists(directory))
+        {
+            throw new DirectoryNotFoundException("Path not found");
+        }
+
+        var normalizedName = NormalizeName(fileName, "file");
+        if (expectedLength is > GenericUploadMaxBytes)
+        {
+            throw new InvalidDataException("file too large");
+        }
+
+        var destination = EnsureUniquePath(directory, normalizedName);
+        await using var output = File.Create(destination);
+        var copied = await CopyWithLimitAsync(content, output, GenericUploadMaxBytes, cancellationToken);
+
+        return new
+        {
+            path = destination,
+            size = copied,
+            name = Path.GetFileName(destination)
+        };
+    }
+
+    public DownloadStreamResult OpenDownloadStream(string basePath, string? inputPath)
+    {
+        var root = Path.GetFullPath(basePath);
+        var targetPath = ResolveWithinBase(root, inputPath);
+        if (targetPath is null)
+        {
+            throw new UnauthorizedAccessException("Path is outside allowed base");
+        }
+
+        if (File.Exists(targetPath))
+        {
+            var name = Path.GetFileName(targetPath);
+            var contentType = ContentTypeProvider.TryGetContentType(name, out var mime)
+                ? mime
+                : "application/octet-stream";
+            var stream = new FileStream(targetPath, FileMode.Open, FileAccess.Read, FileShare.Read, 16 * 1024, FileOptions.Asynchronous);
+            return new DownloadStreamResult(stream, name, contentType, EnableRangeProcessing: true);
+        }
+
+        if (Directory.Exists(targetPath))
+        {
+            var folderName = Path.GetFileName(targetPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (string.IsNullOrWhiteSpace(folderName))
+            {
+                folderName = "archive";
+            }
+
+            var zipName = $"{folderName}.zip";
+            var tempZipPath = Path.Combine(Path.GetTempPath(), $"webcli-download-{Guid.NewGuid():N}.zip");
+            ZipFile.CreateFromDirectory(targetPath, tempZipPath, CompressionLevel.Fastest, includeBaseDirectory: true);
+            var stream = new FileStream(
+                tempZipPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                16 * 1024,
+                FileOptions.Asynchronous | FileOptions.DeleteOnClose);
+            return new DownloadStreamResult(stream, zipName, "application/zip", EnableRangeProcessing: true);
+        }
+
+        throw new FileNotFoundException("Path not found", targetPath);
+    }
+
+    public sealed record DownloadStreamResult(
+        Stream Stream,
+        string Name,
+        string ContentType,
+        bool EnableRangeProcessing);
+
     private static string? ResolveWithinBase(string basePath, string? inputPath)
     {
         var candidate = string.IsNullOrWhiteSpace(inputPath) ? basePath : Path.GetFullPath(inputPath.Trim());
-        if (candidate == basePath || candidate.StartsWith(basePath + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+        if (IsWithinBase(basePath, candidate))
         {
             return candidate;
         }
@@ -168,6 +412,59 @@ public sealed class FileApiService
         return parent == basePath || parent.StartsWith(basePath + Path.DirectorySeparatorChar, StringComparison.Ordinal)
             ? parent
             : null;
+    }
+
+    private static bool IsWithinBase(string basePath, string targetPath)
+    {
+        return targetPath == basePath
+               || targetPath.StartsWith(basePath + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+    }
+
+    private static string NormalizeName(string? input, string fieldName)
+    {
+        var normalized = Path.GetFileName((input ?? string.Empty).Trim());
+        if (normalized.Length == 0 || normalized is "." or "..")
+        {
+            throw new InvalidDataException($"{fieldName} is required");
+        }
+
+        if (normalized.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        {
+            throw new InvalidDataException($"{fieldName} contains invalid characters");
+        }
+
+        return normalized;
+    }
+
+    private static string EnsureUniquePath(string directory, string fileName)
+    {
+        var ext = Path.GetExtension(fileName);
+        var stem = Path.GetFileNameWithoutExtension(fileName);
+        var index = 0;
+        var candidate = Path.Combine(directory, fileName);
+        while (File.Exists(candidate) || Directory.Exists(candidate))
+        {
+            index += 1;
+            candidate = Path.Combine(directory, $"{stem} ({index}){ext}");
+        }
+
+        return candidate;
+    }
+
+    private static object BuildEntryPayload(string path)
+    {
+        var attr = File.GetAttributes(path);
+        var isDir = attr.HasFlag(FileAttributes.Directory);
+        var isSym = attr.HasFlag(FileAttributes.ReparsePoint);
+        var info = isDir ? new DirectoryInfo(path) as FileSystemInfo : new FileInfo(path);
+        return new
+        {
+            name = Path.GetFileName(path),
+            path,
+            kind = isDir ? "dir" : (isSym ? "symlink" : "file"),
+            size = isDir ? (long?)null : ((FileInfo)info).Length,
+            mtime = info.LastWriteTimeUtc.ToString("O")
+        };
     }
 
     private static async Task<bool> IsLikelyTextFileAsync(string file, CancellationToken cancellationToken)

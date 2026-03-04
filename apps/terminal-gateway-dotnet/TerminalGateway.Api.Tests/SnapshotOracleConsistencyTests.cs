@@ -34,13 +34,14 @@ public class SnapshotOracleConsistencyTests
 
         const string input = "oracle-sync-line\n";
         await hub.InvokeAsync("SendInput", new { instanceId, data = input });
-        var patch = await WaitForMessageAsync(messages, gate,
-            msg => GetType(msg) == "term.patch",
+        var liveRaw = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.raw"
+                && JsonSerializer.Serialize(msg).Contains("oracle-sync-line", StringComparison.Ordinal),
             TimeSpan.FromSeconds(8));
 
         await hub.InvokeAsync("RequestSync", new { instanceId, type = "screen" });
         var snapshot = await WaitForMessageAsync(messages, gate,
-            msg => GetType(msg) == "term.snapshot" && msg.GetProperty("ts").GetInt64() > patch.GetProperty("ts").GetInt64(),
+            msg => GetType(msg) == "term.snapshot" && msg.GetProperty("ts").GetInt64() > liveRaw.GetProperty("ts").GetInt64(),
             TimeSpan.FromSeconds(8));
 
         using var oracle = new XTermOracleAdapter(80, 25);
@@ -81,15 +82,15 @@ public class SnapshotOracleConsistencyTests
 
         const string input = "resize-check\n";
         await hub.InvokeAsync("SendInput", new { instanceId, data = input });
-        var patch = await WaitForMessageAsync(messages, gate,
-            msg => GetType(msg) == "term.patch" && JsonSerializer.Serialize(msg).Contains("resize-check", StringComparison.Ordinal),
+        var liveRaw = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.raw" && JsonSerializer.Serialize(msg).Contains("resize-check", StringComparison.Ordinal),
             TimeSpan.FromSeconds(8));
 
         await hub.InvokeAsync("RequestSync", new { instanceId, type = "screen" });
         var snapshot = await WaitForMessageAsync(messages, gate,
             msg => GetType(msg) == "term.snapshot"
                 && msg.GetProperty("size").GetProperty("cols").GetInt32() == 100
-                && msg.GetProperty("ts").GetInt64() > patch.GetProperty("ts").GetInt64(),
+                && msg.GetProperty("ts").GetInt64() > liveRaw.GetProperty("ts").GetInt64(),
             TimeSpan.FromSeconds(8));
 
         using var oracle = new XTermOracleAdapter(80, 25);

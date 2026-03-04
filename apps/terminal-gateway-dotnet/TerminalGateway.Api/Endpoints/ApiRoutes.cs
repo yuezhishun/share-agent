@@ -292,8 +292,187 @@ public static class ApiRoutes
             }
         });
 
+        app.MapPost("/api/files/write", async (FileWriteRequest body, FileApiService files, GatewayOptions options, CancellationToken ct) =>
+        {
+            try
+            {
+                var result = await files.WriteAsync(options.FilesBasePath, body.Path, body.Content, ct);
+                return Results.Ok(result);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return Results.Json(new { error = ex.Message, @base = options.FilesBasePath }, statusCode: StatusCodes.Status403Forbidden);
+            }
+            catch (DirectoryNotFoundException ex)
+            {
+                return Results.NotFound(new { error = ex.Message, path = body.Path });
+            }
+            catch (InvalidDataException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, path = body.Path });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, path = body.Path });
+            }
+        });
+
+        app.MapPost("/api/files/upload", async (HttpRequest request, string? path, FileApiService files, GatewayOptions options, CancellationToken ct) =>
+        {
+            if (!request.HasFormContentType)
+            {
+                return Results.BadRequest(new { error = "multipart form-data is required" });
+            }
+
+            var form = await request.ReadFormAsync(ct);
+            var file = form.Files.GetFile("file") ?? form.Files.FirstOrDefault();
+            if (file is null)
+            {
+                return Results.BadRequest(new { error = "file is required" });
+            }
+
+            var targetPath = form["path"].ToString();
+            if (string.IsNullOrWhiteSpace(targetPath))
+            {
+                targetPath = path;
+            }
+
+            try
+            {
+                await using var stream = file.OpenReadStream();
+                var uploaded = await files.UploadToPathAsync(options.FilesBasePath, targetPath, file.FileName, stream, file.Length, ct);
+                return Results.Ok(new { upload = uploaded });
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return Results.Json(new { error = ex.Message, @base = options.FilesBasePath }, statusCode: StatusCodes.Status403Forbidden);
+            }
+            catch (DirectoryNotFoundException ex)
+            {
+                return Results.NotFound(new { error = ex.Message, path = targetPath });
+            }
+            catch (InvalidDataException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, path = targetPath });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, path = targetPath });
+            }
+        });
+
+        app.MapPost("/api/files/mkdir", (FileMkdirRequest body, FileApiService files, GatewayOptions options) =>
+        {
+            var targetPath = string.IsNullOrWhiteSpace(body.Path) ? options.FilesBasePath : body.Path;
+            try
+            {
+                var item = files.CreateDirectory(options.FilesBasePath, targetPath, body.Name);
+                return Results.Ok(new { item });
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return Results.Json(new { error = ex.Message, @base = options.FilesBasePath }, statusCode: StatusCodes.Status403Forbidden);
+            }
+            catch (DirectoryNotFoundException ex)
+            {
+                return Results.NotFound(new { error = ex.Message, path = targetPath });
+            }
+            catch (InvalidDataException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, path = targetPath });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, path = targetPath });
+            }
+        });
+
+        app.MapPost("/api/files/rename", (FileRenameRequest body, FileApiService files, GatewayOptions options) =>
+        {
+            try
+            {
+                var item = files.RenameEntry(options.FilesBasePath, body.Path, body.NewName);
+                return Results.Ok(new { item });
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return Results.Json(new { error = ex.Message, @base = options.FilesBasePath }, statusCode: StatusCodes.Status403Forbidden);
+            }
+            catch (FileNotFoundException ex)
+            {
+                return Results.NotFound(new { error = ex.Message, path = ex.FileName ?? body.Path });
+            }
+            catch (InvalidDataException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, path = body.Path });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, path = body.Path });
+            }
+        });
+
+        app.MapDelete("/api/files/remove", (string? path, string? recursive, FileApiService files, GatewayOptions options) =>
+        {
+            var allowRecursive = recursive == "1" || string.Equals(recursive, "true", StringComparison.OrdinalIgnoreCase);
+            try
+            {
+                var result = files.RemoveEntry(options.FilesBasePath, path, allowRecursive);
+                return Results.Ok(result);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return Results.Json(new { error = ex.Message, @base = options.FilesBasePath }, statusCode: StatusCodes.Status403Forbidden);
+            }
+            catch (FileNotFoundException ex)
+            {
+                return Results.NotFound(new { error = ex.Message, path = ex.FileName ?? path });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, path });
+            }
+            catch (IOException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, path });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, path });
+            }
+        });
+
+        app.MapGet("/api/files/download", (string? path, FileApiService files, GatewayOptions options) =>
+        {
+            FileApiService.DownloadStreamResult? download = null;
+            try
+            {
+                download = files.OpenDownloadStream(options.FilesBasePath, path);
+                return Results.Stream(download.Stream, download.ContentType, download.Name, enableRangeProcessing: download.EnableRangeProcessing);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                download?.Stream.Dispose();
+                return Results.Json(new { error = ex.Message, @base = options.FilesBasePath }, statusCode: StatusCodes.Status403Forbidden);
+            }
+            catch (FileNotFoundException ex)
+            {
+                download?.Stream.Dispose();
+                return Results.NotFound(new { error = ex.Message, path = ex.FileName ?? path });
+            }
+            catch (Exception ex)
+            {
+                download?.Stream.Dispose();
+                return Results.BadRequest(new { error = ex.Message, path });
+            }
+        });
+
         return app;
     }
+
+    private sealed record FileMkdirRequest(string? Path, string? Name);
+    private sealed record FileRenameRequest(string? Path, string? NewName);
+    private sealed record FileWriteRequest(string? Path, string? Content);
 
     private static bool IsLocalNode(string nodeId, GatewayOptions options)
     {

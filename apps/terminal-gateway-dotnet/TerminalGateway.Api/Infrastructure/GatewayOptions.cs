@@ -3,6 +3,7 @@ namespace TerminalGateway.Api.Infrastructure;
 public sealed class GatewayOptions
 {
     private static readonly string[] DefaultFsAllowedRoots = ["/home", "/workspace", "/www"];
+    private static readonly string[] DefaultPathPrefixes = ["/www/server/nodejs/v22.22.0/bin"];
 
     public string GatewayRole { get; init; } = "master";
     public string? MasterUrl { get; init; }
@@ -26,6 +27,7 @@ public sealed class GatewayOptions
     public string CodexConfigPath { get; init; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "config.toml");
     public string ClaudeConfigPath { get; init; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "config.json");
     public IReadOnlyList<string> FsAllowedRoots { get; init; } = DefaultFsAllowedRoots;
+    public IReadOnlyList<string> PathPrefixes { get; init; } = DefaultPathPrefixes;
 
     public static GatewayOptions FromConfiguration(IConfiguration config)
     {
@@ -59,7 +61,8 @@ public sealed class GatewayOptions
             MaxOutputBufferBytes = ParseInt(config, 8 * 1024 * 1024, "TERMINAL_MAX_OUTPUT_BUFFER_BYTES", "Gateway:MaxOutputBufferBytes"),
             CodexConfigPath = Read(config, "TERMINAL_CODEX_CONFIG_PATH", "Gateway:CodexConfigPath") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "config.toml"),
             ClaudeConfigPath = Read(config, "TERMINAL_CLAUDE_CONFIG_PATH", "Gateway:ClaudeConfigPath") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "config.json"),
-            FsAllowedRoots = ParseRoots(config)
+            FsAllowedRoots = ParseRoots(config),
+            PathPrefixes = ParsePathPrefixes(config)
         };
     }
 
@@ -119,6 +122,37 @@ public sealed class GatewayOptions
             .Select(x => x!.Trim())
             .Where(Path.IsPathRooted)
             .Select(Path.GetFullPath)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private static IReadOnlyList<string> ParsePathPrefixes(IConfiguration config)
+    {
+        var raw = Read(config, "TERMINAL_PATH_PREFIXES", "Gateway:PathPrefixes");
+        var parsedRaw = ParsePathPrefixString(raw);
+        if (parsedRaw.Count > 0)
+        {
+            return parsedRaw;
+        }
+
+        var parsedSection = ParsePathPrefixValues(config.GetSection("Gateway:PathPrefixes")
+            .GetChildren()
+            .Select(x => x.Value));
+        return parsedSection.Count > 0 ? parsedSection : DefaultPathPrefixes;
+    }
+
+    private static IReadOnlyList<string> ParsePathPrefixString(string? raw)
+    {
+        return ParsePathPrefixValues((raw ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(x => x.Trim()));
+    }
+
+    private static IReadOnlyList<string> ParsePathPrefixValues(IEnumerable<string?> values)
+    {
+        return values
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => x!.Trim())
             .Distinct(StringComparer.Ordinal)
             .ToList();
     }

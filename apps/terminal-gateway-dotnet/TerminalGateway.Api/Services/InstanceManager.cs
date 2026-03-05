@@ -20,6 +20,7 @@ public sealed class InstanceManager
     private readonly string _nodeId;
     private readonly string _nodeName;
     private readonly string _nodeRole;
+    private readonly IReadOnlyList<string> _pathPrefixes;
 
     public event Action<string, object>? Patch;
     public event Action<string, object>? Raw;
@@ -28,7 +29,16 @@ public sealed class InstanceManager
     public string NodeName => _nodeName;
     public string NodeRole => _nodeRole;
 
-    public InstanceManager(IPtyEngine ptyEngine, int historyLimit, int rawReplayMaxBytes, int defaultCols, int defaultRows, string nodeId, string nodeName, string nodeRole)
+    public InstanceManager(
+        IPtyEngine ptyEngine,
+        int historyLimit,
+        int rawReplayMaxBytes,
+        int defaultCols,
+        int defaultRows,
+        string nodeId,
+        string nodeName,
+        string nodeRole,
+        IReadOnlyList<string>? pathPrefixes = null)
     {
         _ptyEngine = ptyEngine;
         _historyLimit = Math.Max(1, historyLimit);
@@ -38,6 +48,7 @@ public sealed class InstanceManager
         _nodeId = nodeId;
         _nodeName = nodeName;
         _nodeRole = nodeRole;
+        _pathPrefixes = NormalizePathPrefixes(pathPrefixes);
     }
 
     public async Task<InstanceSummary> CreateAsync(CreateInstanceRequest input, string defaultBasePath, CancellationToken cancellationToken)
@@ -59,6 +70,7 @@ public sealed class InstanceManager
 
         var parsed = CommandParser.Parse(command);
         var args = (input.Args is { Count: > 0 } ? input.Args : parsed.Args).ToList();
+        args = EnsureInteractiveShellArgs(parsed.File, args);
         var env = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
         {
@@ -69,6 +81,7 @@ public sealed class InstanceManager
         {
             env[kv.Key] = kv.Value;
         }
+        env["PATH"] = BuildPathWithPrefixes(env.TryGetValue("PATH", out var currentPath) ? currentPath : string.Empty, _pathPrefixes);
 
         var runtime = await _ptyEngine.CreateAsync(new PtyLaunchOptions
         {
@@ -493,6 +506,171 @@ public sealed class InstanceManager
         }
 
         return Math.Clamp(value, min, max);
+    }
+
+    private static List<string> EnsureInteractiveShellArgs(string executable, List<string> args)
+    {
+        if (IsBashOrZshExecutable(executable))
+        {
+            return EnsureBashOrZshInteractiveLoginArgs(args);
+        }
+
+        if (!IsShExecutable(executable))
+        {
+            return args;
+        }
+
+        if (HasShellFlag(args, "i", "--interactive") || HasShellFlag(args, "c", "--command"))
+        {
+            return args;
+        }
+
+        if (args.Any(arg =>
+        {
+            var value = (arg ?? string.Empty).Trim();
+            return value.Length > 0 && !value.StartsWith("-", StringComparison.Ordinal);
+        }))
+        {
+            return args;
+        }
+
+        var normalized = new List<string>(args.Count + 1) { "-i" };
+        normalized.AddRange(args);
+        return normalized;
+    }
+
+    private static List<string> EnsureBashOrZshInteractiveLoginArgs(List<string> args)
+    {
+        if (HasShellFlag(args, "c", "--command"))
+        {
+            return args;
+        }
+
+        if (args.Any(arg =>
+        {
+            var value = (arg ?? string.Empty).Trim();
+            return value.Length > 0 && !value.StartsWith("-", StringComparison.Ordinal);
+        }))
+        {
+            return args;
+        }
+
+        var hasInteractive = HasShellFlag(args, "i", "--interactive");
+        var hasLogin = HasShellFlag(args, "l", "--login");
+        if (hasInteractive && hasLogin)
+        {
+            return args;
+        }
+
+        var normalized = new List<string>(args);
+        if (!hasLogin)
+        {
+            normalized.Insert(0, "-l");
+        }
+        if (!hasInteractive)
+        {
+            normalized.Insert(0, "-i");
+        }
+
+        return normalized;
+    }
+
+    private static bool IsBashOrZshExecutable(string executable)
+    {
+        var fileName = Path.GetFileName((executable ?? string.Empty).Trim()).ToLowerInvariant();
+        return fileName is "bash" or "bash.exe" or "zsh" or "zsh.exe";
+    }
+
+    private static bool IsShExecutable(string executable)
+    {
+        var fileName = Path.GetFileName((executable ?? string.Empty).Trim()).ToLowerInvariant();
+        return fileName is "sh" or "sh.exe";
+    }
+
+    private static bool HasShellFlag(IEnumerable<string> args, string shortFlag, string longFlag)
+    {
+        foreach (var arg in args)
+        {
+            var value = (arg ?? string.Empty).Trim();
+            if (value.Length == 0)
+            {
+                continue;
+            }
+
+            if (string.Equals(value, longFlag, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            if (string.Equals(value, $"-{shortFlag}", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            if (IsShortFlagCluster(value) && value.IndexOf(shortFlag, StringComparison.Ordinal) >= 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsShortFlagCluster(string arg)
+    {
+        if (arg.Length < 3 || arg[0] != '-' || arg[1] == '-')
+        {
+            return false;
+        }
+
+        for (var i = 1; i < arg.Length; i++)
+        {
+            if (!char.IsLetter(arg[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static IReadOnlyList<string> NormalizePathPrefixes(IReadOnlyList<string>? pathPrefixes)
+    {
+        if (pathPrefixes is null || pathPrefixes.Count == 0)
+        {
+            return [];
+        }
+
+        return pathPrefixes
+            .Select(x => (x ?? string.Empty).Trim())
+            .Where(x => x.Length > 0)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private static string BuildPathWithPrefixes(string? currentPath, IReadOnlyList<string> prefixes)
+    {
+        var items = new List<string>();
+        foreach (var prefix in prefixes)
+        {
+            var normalized = (prefix ?? string.Empty).Trim();
+            if (normalized.Length == 0 || items.Contains(normalized, StringComparer.Ordinal))
+            {
+                continue;
+            }
+            items.Add(normalized);
+        }
+
+        foreach (var segment in (currentPath ?? string.Empty).Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (segment.Length == 0 || items.Contains(segment, StringComparer.Ordinal))
+            {
+                continue;
+            }
+            items.Add(segment);
+        }
+
+        return string.Join(Path.PathSeparator, items);
     }
 
     private static string? ResolveWithinBase(string basePath, string? inputPath)

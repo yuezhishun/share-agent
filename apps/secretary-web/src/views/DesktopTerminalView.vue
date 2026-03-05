@@ -73,7 +73,7 @@
             <input v-model="recipeEditor.name" type="text" placeholder="显示名（可选）" />
             <input v-model="recipeEditor.cwd" type="text" placeholder="文件夹(CWD)，如 /home/yueyuan" />
             <input v-model="recipeEditor.command" type="text" placeholder="指令，如 bash" required />
-            <input v-model="recipeEditor.argsInput" type="text" placeholder='参数(JSON数组)，如 ["-l"]' />
+            <input v-model="recipeEditor.argsInput" type="text" placeholder='参数(JSON数组)，如 ["-i"]' />
             <textarea v-model="recipeEditor.envInput" rows="3" placeholder='环境变量(JSON对象)，如 {"TERM":"xterm-256color"}' />
             <div class="recipe-editor-actions">
               <button type="submit" class="primary">{{ editingRecipeId ? '更新配方' : '保存配方' }}</button>
@@ -296,7 +296,7 @@ const terminalRef = ref(null);
 const uploadFilesInputRef = ref(null);
 
 const command = ref('bash');
-const argsInput = ref('["-l"]');
+const argsInput = ref('["-i"]');
 const envInput = ref('{}');
 const cwd = ref('');
 const createNodeId = ref('');
@@ -429,7 +429,7 @@ function buildRecipeEditor(seed = null) {
     name: String(source.name || ''),
     cwd: String(source.cwd || ''),
     command: String(source.command || 'bash') || 'bash',
-    argsInput: JSON.stringify(Array.isArray(source.args) ? source.args : ['-l']),
+    argsInput: JSON.stringify(Array.isArray(source.args) ? source.args : ['-i']),
     envInput: JSON.stringify(source.env && typeof source.env === 'object' && !Array.isArray(source.env) ? source.env : {}, null, 2),
     group: String(source.group || 'general')
   };
@@ -789,8 +789,8 @@ async function createInstance() {
     const parsedArgs = selectedRecipe
       ? (Array.isArray(selectedRecipe.args) ? selectedRecipe.args.map((x) => String(x)) : [])
       : (() => {
-          const parsed = parseJsonOrDefault(argsInput.value, ['-l']);
-          return Array.isArray(parsed) ? parsed.map((x) => String(x)) : ['-l'];
+          const parsed = parseJsonOrDefault(argsInput.value, ['-i']);
+          return Array.isArray(parsed) ? parsed.map((x) => String(x)) : ['-i'];
         })();
     const parsedEnv = selectedRecipe
       ? (selectedRecipe.env && typeof selectedRecipe.env === 'object' && !Array.isArray(selectedRecipe.env) ? selectedRecipe.env : {})

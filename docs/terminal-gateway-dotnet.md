@@ -42,6 +42,7 @@ dotnet test apps/terminal-gateway-dotnet/TerminalGateway.Api.Tests/TerminalGatew
 - `TERMINAL_MAX_OUTPUT_BUFFER_BYTES`
 - `TERMINAL_CODEX_CONFIG_PATH`
 - `TERMINAL_CLAUDE_CONFIG_PATH`
+- `TERMINAL_PATH_PREFIXES`（逗号分隔；用于补齐 PTY 子进程 `PATH` 前缀，如 Node/Codex 安装目录）
 - `TERMINAL_FS_ALLOWED_ROOTS`
 
 ## 6. 联调状态

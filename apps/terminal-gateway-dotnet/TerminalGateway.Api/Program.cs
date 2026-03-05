@@ -18,7 +18,8 @@ builder.Services.AddSingleton<InstanceManager>(sp => new InstanceManager(
     options.DefaultRows,
     options.NodeId,
     options.NodeName,
-    options.GatewayRole));
+    options.GatewayRole,
+    options.PathPrefixes));
 builder.Services.AddSingleton<TerminalConnectionRegistry>();
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<TerminalEventRelay>();

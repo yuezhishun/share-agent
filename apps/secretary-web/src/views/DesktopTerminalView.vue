@@ -2,10 +2,37 @@
   <div class="app">
     <div class="toolbar">
       <div class="logo"><i class="fa-solid fa-terminal" /> 多终端管理器 (实时)</div>
+      <div class="toolbar-actions">
+        <button
+          type="button"
+          class="sidebar-toggle-btn"
+          data-testid="toggle-left-sidebar"
+          @click="toggleLeftSidebar"
+        >
+          <i :class="leftSidebarCollapsed ? 'fa-solid fa-chevron-right' : 'fa-solid fa-chevron-left'" />
+          {{ leftSidebarCollapsed ? '显示左栏' : '隐藏左栏' }}
+        </button>
+        <button
+          type="button"
+          class="sidebar-toggle-btn"
+          data-testid="toggle-right-sidebar"
+          @click="toggleRightSidebar"
+        >
+          <i :class="rightSidebarCollapsed ? 'fa-solid fa-chevron-left' : 'fa-solid fa-chevron-right'" />
+          {{ rightSidebarCollapsed ? '显示右栏' : '隐藏右栏' }}
+        </button>
+      </div>
     </div>
 
-    <div class="main">
-      <div class="sidebar-column left-sidebar">
+    <div
+      class="main"
+      :class="{
+        'left-collapsed': leftSidebarCollapsed,
+        'right-collapsed': rightSidebarCollapsed,
+        'both-collapsed': leftSidebarCollapsed && rightSidebarCollapsed
+      }"
+    >
+      <div v-show="!leftSidebarCollapsed" class="sidebar-column left-sidebar">
         <div class="sidebar-section sessions">
           <div class="section-header">
             <span><i class="fa-regular fa-window-maximize" /> 终端会话</span>
@@ -134,7 +161,7 @@
         </div>
       </div>
 
-      <div class="sidebar-column right-sidebar">
+      <div v-show="!rightSidebarCollapsed" class="sidebar-column right-sidebar">
         <div class="sidebar-section file-browser">
           <div class="section-header">
             <span>
@@ -282,6 +309,8 @@ const editingRecipeId = ref('');
 const showRecipeEditor = ref(false);
 const recipeEditor = ref(buildRecipeEditor());
 const defaultCreateRecipeId = ref('');
+const leftSidebarCollapsed = ref(false);
+const rightSidebarCollapsed = ref(false);
 const customShortcutItems = ref([]);
 const shortcutEditor = ref({
   label: '',
@@ -294,6 +323,7 @@ let term = null;
 let fitAddon = null;
 let unsubscribe = null;
 let renderer = null;
+let terminalResizeObserver = null;
 
 const recipeItems = computed(() => [...recipesStore.items].sort((a, b) => {
   const groupCompare = String(a.group || 'general').localeCompare(String(b.group || 'general'), 'zh-Hans-CN');
@@ -325,6 +355,7 @@ const customShortcutStorageKey = 'webcli-shortcuts-v1';
 const codexQuickCommand = 'codex --dangerously-bypass-approvals-and-sandbox';
 const comboKeyIntervalMs = 120;
 const quickCommandIntervalMs = 300;
+const mobileAutoCollapseWidth = 820;
 
 const builtInShortcutItems = [
   { id: 'esc', label: 'esc', group: '控制键', value: '\u001b' },
@@ -607,6 +638,61 @@ function focusTerminal() {
 async function fitTerminal() {
   await nextTick();
   fitAddon?.fit();
+}
+
+function isMobileViewport() {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  return window.innerWidth <= mobileAutoCollapseWidth;
+}
+
+function applyResponsiveSidebarCollapse() {
+  if (!isMobileViewport()) {
+    return;
+  }
+  if (!leftSidebarCollapsed.value) {
+    leftSidebarCollapsed.value = true;
+  }
+  if (!rightSidebarCollapsed.value) {
+    rightSidebarCollapsed.value = true;
+  }
+}
+
+function onWindowResize() {
+  applyResponsiveSidebarCollapse();
+  fitTerminal();
+}
+
+async function fitAfterFontsReady() {
+  if (typeof document === 'undefined') {
+    return;
+  }
+  const fonts = document.fonts;
+  if (!fonts?.ready || typeof fonts.ready.then !== 'function') {
+    return;
+  }
+  try {
+    await fonts.ready;
+    await fitTerminal();
+  } catch {
+  }
+}
+
+async function toggleLeftSidebar() {
+  leftSidebarCollapsed.value = !leftSidebarCollapsed.value;
+  await fitTerminal();
+  if (activeCenterTab.value === 'terminal') {
+    focusTerminal();
+  }
+}
+
+async function toggleRightSidebar() {
+  rightSidebarCollapsed.value = !rightSidebarCollapsed.value;
+  await fitTerminal();
+  if (activeCenterTab.value === 'terminal') {
+    focusTerminal();
+  }
 }
 
 function switchCenterTab(tabId) {
@@ -1199,6 +1285,7 @@ onMounted(async () => {
     defaultCreateRecipeId.value = '';
     persistDefaultCreateRecipe();
   }
+  applyResponsiveSidebarCollapse();
 
   term = new Terminal({
     convertEol: true,
@@ -1225,9 +1312,16 @@ onMounted(async () => {
   term.onResize(({ cols: c, rows: r }) => terminalStore.sendResize(c, r));
   terminalRef.value?.addEventListener('paste', onTerminalPaste);
   terminalRef.value?.addEventListener('contextmenu', onTerminalContextMenu);
-  window.addEventListener('resize', fitTerminal);
+  if (typeof ResizeObserver === 'function' && terminalRef.value) {
+    terminalResizeObserver = new ResizeObserver(() => {
+      fitTerminal();
+    });
+    terminalResizeObserver.observe(terminalRef.value);
+  }
+  window.addEventListener('resize', onWindowResize);
 
   await fitTerminal();
+  fitAfterFontsReady().catch(() => {});
   await refreshTerminals();
   focusTerminal();
 });
@@ -1235,7 +1329,9 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   unsubscribe?.();
   terminalStore.disconnect();
-  window.removeEventListener('resize', fitTerminal);
+  window.removeEventListener('resize', onWindowResize);
+  terminalResizeObserver?.disconnect();
+  terminalResizeObserver = null;
   terminalRef.value?.removeEventListener('paste', onTerminalPaste);
   terminalRef.value?.removeEventListener('contextmenu', onTerminalContextMenu);
   term?.dispose();
@@ -1281,6 +1377,24 @@ onBeforeUnmount(() => {
 
 .toolbar .logo i {
   color: #007acc;
+}
+
+.toolbar-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sidebar-toggle-btn {
+  border-color: #3f5b77;
+  background-color: #23364a;
+  color: #dbefff;
+  font-size: 0.8rem;
+}
+
+.sidebar-toggle-btn:hover {
+  background-color: #2a4560;
 }
 
 .plain-output-probe {
@@ -1951,7 +2065,6 @@ button.primary:hover {
 
 .terminal-viewport :deep(.xterm) {
   height: 100%;
-  padding: 16px;
 }
 
 .terminal-viewport :deep(.xterm-viewport) {
@@ -2020,6 +2133,35 @@ button.primary:hover {
 
   .terminal-panel {
     min-height: 52vh;
+  }
+}
+
+.main.left-collapsed {
+  grid-template-columns: minmax(520px, 1fr) minmax(300px, 380px);
+}
+
+.main.right-collapsed {
+  grid-template-columns: minmax(250px, 340px) minmax(520px, 1fr);
+}
+
+.main.both-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@media (max-width: 1380px) {
+  .main.left-collapsed {
+    grid-template-columns: minmax(460px, 1fr) minmax(280px, 340px);
+  }
+
+  .main.right-collapsed {
+    grid-template-columns: minmax(230px, 300px) minmax(460px, 1fr);
+  }
+}
+
+@media (max-width: 980px) {
+  .main.left-collapsed,
+  .main.both-collapsed {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

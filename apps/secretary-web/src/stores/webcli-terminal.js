@@ -46,7 +46,19 @@ function parseSeq(value, fallback = 0) {
 }
 
 const MAX_PLAIN_OUTPUT_CHARS = 12000;
-const DEFAULT_MAX_JOINED_INSTANCES = 2;
+const MAX_ANSI_REPLAY_BYTES_PER_INSTANCE = 4 * 1024 * 1024;
+const textEncoder = typeof TextEncoder === 'function' ? new TextEncoder() : null;
+
+function utf8ByteLength(input) {
+  const value = String(input || '');
+  if (!value) {
+    return 0;
+  }
+  if (textEncoder) {
+    return textEncoder.encode(value).length;
+  }
+  return value.length;
+}
 
 export const useWebCliTerminalStore = defineStore('webcliTerminal', {
   state: () => ({
@@ -61,14 +73,15 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
     connection: null,
     joinedInstanceId: '',
     joinedInstanceIds: [],
-    maxJoinedInstances: DEFAULT_MAX_JOINED_INSTANCES,
     listeners: [],
     resizeTimer: null,
     pendingResize: null,
     cachedScreens: {},
+    ansiReplayByInstance: {},
     streamStates: {},
     routeResyncTimers: {},
     routeResyncInFlight: {},
+    resizeAckByInstance: {},
     plainOutput: '',
     plainOutputByInstance: {},
     uiSession: {
@@ -119,6 +132,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
     emitMessage(message) {
       this.rememberScreenFrame(message);
       this.rememberPlainOutput(message);
+      this.rememberAnsiReplay(message);
       if (!this.isMessageForSelected(message)) {
         return;
       }
@@ -173,6 +187,116 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
           this.plainOutput = next;
         }
       }
+    },
+
+    rememberAnsiReplay(message) {
+      if (!message || typeof message !== 'object' || message.type !== 'term.raw') {
+        return;
+      }
+      if (message.local === true) {
+        return;
+      }
+      const instanceId = String(message.instance_id || '').trim();
+      if (!instanceId) {
+        return;
+      }
+
+      const chunk = String(message.data || '');
+      const reset = message.replay === true && message.reset === true;
+      if (!chunk && !reset) {
+        return;
+      }
+
+      if (!this.ansiReplayByInstance[instanceId]) {
+        this.ansiReplayByInstance[instanceId] = { chunks: [], bytes: 0, hasServerBaseline: false };
+      }
+      const entry = this.ansiReplayByInstance[instanceId];
+      if (!Object.prototype.hasOwnProperty.call(entry, 'hasServerBaseline')) {
+        entry.hasServerBaseline = false;
+      }
+
+      if (reset) {
+        entry.chunks = [];
+        entry.bytes = 0;
+      }
+      if (message.replay === true && reset && parseSeq(message.since_seq, 0) <= 0) {
+        entry.hasServerBaseline = true;
+      }
+
+      if (chunk) {
+        entry.chunks.push(chunk);
+        entry.bytes += utf8ByteLength(chunk);
+      }
+
+      while (entry.bytes > MAX_ANSI_REPLAY_BYTES_PER_INSTANCE && entry.chunks.length > 0) {
+        const removed = entry.chunks.shift();
+        entry.bytes = Math.max(0, entry.bytes - utf8ByteLength(removed));
+      }
+    },
+
+    getAnsiReplayData(instanceId) {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return '';
+      }
+      const entry = this.ansiReplayByInstance[id];
+      if (!entry || !Array.isArray(entry.chunks) || entry.chunks.length === 0) {
+        return '';
+      }
+      return entry.chunks.join('');
+    },
+
+    hasServerBaseline(instanceId) {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return false;
+      }
+      const entry = this.ansiReplayByInstance[id];
+      return entry?.hasServerBaseline === true;
+    },
+
+    buildLocalClearMessage(instanceId) {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return null;
+      }
+      return {
+        v: 1,
+        type: 'term.raw',
+        instance_id: id,
+        replay: true,
+        reset: true,
+        local: true,
+        data: ''
+      };
+    },
+
+    buildLocalReplayMessage(instanceId) {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return null;
+      }
+      const data = this.getAnsiReplayData(id);
+      if (!data) {
+        return null;
+      }
+      const stream = this.ensureStreamState(id);
+      const seq = parseSeq(stream?.lastSeq, 0);
+      return {
+        v: 1,
+        type: 'term.raw',
+        instance_id: id,
+        replay: true,
+        req_id: `local-replay-${Date.now()}`,
+        since_seq: 0,
+        from_seq: 1,
+        to_seq: seq,
+        seq,
+        reset: true,
+        truncated: false,
+        local: true,
+        data
+      };
     },
 
     isMessageForSelected(message) {
@@ -270,6 +394,29 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       }
     },
 
+    async waitForSnapshot(instanceId, timeoutMs = 500) {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return null;
+      }
+      const current = this.cachedScreens[id];
+      if (current?.type === 'term.snapshot') {
+        return current;
+      }
+
+      const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        const latest = this.cachedScreens[id];
+        if (latest?.type === 'term.snapshot') {
+          return latest;
+        }
+      }
+
+      const fallback = this.cachedScreens[id];
+      return fallback?.type === 'term.snapshot' ? fallback : null;
+    },
+
     resetStreamState(instanceId, lastSeq = 0) {
       const id = String(instanceId || '').trim();
       if (!id) {
@@ -359,10 +506,14 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       });
 
       try {
+        const explicitSince = Number(options?.sinceSeq);
         const fromStart = options?.fromStart === true;
-        const sinceSeq = fromStart
-          ? 0
-          : Math.max(0, Number(stream.lastSeq) || 0);
+        const hasExplicitSince = Number.isFinite(explicitSince);
+        const sinceSeq = hasExplicitSince
+          ? Math.max(0, Math.floor(explicitSince))
+          : (fromStart
+              ? 0
+              : Math.max(0, Number(stream.lastSeq) || 0));
         await this.connection.invoke('RequestSync', {
           instanceId: id,
           type: 'raw',
@@ -420,6 +571,11 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       }
 
       if (seq > stream.lastSeq + 1) {
+        if (id !== String(this.selectedInstanceId || '').trim()) {
+          this.queuePendingRaw(stream, message);
+          this.requestRawSync(id, 'seq_gap_background').catch(() => {});
+          return [];
+        }
         this.queuePendingRaw(stream, message);
         if (id === String(this.selectedInstanceId || '').trim()) {
           this.setStatus('Resync requested');
@@ -460,45 +616,60 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       const drained = this.flushPendingRaw(id);
       if (stream.pendingRaw.length > 0) {
         this.requestRawSync(id, 'post_sync_gap').catch(() => {
-          this.setStatus(`Auto resync failed: ${id}`);
+          if (id === String(this.selectedInstanceId || '').trim()) {
+            this.setStatus(`Auto resync failed: ${id}`);
+          }
         });
       }
 
       return [message, ...drained];
     },
 
+    shouldSuppressResizeSnapshot(instanceId, message) {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return false;
+      }
+      const ackAt = Number(this.resizeAckByInstance[id] || 0);
+      if (!Number.isFinite(ackAt) || ackAt <= 0) {
+        return false;
+      }
+      if (Date.now() - ackAt > 1200) {
+        return false;
+      }
+      const stream = this.ensureStreamState(id);
+      const snapshotSeq = parseSeq(message?.seq, parseSeq(message?.base_seq, 0));
+      if (snapshotSeq > 0 && stream && snapshotSeq > stream.lastSeq + 1) {
+        return false;
+      }
+      return true;
+    },
+
     processIncomingMessage(message) {
       if (!message || typeof message !== 'object') {
         return [];
       }
+      const instanceId = String(message.instance_id || '').trim();
       const isSelected = this.isMessageForSelected(message);
-      if (message.type === 'term.raw') {
-        const items = this.handleIncomingRaw(message);
-        if (!isSelected) {
-          for (const item of items) {
-            this.rememberPlainOutput(item, { cacheOnly: true });
-          }
-          return [];
+      if (message.type === 'term.resize.ack') {
+        if (instanceId) {
+          this.resizeAckByInstance[instanceId] = Date.now();
         }
-        return items;
+        return isSelected ? [message] : [];
+      }
+      if (message.type === 'term.snapshot' && this.shouldSuppressResizeSnapshot(instanceId, message)) {
+        this.rememberScreenFrame(message);
+        this.syncStreamSeq(instanceId, parseSeq(message.seq, parseSeq(message.base_seq, 0)));
+        return [];
+      }
+      if (message.type === 'term.raw') {
+        return this.handleIncomingRaw(message);
       }
       if (message.type === 'term.sync.complete') {
-        const items = this.handleIncomingSyncComplete(message);
-        if (!isSelected) {
-          for (const item of items) {
-            this.rememberPlainOutput(item, { cacheOnly: true });
-          }
-          return [];
-        }
-        return items;
+        return this.handleIncomingSyncComplete(message);
       }
-      if (!isSelected && message.type === 'term.exit') {
-        this.rememberPlainOutput(message, { cacheOnly: true });
-        return [];
-      }
-      if (!isSelected && (message.type === 'term.snapshot' || message.type === 'term.patch')) {
-        this.rememberScreenFrame(message);
-        return [];
+      if (!isSelected && (message.type === 'term.snapshot' || message.type === 'term.patch' || message.type === 'term.exit')) {
+        return [message];
       }
       return isSelected ? [message] : [];
     },
@@ -528,11 +699,24 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
           delete this.plainOutputByInstance[id];
         }
       }
+      for (const id of Object.keys(this.ansiReplayByInstance)) {
+        if (!activeIds.has(id)) {
+          delete this.ansiReplayByInstance[id];
+        }
+      }
+      for (const id of Object.keys(this.resizeAckByInstance)) {
+        if (!activeIds.has(id)) {
+          delete this.resizeAckByInstance[id];
+        }
+      }
       if (this.selectedInstanceId && !this.instances.some((x) => x.id === this.selectedInstanceId)) {
         this.selectedInstanceId = '';
         this.setStatus('Current instance exited');
       }
       this.syncPlainOutputForSelected();
+      if (this.connection && this.wsConnected) {
+        this.syncJoinedInstances().catch(() => {});
+      }
       return this.instances;
     },
 
@@ -654,6 +838,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       }
       this.routeResyncTimers = {};
       this.routeResyncInFlight = {};
+      this.resizeAckByInstance = {};
       this.connection = null;
       this.joinedInstanceId = '';
       this.joinedInstanceIds = [];
@@ -667,17 +852,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       this.isReconnecting = false;
       this.plainOutput = '';
       this.plainOutputByInstance = {};
-    },
-
-    touchJoinedInstance(instanceId) {
-      const id = String(instanceId || '').trim();
-      if (!id) {
-        return;
-      }
-      const withoutCurrent = this.joinedInstanceIds.filter((item) => item !== id);
-      withoutCurrent.push(id);
-      this.joinedInstanceIds = withoutCurrent;
-      this.joinedInstanceId = id;
+      this.ansiReplayByInstance = {};
     },
 
     async leaveJoinedInstance(instanceId, options = {}) {
@@ -698,27 +873,62 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       }
     },
 
-    async trimJoinedInstances() {
-      const limit = Math.max(1, Number(this.maxJoinedInstances) || DEFAULT_MAX_JOINED_INSTANCES);
-      while (this.joinedInstanceIds.length > limit) {
-        const stale = this.joinedInstanceIds[0];
-        await this.leaveJoinedInstance(stale, { callRemote: true });
-      }
-    },
-
     async joinInstance(instanceId) {
       const id = String(instanceId || '').trim();
       if (!id || !this.connection || !this.wsConnected) {
-        return;
+        return false;
       }
 
       if (this.joinedInstanceIds.includes(id)) {
-        this.touchJoinedInstance(id);
-        return;
+        return true;
       }
       await this.connection.invoke('JoinInstance', { instanceId: id });
-      this.touchJoinedInstance(id);
-      await this.trimJoinedInstances();
+      if (!this.joinedInstanceIds.includes(id)) {
+        this.joinedInstanceIds = [...this.joinedInstanceIds, id];
+      }
+      this.joinedInstanceId = id;
+      return true;
+    },
+
+    async syncJoinedInstances(options = {}) {
+      if (!this.connection || !this.wsConnected) {
+        return;
+      }
+
+      const include = Array.isArray(options?.include) ? options.include : [];
+      const requiredSet = new Set(include.map((id) => String(id || '').trim()).filter(Boolean));
+      const targetIds = [
+        ...this.instances.map((item) => String(item?.id || '').trim()),
+        ...include.map((id) => String(id || '').trim())
+      ].filter((id, index, array) => id.length > 0 && array.indexOf(id) === index);
+      const targetSet = new Set(targetIds);
+
+      const stale = this.joinedInstanceIds.filter((id) => !targetSet.has(id));
+      for (const id of stale) {
+        await this.leaveJoinedInstance(id, { callRemote: true });
+      }
+
+      let requiredJoinError = null;
+      for (const id of targetIds) {
+        try {
+          await this.joinInstance(id);
+        } catch (error) {
+          if (requiredSet.has(id) && !requiredJoinError) {
+            requiredJoinError = error || new Error(`JoinInstance failed: ${id}`);
+          }
+        }
+      }
+
+      const joinedSet = new Set(this.joinedInstanceIds.map((id) => String(id || '').trim()).filter(Boolean));
+      this.joinedInstanceIds = targetIds.filter((id) => joinedSet.has(id));
+      const selectedId = String(this.selectedInstanceId || '').trim();
+      this.joinedInstanceId = joinedSet.has(selectedId) && targetSet.has(selectedId)
+        ? selectedId
+        : (this.joinedInstanceIds[this.joinedInstanceIds.length - 1] || '');
+
+      if (requiredJoinError) {
+        throw requiredJoinError;
+      }
     },
 
     async ensureConnection() {
@@ -773,18 +983,18 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
         this.setStatus('Connected');
         try {
           const selected = String(this.selectedInstanceId || '').trim();
-          const previous = [...this.joinedInstanceIds];
           this.joinedInstanceId = '';
           this.joinedInstanceIds = [];
-          const targets = [selected, ...previous]
-            .map((id) => String(id || '').trim())
-            .filter((id, index, array) => id.length > 0 && array.indexOf(id) === index)
-            .slice(0, Math.max(1, Number(this.maxJoinedInstances) || DEFAULT_MAX_JOINED_INSTANCES));
-          for (const id of targets) {
-            await this.joinInstance(id);
-          }
+          await this.syncJoinedInstances({ include: selected ? [selected] : [] });
           if (selected) {
-            await this.requestRawSync(selected, 'reconnect');
+            const stream = this.ensureStreamState(selected);
+            const snapshot = await this.waitForSnapshot(selected, 600);
+            const baselineSeq = parseSeq(snapshot?.seq, parseSeq(snapshot?.base_seq, parseSeq(stream?.lastSeq, 0)));
+            if (baselineSeq > 0) {
+              await this.requestRawSync(selected, 'reconnect', { sinceSeq: baselineSeq });
+            } else {
+              await this.requestRawSync(selected, 'reconnect', { fromStart: true });
+            }
           }
         } catch (error) {
           this.setStatus(String(error?.message || error || 'reconnect sync failed'));
@@ -801,6 +1011,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       try {
         await connection.start();
         this.wsConnected = true;
+        await this.syncJoinedInstances();
       } catch (error) {
         this.wsConnected = false;
         this.isReconnecting = false;
@@ -822,18 +1033,32 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       this.selectedInstanceId = nextId;
       this.ensureStreamState(nextId);
       this.syncPlainOutputForSelected();
-      const cached = this.cachedScreens[nextId];
-      if (cached && cached.type === 'term.snapshot') {
-        this.emitMessage(this.cloneFrame(cached));
+      const clearMessage = this.buildLocalClearMessage(nextId);
+      if (clearMessage) {
+        this.emitMessage(clearMessage);
       }
-
-      this.setStatus('Connected');
 
       let lastError = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
-          await this.joinInstance(nextId);
-          await this.requestRawSync(nextId, 'connect');
+          await this.syncJoinedInstances({ include: [nextId] });
+          const stream = this.ensureStreamState(nextId);
+          const snapshot = await this.waitForSnapshot(nextId, 600);
+          const baselineSeq = parseSeq(snapshot?.seq, parseSeq(snapshot?.base_seq, parseSeq(stream?.lastSeq, 0)));
+          if (baselineSeq > 0) {
+            await this.requestRawSync(nextId, 'connect', { sinceSeq: baselineSeq });
+            this.setStatus('Connected');
+            return;
+          }
+
+          const localReplay = this.buildLocalReplayMessage(nextId);
+          if (localReplay) {
+            this.emitMessage(localReplay);
+            this.setStatus('Connected (local fallback)');
+          }
+
+          await this.requestRawSync(nextId, 'connect', { fromStart: true });
+          this.setStatus('Connected');
           return;
         } catch (error) {
           lastError = error;

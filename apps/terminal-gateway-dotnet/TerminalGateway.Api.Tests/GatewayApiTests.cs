@@ -115,6 +115,11 @@ public class GatewayApiTests
         await hub.StartAsync();
         await hub.InvokeAsync("JoinInstance", new { instanceId });
         _ = await WaitForMessageAsync(messages, gate, msg => GetType(msg) == "term.snapshot", TimeSpan.FromSeconds(8));
+        var snapshotCountBeforeResize = 0;
+        lock (gate)
+        {
+            snapshotCountBeforeResize = messages.Count(msg => GetType(msg) == "term.snapshot");
+        }
 
         await hub.InvokeAsync("RequestResize", new { instanceId, cols = 100, rows = 30, reqId = "resize-test" });
 
@@ -123,13 +128,13 @@ public class GatewayApiTests
             TimeSpan.FromSeconds(8));
         Assert.Equal(100, ack.GetProperty("size").GetProperty("cols").GetInt32());
         Assert.Equal(30, ack.GetProperty("size").GetProperty("rows").GetInt32());
-
-        var resizedSnapshot = await WaitForMessageAsync(messages, gate,
-            msg => GetType(msg) == "term.snapshot" && msg.TryGetProperty("size", out var size)
-                && size.GetProperty("cols").GetInt32() == 100
-                && size.GetProperty("rows").GetInt32() == 30,
-            TimeSpan.FromSeconds(8));
-        Assert.Equal("term.snapshot", GetType(resizedSnapshot));
+        await Task.Delay(250);
+        var snapshotCountAfterResize = 0;
+        lock (gate)
+        {
+            snapshotCountAfterResize = messages.Count(msg => GetType(msg) == "term.snapshot");
+        }
+        Assert.Equal(snapshotCountBeforeResize, snapshotCountAfterResize);
 
         await hub.InvokeAsync("SendInput", new { instanceId, data = "echo raw-sync-check\r" });
         _ = await WaitForMessageAsync(messages, gate,

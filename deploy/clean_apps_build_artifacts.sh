@@ -3,18 +3,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-APPS_DIR="$REPO_ROOT/apps"
+TARGET_ROOT="$REPO_ROOT"
 DRY_RUN=false
 
 usage() {
   cat <<'EOF'
 Usage:
-  clean_apps_build_artifacts.sh [apps_dir] [--dry-run]
+  clean_apps_build_artifacts.sh [target_dir] [--dry-run]
 
 Examples:
   clean_apps_build_artifacts.sh
   clean_apps_build_artifacts.sh ../apps
-  clean_apps_build_artifacts.sh /home/yueyuan/pty-agent/apps --dry-run
+  clean_apps_build_artifacts.sh /home/yueyuan/pty-agent --dry-run
 EOF
 }
 
@@ -28,8 +28,8 @@ for arg in "$@"; do
       exit 0
       ;;
     *)
-      if [[ "$APPS_DIR" == "$REPO_ROOT/apps" ]]; then
-        APPS_DIR="$arg"
+      if [[ "$TARGET_ROOT" == "$REPO_ROOT" ]]; then
+        TARGET_ROOT="$arg"
       else
         echo "Unknown argument: $arg" >&2
         usage
@@ -39,20 +39,33 @@ for arg in "$@"; do
   esac
 done
 
-if [[ ! -d "$APPS_DIR" ]]; then
-  echo "Directory not found: $APPS_DIR" >&2
+if [[ ! -d "$TARGET_ROOT" ]]; then
+  echo "Directory not found: $TARGET_ROOT" >&2
   exit 1
 fi
 
-echo "Scanning: $APPS_DIR"
-echo "Targets: bin, obj, node_modules"
+echo "Scanning: $TARGET_ROOT"
+echo "Targets: bin, obj, node_modules, dist, coverage, TestResults, test-results, playwright-report, .vite, .turbo"
 if [[ "$DRY_RUN" == true ]]; then
   echo "Mode: dry-run (no files will be deleted)"
 fi
 
 mapfile -d '' TARGETS < <(
-  find "$APPS_DIR" -type d \
-    \( -name bin -o -name obj -o -name node_modules \) \
+  find "$TARGET_ROOT" \
+    \( -name .git -o -name .runtime \) -prune -o \
+    -type d \
+    \( \
+      -name bin -o \
+      -name obj -o \
+      -name node_modules -o \
+      -name dist -o \
+      -name coverage -o \
+      -name TestResults -o \
+      -name test-results -o \
+      -name playwright-report -o \
+      -name .vite -o \
+      -name .turbo \
+    \) \
     -prune -print0
 )
 

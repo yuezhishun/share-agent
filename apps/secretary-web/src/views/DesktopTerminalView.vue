@@ -1349,7 +1349,9 @@ onBeforeUnmount(() => {
   font-family: 'Inter', sans-serif;
   background-color: #1e1e1e;
   min-height: 100vh;
+  min-height: 100dvh;
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -2100,6 +2102,13 @@ button.primary:hover {
     flex-wrap: wrap;
   }
 
+  .toolbar-actions {
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
   .main {
     grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
   }
@@ -2117,8 +2126,38 @@ button.primary:hover {
 }
 
 @media (max-width: 820px) {
+  .app {
+    min-height: 100vh;
+    min-height: 100dvh;
+    height: auto;
+    overflow-y: auto;
+  }
+
+  .toolbar {
+    padding: 10px 12px;
+    gap: 10px;
+  }
+
+  .toolbar .logo {
+    font-size: 0.98rem;
+  }
+
+  .toolbar-actions {
+    justify-content: stretch;
+    gap: 6px;
+  }
+
+  .sidebar-toggle-btn {
+    flex: 1 1 0;
+    justify-content: center;
+    min-width: 0;
+  }
+
   .main {
-    grid-template-columns: 1fr;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: visible;
   }
 
   .left-sidebar,
@@ -2128,11 +2167,122 @@ button.primary:hover {
     border-left: none;
     border-top: none;
     border-bottom: 1px solid #3c3c3c;
-    max-height: 48vh;
+    max-height: none;
+    flex: 0 0 auto;
+  }
+
+  .left-sidebar {
+    min-height: 34dvh;
   }
 
   .terminal-panel {
-    min-height: 52vh;
+    flex: 0 0 auto;
+    min-height: 0;
+    min-height: 42dvh;
+    padding: 8px;
+  }
+
+  .right-sidebar {
+    min-height: 38dvh;
+    border-bottom: none;
+    border-top: 1px solid #3c3c3c;
+  }
+
+  .sidebar-section,
+  .file-browser-panel,
+  .shortcut-panel,
+  .terminal-viewport,
+  .editor-viewport,
+  .terminal-tabs,
+  .terminal-list,
+  .recipe-list,
+  .file-list {
+    min-height: 0;
+  }
+
+  .terminal-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .terminal-tabs,
+  .status-text,
+  .tab-btn {
+    max-width: 100%;
+  }
+
+  .tab-btn {
+    flex-shrink: 0;
+  }
+
+  .shortcut-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .shortcut-editor {
+    grid-template-columns: 1fr;
+  }
+
+  .recipe-editor-actions,
+  .editor-toolbar,
+  .right-tab-footer {
+    flex-wrap: wrap;
+  }
+
+  .editor-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .file-item,
+  .terminal-item,
+  .recipe-item {
+    margin-left: 6px;
+    margin-right: 6px;
+  }
+}
+
+@media (max-width: 640px) {
+  .left-sidebar {
+    min-height: 32dvh;
+  }
+
+  .terminal-panel {
+    min-height: 40dvh;
+  }
+
+  .right-sidebar {
+    min-height: 36dvh;
+  }
+
+  .sessions {
+    flex: 2;
+  }
+
+  .recipes {
+    flex: 3;
+  }
+
+  .section-header {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .terminal-item,
+  .recipe-item,
+  .file-item {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  .tab-btn {
+    padding: 4px 8px;
+  }
+
+  .path-breadcrumb {
+    width: 100%;
+    flex: 1 1 100%;
   }
 }
 

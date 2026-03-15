@@ -18,6 +18,12 @@
 dotnet run --project apps/terminal-gateway-dotnet/TerminalGateway.Api/TerminalGateway.Api.csproj
 ```
 
+### 1.1) 使用解决方案文件
+```bash
+dotnet sln apps/terminal-gateway-dotnet/TerminalGateway.sln list
+dotnet test apps/terminal-gateway-dotnet/TerminalGateway.sln -v minimal
+```
+
 ### 2) 运行 Web Console
 ```bash
 cd apps/secretary-web
@@ -31,7 +37,7 @@ npm run dev
 
 ### Dotnet Gateway
 ```bash
-dotnet test apps/terminal-gateway-dotnet/TerminalGateway.Api.Tests/TerminalGateway.Api.Tests.csproj -v minimal
+dotnet test apps/terminal-gateway-dotnet/TerminalGateway.sln -v minimal
 ```
 
 ### Web Console
@@ -45,6 +51,14 @@ npm run test:e2e
 - `deploy/docker-compose.yml`：MVP 仅包含 `terminal-gateway-dotnet + secretary-web + nginx`
 - `deploy/nginx.conf`：反向代理 `/web-pty/api/` 与 `/web-pty/hubs/`
 - `deploy/smoke.sh`：实例创建/列表/终止冒烟
+
+## 清理构建产物
+```bash
+./clean.sh
+./clean.sh --dry-run
+```
+
+默认会从仓库根目录扫描并删除 `bin`、`obj`、`node_modules`、`dist`、`coverage`、`TestResults`、`test-results`、`playwright-report`、`.vite`、`.turbo` 等构建产物目录。
 
 ## 文档
 - 当前有效：`docs/terminal-gateway-dotnet.md`、`docs/nginx-config-paths.md`

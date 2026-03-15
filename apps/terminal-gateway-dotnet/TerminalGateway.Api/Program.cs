@@ -26,14 +26,17 @@ builder.Services.AddSingleton<TerminalEventRelay>();
 builder.Services.AddSingleton<NodeRegistry>();
 builder.Services.AddSingleton<RemoteInstanceRegistry>();
 builder.Services.AddSingleton<ClusterCommandBroker>();
+builder.Services.AddSingleton<ClusterCommandExecutor>();
 builder.Services.AddSingleton<ClusterEventDeduplicator>();
 builder.Services.AddSingleton<FileApiService>();
 builder.Services.AddSingleton<ProjectApiService>();
+builder.Services.AddSingleton<ProcessApiService>();
 builder.Services.AddHostedService<SlaveClusterBridgeService>();
 
 var app = builder.Build();
 
 app.MapApiRoutes();
+app.MapProcessEndpoints();
 app.MapHub<TerminalHub>("/hubs/terminal");
 app.MapHub<ClusterHub>("/hubs/cluster");
 

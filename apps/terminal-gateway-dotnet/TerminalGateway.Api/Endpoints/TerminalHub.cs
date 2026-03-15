@@ -57,6 +57,11 @@ public sealed class TerminalHub : Hub
             throw new HubException("instance not found");
         }
 
+        if (IsLocalNode(nodeId))
+        {
+            throw new HubException("instance not found");
+        }
+
         var remoteSnapshot = await RequestRemoteSyncAsync(nodeId, instanceId, new TerminalSyncRequest { Type = "screen" }, Context.ConnectionAborted);
         if (remoteSnapshot.ValueKind == System.Text.Json.JsonValueKind.Object)
         {
@@ -99,6 +104,11 @@ public sealed class TerminalHub : Hub
                 throw new HubException("instance not found");
             }
 
+            if (IsLocalNode(nodeId))
+            {
+                throw new HubException("instance not found");
+            }
+
             var result = await _broker.SendAsync(nodeId, "instance.input", new
             {
                 instance_id = instanceId,
@@ -125,6 +135,11 @@ public sealed class TerminalHub : Hub
         if (resized is null)
         {
             if (!TryResolveRemoteNode(instanceId, out var nodeId))
+            {
+                throw new HubException("instance not found");
+            }
+
+            if (IsLocalNode(nodeId))
             {
                 throw new HubException("instance not found");
             }
@@ -196,6 +211,11 @@ public sealed class TerminalHub : Hub
                 throw new HubException("instance not found");
             }
 
+            if (IsLocalNode(nodeId))
+            {
+                throw new HubException("instance not found");
+            }
+
             var remoteRaw = await RequestRemoteSyncAsync(nodeId, instanceId, request, Context.ConnectionAborted);
             if (IsRawEvent(remoteRaw))
             {
@@ -220,6 +240,11 @@ public sealed class TerminalHub : Hub
                     throw new HubException("instance not found");
                 }
 
+                if (IsLocalNode(nodeId))
+                {
+                    throw new HubException("instance not found");
+                }
+
                 var remoteChunk = await RequestRemoteSyncAsync(nodeId, instanceId, request, Context.ConnectionAborted);
                 if (remoteChunk.ValueKind != System.Text.Json.JsonValueKind.Object)
                 {
@@ -237,6 +262,11 @@ public sealed class TerminalHub : Hub
         if (snapshot is null)
         {
             if (!TryResolveRemoteNode(instanceId, out var nodeId))
+            {
+                throw new HubException("instance not found");
+            }
+
+            if (IsLocalNode(nodeId))
             {
                 throw new HubException("instance not found");
             }
@@ -273,6 +303,11 @@ public sealed class TerminalHub : Hub
 
         nodeId = string.Empty;
         return false;
+    }
+
+    private bool IsLocalNode(string nodeId)
+    {
+        return string.Equals((nodeId ?? string.Empty).Trim(), _options.NodeId, StringComparison.Ordinal);
     }
 
     private async Task<System.Text.Json.JsonElement> RequestRemoteSyncAsync(string nodeId, string instanceId, TerminalSyncRequest request, CancellationToken cancellationToken)

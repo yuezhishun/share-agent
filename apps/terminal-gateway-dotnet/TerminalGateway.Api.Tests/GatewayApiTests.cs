@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.SignalR.Client;
@@ -34,6 +35,102 @@ public class GatewayApiTests
         Assert.Equal(HttpStatusCode.OK, projectsRes.StatusCode);
         var projects = JsonDocument.Parse(await projectsRes.Content.ReadAsStringAsync()).RootElement;
         Assert.Contains(projects.GetProperty("items").EnumerateArray(), x => x.GetProperty("name").GetString() == "alpha");
+    }
+
+    [Fact]
+    public async Task Process_Run_Endpoint_Works()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tg-process-run-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["FILES_BASE_PATH"] = tempDir
+        });
+        using var client = app.CreateClient();
+
+        var response = await client.PostAsJsonAsync("/api/processes/run", new
+        {
+            file = "sh",
+            args = new[] { "-c", "printf 'hello-process'" },
+            cwd = tempDir
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        Assert.True(payload.GetProperty("is_success").GetBoolean());
+        Assert.Equal(0, payload.GetProperty("exit_code").GetInt32());
+        Assert.Equal("hello-process", payload.GetProperty("standard_output").GetString());
+    }
+
+    [Fact]
+    public async Task Process_Pipeline_Run_Endpoint_Works()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tg-process-pipe-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["FILES_BASE_PATH"] = tempDir
+        });
+        using var client = app.CreateClient();
+
+        var response = await client.PostAsJsonAsync("/api/processes/run", new
+        {
+            file = "sh",
+            args = new[] { "-c", "printf 'alpha\\nbeta\\n'" },
+            cwd = tempDir,
+            pipeline = new object[]
+            {
+                new
+                {
+                    file = "wc",
+                    args = new[] { "-l" }
+                }
+            }
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        Assert.True(payload.GetProperty("is_success").GetBoolean());
+        Assert.Equal("2", (payload.GetProperty("standard_output").GetString() ?? string.Empty).Trim());
+    }
+
+    [Fact]
+    public async Task Managed_Process_Endpoints_Work()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tg-process-managed-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["FILES_BASE_PATH"] = tempDir
+        });
+        using var client = app.CreateClient();
+
+        var createResponse = await client.PostAsJsonAsync("/api/processes", new
+        {
+            file = "sh",
+            args = new[] { "-c", "echo start && sleep 0.2 && echo done" },
+            cwd = tempDir
+        });
+
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+        var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
+        var processId = created.GetProperty("process_id").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(processId));
+
+        var waitResponse = await client.PostAsync($"/api/processes/{processId}/wait?timeout_ms=5000", content: null);
+        Assert.Equal(HttpStatusCode.OK, waitResponse.StatusCode);
+        var waited = JsonDocument.Parse(await waitResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.True(waited.GetProperty("completed").GetBoolean());
+        Assert.Equal("completed", waited.GetProperty("status").GetString());
+        Assert.Contains("done", waited.GetProperty("result").GetProperty("standard_output").GetString() ?? string.Empty);
+
+        var outputResponse = await client.GetAsync($"/api/processes/{processId}/output");
+        Assert.Equal(HttpStatusCode.OK, outputResponse.StatusCode);
+        var outputPayload = JsonDocument.Parse(await outputResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.NotEmpty(outputPayload.GetProperty("items").EnumerateArray());
     }
 
     [Fact]
@@ -554,6 +651,231 @@ public class GatewayApiTests
 
         var deleteRes = await client.DeleteAsync($"/api/nodes/slave-1/instances/{instanceId}");
         Assert.Equal(HttpStatusCode.OK, deleteRes.StatusCode);
+    }
+
+    [Fact]
+    public async Task Slave_Node_Should_Request_Master_Create_And_Operate_Instance_Through_ClusterHub()
+    {
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-reverse-token",
+            ["NODE_ID"] = "master-reverse",
+            ["NODE_NAME"] = "Master Reverse"
+        });
+        using var client = app.CreateClient();
+
+        await using var slaveHub = BuildClusterHubConnection(client);
+        await slaveHub.StartAsync();
+        await slaveHub.InvokeAsync("RegisterNode", new
+        {
+            token = "cluster-reverse-token",
+            nodeId = "slave-origin",
+            nodeName = "Slave Origin",
+            instanceCount = 0
+        });
+
+        var createResult = await slaveHub.InvokeAsync<ClusterCommandResult>("RequestCommand", new
+        {
+            token = "cluster-reverse-token",
+            sourceNodeId = "slave-origin",
+            targetNodeId = "master-reverse",
+            type = "instance.create",
+            payload = new
+            {
+                command = "bash",
+                args = new[] { "-i" },
+                cols = 80,
+                rows = 25,
+                cwd = "/home/yueyuan"
+            }
+        });
+        Assert.True(createResult.Ok);
+        var instanceId = createResult.Payload.GetProperty("instance_id").GetString()!;
+        Assert.False(string.IsNullOrWhiteSpace(instanceId));
+        Assert.Equal("slave-origin", createResult.SourceNodeId);
+        Assert.Equal("master-reverse", createResult.TargetNodeId);
+
+        var inputResult = await slaveHub.InvokeAsync<ClusterCommandResult>("RequestCommand", new
+        {
+            token = "cluster-reverse-token",
+            sourceNodeId = "slave-origin",
+            targetNodeId = "master-reverse",
+            type = "instance.input",
+            payload = new { instance_id = instanceId, data = "echo reverse-path\r" }
+        });
+        Assert.True(inputResult.Ok);
+
+        var resizeResult = await slaveHub.InvokeAsync<ClusterCommandResult>("RequestCommand", new
+        {
+            token = "cluster-reverse-token",
+            sourceNodeId = "slave-origin",
+            targetNodeId = "master-reverse",
+            type = "instance.resize",
+            payload = new { instance_id = instanceId, cols = 100, rows = 30 }
+        });
+        Assert.True(resizeResult.Ok);
+
+        var syncResult = await slaveHub.InvokeAsync<ClusterCommandResult>("RequestCommand", new
+        {
+            token = "cluster-reverse-token",
+            sourceNodeId = "slave-origin",
+            targetNodeId = "master-reverse",
+            type = "instance.sync",
+            payload = new { instance_id = instanceId, type = "screen" }
+        });
+        Assert.True(syncResult.Ok);
+        Assert.Equal("term.snapshot", syncResult.Payload.GetProperty("type").GetString());
+        Assert.Equal("master-reverse", syncResult.Payload.GetProperty("node_id").GetString());
+        Assert.Equal("Master Reverse", syncResult.Payload.GetProperty("node_name").GetString());
+
+        var terminateResult = await slaveHub.InvokeAsync<ClusterCommandResult>("RequestCommand", new
+        {
+            token = "cluster-reverse-token",
+            sourceNodeId = "slave-origin",
+            targetNodeId = "master-reverse",
+            type = "instance.terminate",
+            payload = new { instance_id = instanceId }
+        });
+        Assert.True(terminateResult.Ok);
+
+        await Task.Delay(250);
+        var instancesPayload = JsonDocument.Parse(await client.GetStringAsync("/api/instances")).RootElement;
+        Assert.DoesNotContain(instancesPayload.GetProperty("items").EnumerateArray(), item => item.GetProperty("id").GetString() == instanceId);
+    }
+
+    [Fact]
+    public async Task TerminalHub_Should_Route_For_SlaveRequested_MasterInstance()
+    {
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-reverse-terminal-token",
+            ["NODE_ID"] = "master-join",
+            ["NODE_NAME"] = "Master Join"
+        });
+        using var client = app.CreateClient();
+
+        await using var slaveHub = BuildClusterHubConnection(client);
+        await slaveHub.StartAsync();
+        await slaveHub.InvokeAsync("RegisterNode", new
+        {
+            token = "cluster-reverse-terminal-token",
+            nodeId = "slave-join",
+            nodeName = "Slave Join",
+            instanceCount = 0
+        });
+
+        var createResult = await slaveHub.InvokeAsync<ClusterCommandResult>("RequestCommand", new
+        {
+            token = "cluster-reverse-terminal-token",
+            sourceNodeId = "slave-join",
+            targetNodeId = "master-join",
+            type = "instance.create",
+            payload = new
+            {
+                command = "bash",
+                args = new[] { "-i" },
+                cols = 80,
+                rows = 25,
+                cwd = "/home/yueyuan"
+            }
+        });
+        Assert.True(createResult.Ok);
+        var instanceId = createResult.Payload.GetProperty("instance_id").GetString()!;
+
+        await using var terminalHub = BuildHubConnection(client);
+        List<JsonElement> messages = [];
+        var gate = new object();
+        terminalHub.On<JsonElement>("TerminalEvent", msg =>
+        {
+            lock (gate)
+            {
+                messages.Add(msg.Clone());
+            }
+        });
+
+        await terminalHub.StartAsync();
+        await terminalHub.InvokeAsync("JoinInstance", new { instanceId });
+        var snapshot = await WaitForMessageAsync(messages, gate, msg => GetType(msg) == "term.snapshot", TimeSpan.FromSeconds(8));
+        Assert.Equal("master-join", snapshot.GetProperty("node_id").GetString());
+        Assert.Equal("Master Join", snapshot.GetProperty("node_name").GetString());
+
+        await terminalHub.InvokeAsync("SendInput", new { instanceId, data = "echo reverse-terminal\r" });
+        var raw = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.raw" && JsonSerializer.Serialize(msg).Contains("reverse-terminal", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(8));
+        Assert.Equal("master-join", raw.GetProperty("node_id").GetString());
+
+        await terminalHub.InvokeAsync("RequestResize", new { instanceId, cols = 110, rows = 35, reqId = "reverse-resize" });
+        var ack = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.resize.ack" && GetString(msg, "req_id") == "reverse-resize",
+            TimeSpan.FromSeconds(8));
+        Assert.Equal("master-join", ack.GetProperty("node_id").GetString());
+
+        await slaveHub.InvokeAsync<ClusterCommandResult>("RequestCommand", new
+        {
+            token = "cluster-reverse-terminal-token",
+            sourceNodeId = "slave-join",
+            targetNodeId = "master-join",
+            type = "instance.terminate",
+            payload = new { instance_id = instanceId }
+        });
+
+        var ex = await Assert.ThrowsAsync<HubException>(() => terminalHub.InvokeAsync("RequestSync", new { instanceId, type = "screen" }));
+        Assert.Contains("instance not found", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Reverse_Cluster_Command_Should_Reject_Unregistered_Or_Mismatched_Slave()
+    {
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-reverse-auth-token",
+            ["NODE_ID"] = "master-auth",
+            ["NODE_NAME"] = "Master Auth"
+        });
+        using var client = app.CreateClient();
+
+        await using var unknownHub = BuildClusterHubConnection(client);
+        await unknownHub.StartAsync();
+        var unregistered = await Assert.ThrowsAsync<HubException>(() => unknownHub.InvokeAsync<ClusterCommandResult>("RequestCommand", new
+        {
+            token = "cluster-reverse-auth-token",
+            sourceNodeId = "slave-unknown",
+            targetNodeId = "master-auth",
+            type = "instance.create",
+            payload = new { command = "bash", args = new[] { "-i" }, cwd = "/home/yueyuan" }
+        }));
+        Assert.Contains("source node mismatch", unregistered.Message, StringComparison.Ordinal);
+
+        await using var registeredHub = BuildClusterHubConnection(client);
+        await registeredHub.StartAsync();
+        await registeredHub.InvokeAsync("RegisterNode", new
+        {
+            token = "cluster-reverse-auth-token",
+            nodeId = "slave-auth",
+            nodeName = "Slave Auth",
+            instanceCount = 0
+        });
+
+        var mismatched = await Assert.ThrowsAsync<HubException>(() => registeredHub.InvokeAsync<ClusterCommandResult>("RequestCommand", new
+        {
+            token = "cluster-reverse-auth-token",
+            sourceNodeId = "slave-other",
+            targetNodeId = "master-auth",
+            type = "instance.create",
+            payload = new { command = "bash", args = new[] { "-i" }, cwd = "/home/yueyuan" }
+        }));
+        Assert.Contains("source node mismatch", mismatched.Message, StringComparison.Ordinal);
+
+        var badToken = await Assert.ThrowsAsync<HubException>(() => registeredHub.InvokeAsync<ClusterCommandResult>("RequestCommand", new
+        {
+            token = "bad-token",
+            sourceNodeId = "slave-auth",
+            targetNodeId = "master-auth",
+            type = "instance.create",
+            payload = new { command = "bash", args = new[] { "-i" }, cwd = "/home/yueyuan" }
+        }));
+        Assert.Contains("unauthorized cluster token", badToken.Message, StringComparison.Ordinal);
     }
 
     [Fact]

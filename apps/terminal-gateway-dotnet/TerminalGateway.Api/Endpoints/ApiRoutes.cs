@@ -165,6 +165,196 @@ public static class ApiRoutes
             }
         });
 
+        app.MapPost("/api/nodes/{nodeId}/processes/run", async (string nodeId, RunProcessRequest body, ProcessApiService processes, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        {
+            if (IsLocalNode(nodeId, options))
+            {
+                try
+                {
+                    return Results.Ok(await processes.RunAsync(body, ct));
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    return Results.Json(new { error = ex.Message, node_id = nodeId }, statusCode: StatusCodes.Status403Forbidden);
+                }
+                catch (Exception ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message, node_id = nodeId });
+                }
+            }
+
+            try
+            {
+                var result = await broker.SendAsync(nodeId, "process.run", body, ct);
+                return result.Ok
+                    ? Results.Ok(result.Payload)
+                    : Results.BadRequest(new { error = result.Error ?? "remote process run failed", node_id = nodeId });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId });
+            }
+        });
+
+        app.MapPost("/api/nodes/{nodeId}/processes", async (string nodeId, RunProcessRequest body, ProcessApiService processes, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        {
+            if (IsLocalNode(nodeId, options))
+            {
+                try
+                {
+                    return Results.Ok(await processes.StartManagedAsync(body, ct));
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    return Results.Json(new { error = ex.Message, node_id = nodeId }, statusCode: StatusCodes.Status403Forbidden);
+                }
+                catch (Exception ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message, node_id = nodeId });
+                }
+            }
+
+            try
+            {
+                var result = await broker.SendAsync(nodeId, "process.start", body, ct);
+                return result.Ok
+                    ? Results.Ok(result.Payload)
+                    : Results.BadRequest(new { error = result.Error ?? "remote process start failed", node_id = nodeId });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId });
+            }
+        });
+
+        app.MapGet("/api/nodes/{nodeId}/processes", async (string nodeId, ProcessApiService processes, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        {
+            if (IsLocalNode(nodeId, options))
+            {
+                return Results.Ok(new { items = processes.ListManaged() });
+            }
+
+            try
+            {
+                var result = await broker.SendAsync(nodeId, "process.list", new { }, ct);
+                return result.Ok
+                    ? Results.Ok(result.Payload)
+                    : Results.BadRequest(new { error = result.Error ?? "remote process list failed", node_id = nodeId });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId });
+            }
+        });
+
+        app.MapGet("/api/nodes/{nodeId}/processes/{processId}", async (string nodeId, string processId, ProcessApiService processes, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        {
+            if (IsLocalNode(nodeId, options))
+            {
+                try
+                {
+                    return Results.Ok(processes.GetManaged(processId));
+                }
+                catch (Exception ex)
+                {
+                    return Results.NotFound(new { error = ex.Message, node_id = nodeId, process_id = processId });
+                }
+            }
+
+            try
+            {
+                var result = await broker.SendAsync(nodeId, "process.get", new { process_id = processId }, ct);
+                return result.Ok
+                    ? Results.Ok(result.Payload)
+                    : Results.NotFound(new { error = result.Error ?? "remote process not found", node_id = nodeId, process_id = processId });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, process_id = processId });
+            }
+        });
+
+        app.MapGet("/api/nodes/{nodeId}/processes/{processId}/output", async (string nodeId, string processId, ProcessApiService processes, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        {
+            if (IsLocalNode(nodeId, options))
+            {
+                try
+                {
+                    return Results.Ok(new { items = processes.GetOutput(processId) });
+                }
+                catch (Exception ex)
+                {
+                    return Results.NotFound(new { error = ex.Message, node_id = nodeId, process_id = processId });
+                }
+            }
+
+            try
+            {
+                var result = await broker.SendAsync(nodeId, "process.output", new { process_id = processId }, ct);
+                return result.Ok
+                    ? Results.Ok(result.Payload)
+                    : Results.NotFound(new { error = result.Error ?? "remote process output not found", node_id = nodeId, process_id = processId });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, process_id = processId });
+            }
+        });
+
+        app.MapPost("/api/nodes/{nodeId}/processes/{processId}/wait", async (string nodeId, string processId, int? timeout_ms, ProcessApiService processes, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        {
+            if (IsLocalNode(nodeId, options))
+            {
+                try
+                {
+                    return Results.Ok(await processes.WaitManagedAsync(processId, timeout_ms));
+                }
+                catch (Exception ex)
+                {
+                    return Results.NotFound(new { error = ex.Message, node_id = nodeId, process_id = processId });
+                }
+            }
+
+            try
+            {
+                var result = await broker.SendAsync(nodeId, "process.wait", new { process_id = processId, timeout_ms }, ct);
+                return result.Ok
+                    ? Results.Ok(result.Payload)
+                    : Results.NotFound(new { error = result.Error ?? "remote process wait failed", node_id = nodeId, process_id = processId });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, process_id = processId });
+            }
+        });
+
+        app.MapPost("/api/nodes/{nodeId}/processes/{processId}/stop", async (string nodeId, string processId, StopManagedProcessRequest body, ProcessApiService processes, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        {
+            if (IsLocalNode(nodeId, options))
+            {
+                try
+                {
+                    return Results.Ok(await processes.StopManagedAsync(processId, body.Force == true));
+                }
+                catch (Exception ex)
+                {
+                    return Results.NotFound(new { error = ex.Message, node_id = nodeId, process_id = processId });
+                }
+            }
+
+            try
+            {
+                var result = await broker.SendAsync(nodeId, "process.stop", new { process_id = processId, force = body.Force == true }, ct);
+                return result.Ok
+                    ? Results.Ok(result.Payload)
+                    : Results.NotFound(new { error = result.Error ?? "remote process stop failed", node_id = nodeId, process_id = processId });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, process_id = processId });
+            }
+        });
+
         app.MapPost("/api/nodes/{nodeId}/files/upload", async (HttpRequest request, string nodeId, InstanceManager manager, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
         {
             if (!request.HasFormContentType)

@@ -276,11 +276,6 @@ namespace ProcessRunner
         /// </summary>
         public async Task<ProcessResult> ExecuteAsync(Encoding encoding, CancellationToken cancellationToken = default)
         {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-
-            if (_command.Timeout != System.Threading.Timeout.InfiniteTimeSpan)
-                cts.CancelAfter(_command.Timeout);
-
             // 创建进程
             var process = CreateProcess();
             
@@ -292,15 +287,15 @@ namespace ProcessRunner
                 // 如果有标准输入数据或流，则异步写入
                 if (_command.StandardInputPipe != null)
                 {
-                    await WritePipeSourceAsync(process.StandardInput.BaseStream, _command.StandardInputPipe, cts.Token);
+                    await WritePipeSourceAsync(process.StandardInput.BaseStream, _command.StandardInputPipe, cancellationToken);
                 }
                 else if (_command.StandardInputStream != null)
                 {
-                    await WriteInputStreamAsync(process.StandardInput, _command.StandardInputStream, cts.Token);
+                    await WriteInputStreamAsync(process.StandardInput, _command.StandardInputStream, cancellationToken);
                 }
                 else if (_command.StandardInput != null)
                 {
-                    await WriteInputAsync(process.StandardInput, _command.StandardInput, cts.Token);
+                    await WriteInputAsync(process.StandardInput, _command.StandardInput, cancellationToken);
                 }
 
                 // 更新上下文
@@ -321,27 +316,47 @@ namespace ProcessRunner
                 if (_command.StandardOutputTarget != null)
                 {
                     // 使用 PipeTarget 处理输出
-                    outputTask = ReadOutputToTargetAsync(process.StandardOutput.BaseStream, _command.StandardOutputTarget, cts.Token);
+                    outputTask = ReadOutputToTargetAsync(process.StandardOutput.BaseStream, _command.StandardOutputTarget, cancellationToken);
                 }
                 else
                 {
                     // 默认行为：缓冲输出
-                    outputTask = ReadOutputAsync(process.StandardOutput, encoding, cts.Token);
+                    outputTask = ReadOutputAsync(process.StandardOutput, encoding, cancellationToken);
                 }
 
                 if (_command.StandardErrorTarget != null)
                 {
                     // 使用 PipeTarget 处理错误
-                    errorTask = ReadOutputToTargetAsync(process.StandardError.BaseStream, _command.StandardErrorTarget, cts.Token);
+                    errorTask = ReadOutputToTargetAsync(process.StandardError.BaseStream, _command.StandardErrorTarget, cancellationToken);
                 }
                 else
                 {
                     // 默认行为：缓冲错误
-                    errorTask = ReadErrorAsync(process.StandardError, encoding, cts.Token);
+                    errorTask = ReadErrorAsync(process.StandardError, encoding, cancellationToken);
                 }
 
-                // 等待进程退出
-                await process.WaitForExitAsync(cts.Token);
+                var processExitTask = process.WaitForExitAsync(cancellationToken);
+                var timeoutTask = WaitForTimeoutAsync(cancellationToken);
+                var completedTask = await Task.WhenAny(processExitTask, timeoutTask);
+
+                if (completedTask == timeoutTask && await timeoutTask)
+                {
+                    KillProcess(process);
+                    await process.WaitForExitAsync(CancellationToken.None);
+                    _command.Context.MarkTimedOut();
+
+                    var timeoutMessage = $"Command timed out after {_command.Timeout.TotalSeconds} seconds";
+                    TriggerTimeoutListeners(timeoutMessage);
+                    TriggerEventListeners(new ProcessTimeoutEvent
+                    {
+                        Message = timeoutMessage,
+                        Context = _command.Context.CreateSnapshot()
+                    });
+
+                    throw new TimeoutException(timeoutMessage);
+                }
+
+                await processExitTask;
 
                 // 等待输出读取完成
                 var output = await outputTask;
@@ -376,28 +391,7 @@ namespace ProcessRunner
             }
             catch (OperationCanceledException)
             {
-                if (!cts.Token.IsCancellationRequested)
-                {
-                    // 超时
-                    try
-                    {
-                        process.Kill();
-                    }
-                    catch { /* 忽略Kill错误 */ }
-
-                    // 更新上下文
-                    _command.Context.MarkTimedOut();
-
-                    var timeoutMessage = $"Command timed out after {_command.Timeout.TotalSeconds} seconds";
-                    TriggerTimeoutListeners(timeoutMessage);
-                    TriggerEventListeners(new ProcessTimeoutEvent
-                    {
-                        Message = timeoutMessage,
-                        Context = _command.Context.CreateSnapshot()
-                    });
-
-                    throw new TimeoutException(timeoutMessage);
-                }
+                KillProcess(process);
                 throw;
             }
         }
@@ -590,6 +584,53 @@ namespace ProcessRunner
                     $"Command execution failed with exit code {result.ExitCode}. " +
                     $"Command: {_command.GetFullCommandLine()}",
                     result);
+            }
+        }
+
+        private async Task<bool> WaitForTimeoutAsync(CancellationToken cancellationToken)
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                if (!_command.Context.TryGetTimeoutDeadline(out var deadlineUtc))
+                {
+                    return false;
+                }
+
+                var remaining = deadlineUtc - DateTime.UtcNow;
+                if (remaining <= TimeSpan.Zero)
+                {
+                    return true;
+                }
+
+                var delay = remaining < TimeSpan.FromMilliseconds(50)
+                    ? remaining
+                    : TimeSpan.FromMilliseconds(50);
+
+                try
+                {
+                    await Task.Delay(delay, cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        private static void KillProcess(Process process)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+                // 忽略终止时的错误
             }
         }
 

@@ -7,16 +7,19 @@ namespace TerminalGateway.Api.Services;
 public sealed class ClusterCommandExecutor
 {
     private static readonly JsonSerializerOptions CaseInsensitiveJson = new() { PropertyNameCaseInsensitive = true };
+    private static readonly JsonSerializerOptions ClusterJson = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
     private readonly GatewayOptions _options;
     private readonly InstanceManager _instances;
     private readonly FileApiService _files;
+    private readonly ProcessApiService _processes;
 
-    public ClusterCommandExecutor(GatewayOptions options, InstanceManager instances, FileApiService files)
+    public ClusterCommandExecutor(GatewayOptions options, InstanceManager instances, FileApiService files, ProcessApiService processes)
     {
         _options = options;
         _instances = instances;
         _files = files;
+        _processes = processes;
     }
 
     public async Task<ClusterCommandResult> ExecuteAsync(ClusterCommandEnvelope command, CancellationToken cancellationToken)
@@ -143,6 +146,60 @@ public sealed class ClusterCommandExecutor
                     var uploaded = await _files.SaveUploadBytesAsync(_options.FilesBasePath, state.Cwd, fileName, bytes, cancellationToken);
                     return Ok(command, uploaded);
                 }
+                case "process.run":
+                {
+                    var request = command.Payload.Deserialize<RunProcessRequest>(CaseInsensitiveJson) ?? new RunProcessRequest();
+                    return Ok(command, await _processes.RunAsync(request, cancellationToken));
+                }
+                case "process.start":
+                {
+                    var request = command.Payload.Deserialize<RunProcessRequest>(CaseInsensitiveJson) ?? new RunProcessRequest();
+                    return Ok(command, await _processes.StartManagedAsync(request, cancellationToken));
+                }
+                case "process.list":
+                    return Ok(command, new { items = _processes.ListManaged() });
+                case "process.get":
+                {
+                    var processId = ReadString(command.Payload, "process_id") ?? ReadString(command.Payload, "processId");
+                    if (string.IsNullOrWhiteSpace(processId))
+                    {
+                        return Fail(command, "process_id is required");
+                    }
+
+                    return Ok(command, _processes.GetManaged(processId));
+                }
+                case "process.output":
+                {
+                    var processId = ReadString(command.Payload, "process_id") ?? ReadString(command.Payload, "processId");
+                    if (string.IsNullOrWhiteSpace(processId))
+                    {
+                        return Fail(command, "process_id is required");
+                    }
+
+                    return Ok(command, new { items = _processes.GetOutput(processId) });
+                }
+                case "process.wait":
+                {
+                    var processId = ReadString(command.Payload, "process_id") ?? ReadString(command.Payload, "processId");
+                    if (string.IsNullOrWhiteSpace(processId))
+                    {
+                        return Fail(command, "process_id is required");
+                    }
+
+                    var timeoutMs = ReadNullableInt(command.Payload, "timeout_ms") ?? ReadNullableInt(command.Payload, "timeoutMs");
+                    return Ok(command, await _processes.WaitManagedAsync(processId, timeoutMs));
+                }
+                case "process.stop":
+                {
+                    var processId = ReadString(command.Payload, "process_id") ?? ReadString(command.Payload, "processId");
+                    if (string.IsNullOrWhiteSpace(processId))
+                    {
+                        return Fail(command, "process_id is required");
+                    }
+
+                    var body = command.Payload.Deserialize<StopManagedProcessRequest>(CaseInsensitiveJson) ?? new StopManagedProcessRequest();
+                    return Ok(command, await _processes.StopManagedAsync(processId, body.Force == true));
+                }
                 default:
                     return Fail(command, $"unsupported command: {command.Type}");
             }
@@ -162,7 +219,7 @@ public sealed class ClusterCommandExecutor
             SourceNodeId = NormalizeSourceNodeId(command),
             TargetNodeId = NormalizeTargetNodeId(command),
             Ok = true,
-            Payload = JsonSerializer.SerializeToElement(payload)
+            Payload = JsonSerializer.SerializeToElement(payload, ClusterJson)
         };
     }
 
@@ -176,7 +233,7 @@ public sealed class ClusterCommandExecutor
             TargetNodeId = NormalizeTargetNodeId(command),
             Ok = false,
             Error = error,
-            Payload = JsonSerializer.SerializeToElement(new { })
+            Payload = JsonSerializer.SerializeToElement(new { }, ClusterJson)
         };
     }
 
@@ -208,5 +265,14 @@ public sealed class ClusterCommandExecutor
             && prop.ValueKind == JsonValueKind.Number
             ? prop.GetInt32()
             : 0;
+    }
+
+    private static int? ReadNullableInt(JsonElement payload, string name)
+    {
+        return payload.ValueKind == JsonValueKind.Object
+            && payload.TryGetProperty(name, out var prop)
+            && prop.ValueKind == JsonValueKind.Number
+            ? prop.GetInt32()
+            : null;
     }
 }

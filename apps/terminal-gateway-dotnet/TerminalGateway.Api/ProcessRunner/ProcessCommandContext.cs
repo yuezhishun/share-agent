@@ -15,38 +15,52 @@ namespace ProcessRunner
         /// <summary>
         /// 目标程序路径
         /// </summary>
-        public string Target { get; init; } = string.Empty;
+        public string Target => _command.Target;
 
         /// <summary>
         /// 命令行参数列表
         /// </summary>
-        public IReadOnlyList<string> Arguments { get; init; } = Array.Empty<string>();
+        public IReadOnlyList<string> Arguments => _command.Arguments;
 
         /// <summary>
         /// 工作目录
         /// </summary>
-        public string WorkingDirectory { get; init; } = Environment.CurrentDirectory;
+        public string WorkingDirectory => _command.WorkingDirectory;
 
         /// <summary>
         /// 环境变量字典
         /// </summary>
-        public IReadOnlyDictionary<string, string> EnvironmentVariables { get; init; }
-            = new Dictionary<string, string>();
+        public IReadOnlyDictionary<string, string> EnvironmentVariables => _command.EnvironmentVariables;
 
         /// <summary>
         /// 基础超时时间
         /// </summary>
-        public TimeSpan Timeout { get; init; } = System.Threading.Timeout.InfiniteTimeSpan;
+        public TimeSpan Timeout => _command.Timeout;
 
         /// <summary>
         /// 当前有效的超时时间（包含动态修改）
         /// </summary>
-        public TimeSpan CurrentTimeout => _dynamicTimeout != default ? _dynamicTimeout : Timeout;
+        public TimeSpan CurrentTimeout
+        {
+            get
+            {
+                lock (_timeoutLock)
+                {
+                    if (_timeoutDeadlineUtc.HasValue)
+                    {
+                        var remaining = _timeoutDeadlineUtc.Value - DateTime.UtcNow;
+                        return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+                    }
+
+                    return _dynamicTimeout != default ? _dynamicTimeout : Timeout;
+                }
+            }
+        }
 
         /// <summary>
         /// 是否使用逐字命令行
         /// </summary>
-        public bool VerbatimCommandLine { get; init; } = true;
+        public bool VerbatimCommandLine => _command.VerbatimCommandLine;
 
         #endregion
 
@@ -146,21 +160,20 @@ namespace ProcessRunner
         /// <summary>
         /// 从 ProcessCommand 创建上下文
         /// </summary>
+        private readonly ProcessCommand _command;
+
         internal ProcessCommandContext(ProcessCommand command)
         {
-            Target = command.Target;
-            Arguments = command.Arguments;
-            WorkingDirectory = command.WorkingDirectory;
-            EnvironmentVariables = new Dictionary<string, string>(command.EnvironmentVariables);
-            Timeout = command.Timeout;
-            VerbatimCommandLine = command.VerbatimCommandLine;
+            _command = command ?? throw new ArgumentNullException(nameof(command));
         }
 
         #endregion
 
         #region 动态修改方法
 
+        private readonly object _timeoutLock = new();
         private TimeSpan _dynamicTimeout;
+        private DateTime? _timeoutDeadlineUtc;
 
         /// <summary>
         /// 动态修改超时时间
@@ -171,7 +184,13 @@ namespace ProcessRunner
         {
             if (IsExited) return false;
 
-            _dynamicTimeout = newTimeout;
+            lock (_timeoutLock)
+            {
+                _dynamicTimeout = newTimeout;
+                _timeoutDeadlineUtc = newTimeout == System.Threading.Timeout.InfiniteTimeSpan
+                    ? null
+                    : DateTime.UtcNow.Add(newTimeout);
+            }
             return true;
         }
 
@@ -246,6 +265,14 @@ namespace ProcessRunner
             IsStarted = true;
             StartTime = DateTime.UtcNow;
             LastActivityTime = DateTime.UtcNow;
+
+            lock (_timeoutLock)
+            {
+                var effectiveTimeout = _dynamicTimeout != default ? _dynamicTimeout : Timeout;
+                _timeoutDeadlineUtc = effectiveTimeout == System.Threading.Timeout.InfiniteTimeSpan
+                    ? null
+                    : DateTime.UtcNow.Add(effectiveTimeout);
+            }
         }
 
         /// <summary>
@@ -256,6 +283,11 @@ namespace ProcessRunner
             ExitCode = exitCode;
             IsExited = true;
             ExitTime = DateTime.UtcNow;
+
+            lock (_timeoutLock)
+            {
+                _timeoutDeadlineUtc = null;
+            }
         }
 
         /// <summary>
@@ -267,6 +299,26 @@ namespace ProcessRunner
             ExitCode = -1;
             IsExited = true;
             ExitTime = DateTime.UtcNow;
+
+            lock (_timeoutLock)
+            {
+                _timeoutDeadlineUtc = null;
+            }
+        }
+
+        internal bool TryGetTimeoutDeadline(out DateTime deadlineUtc)
+        {
+            lock (_timeoutLock)
+            {
+                if (_timeoutDeadlineUtc.HasValue)
+                {
+                    deadlineUtc = _timeoutDeadlineUtc.Value;
+                    return true;
+                }
+            }
+
+            deadlineUtc = default;
+            return false;
         }
 
         /// <summary>

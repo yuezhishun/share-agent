@@ -5,6 +5,7 @@ export function installMockRuntime(page) {
       invokes: [],
       wsInputs: [],
       resizeRequests: [],
+      joinedInstanceIds: [],
       instances: [
         {
           id: 'mock-1',
@@ -234,6 +235,28 @@ export function installMockRuntime(page) {
       };
     }
 
+    function emitServerRaw(instanceId, data) {
+      const id = String(instanceId || 'mock-1');
+      const screen = getScreen(id);
+      const seq = pushRaw(screen, data);
+      if (!seq) {
+        return null;
+      }
+      const raw = {
+        v: 1,
+        type: 'term.raw',
+        instance_id: id,
+        replay: false,
+        seq,
+        ts: Date.now(),
+        data: String(data || '')
+      };
+      state.hubConnection?.emit('TerminalEvent', raw);
+      return raw;
+    }
+
+    state.emitServerRaw = emitServerRaw;
+
     class MockHubConnection {
       constructor() {
         this.handlers = new Map();
@@ -303,7 +326,20 @@ export function installMockRuntime(page) {
 
         if (method === 'JoinInstance') {
           this.instanceId = String(payload.instanceId || 'mock-1');
+          if (!state.joinedInstanceIds.includes(this.instanceId)) {
+            state.joinedInstanceIds.push(this.instanceId);
+          }
           this.emit('TerminalEvent', toSnapshot(this.instanceId));
+          return;
+        }
+
+        if (method === 'LeaveInstance') {
+          const id = String(payload.instanceId || '').trim();
+          if (id) {
+            state.joinedInstanceIds = state.joinedInstanceIds.filter((item) => item !== id);
+          } else {
+            state.joinedInstanceIds = [];
+          }
           return;
         }
 
@@ -351,7 +387,6 @@ export function installMockRuntime(page) {
             size: { cols: screen.cols, rows: screen.rows },
             ts: Date.now()
           });
-          this.emit('TerminalEvent', toSnapshot(id));
         }
       }
     }

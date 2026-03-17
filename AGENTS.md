@@ -2,7 +2,6 @@
 
 ## Project Structure & Module Organization
 This repository is a multi-app monorepo:
-- `apps/terminal-gateway`: Fastify + `node-pty` terminal gateway (`src/`, `test/`).
 - `apps/terminal-gateway-dotnet/TerminalGateway.Api`: .NET terminal gateway API.
 - `apps/terminal-gateway-dotnet/TerminalGateway.Api.Tests`: xUnit tests for dotnet terminal gateway.
 - `apps/secretary-web`: Vue 3 + Vite console (`src/components`, `src/views`, `src/stores`).
@@ -10,8 +9,6 @@ This repository is a multi-app monorepo:
 - `docs/`: architecture and implementation plans.
 
 ## Build, Test, and Development Commands
-- `cd apps/terminal-gateway && npm install && npm start`: run terminal gateway.
-- `cd apps/terminal-gateway && npm test`: run Node test suite (`node --test`).
 - `dotnet run --project apps/terminal-gateway-dotnet/TerminalGateway.Api/TerminalGateway.Api.csproj`: run dotnet terminal gateway.
 - `dotnet test apps/terminal-gateway-dotnet/TerminalGateway.Api.Tests/TerminalGateway.Api.Tests.csproj -v minimal`: run dotnet gateway tests.
 - `cd apps/secretary-web && npm install && npm run dev`: run web console in dev mode.
@@ -27,13 +24,12 @@ This repository is a multi-app monorepo:
 
 ## Testing Guidelines
 - .NET tests use xUnit with `[Fact]` and method names like `Feature_ShouldExpectedBehavior`.
-- Gateway tests use `node:test` with descriptive sentence-style names.
 - Add or update tests for behavior changes in the same app you modify.
-- Run targeted tests before PR, then run full .NET and gateway suites.
+- Run targeted tests before PR, then run full .NET suites.
 
 ## Commit & Pull Request Guidelines
 - Current history uses concise imperative commit subjects (for example `Initial commit`). Continue with short, action-first messages.
-- PRs should include: purpose, scope, affected apps (`terminal-gateway`, `terminal-gateway-dotnet`, `secretary-web`), test evidence, and config changes.
+- PRs should include: purpose, scope, affected apps (`terminal-gateway-dotnet`, `secretary-web`), test evidence, and config changes.
 - Link related issues/tasks and include UI screenshots for web-console changes.
 
 ## Security & Configuration Tips

@@ -22,7 +22,9 @@ public sealed class ClusterHeartbeatRequest
 public sealed class ClusterCommandEnvelope
 {
     public required string CommandId { get; set; }
-    public required string NodeId { get; set; }
+    public string? NodeId { get; set; }
+    public string? SourceNodeId { get; set; }
+    public string? TargetNodeId { get; set; }
     public required string Type { get; set; }
     public JsonElement Payload { get; set; }
 }
@@ -30,9 +32,21 @@ public sealed class ClusterCommandEnvelope
 public sealed class ClusterCommandResult
 {
     public required string CommandId { get; set; }
-    public required string NodeId { get; set; }
+    public string? NodeId { get; set; }
+    public string? SourceNodeId { get; set; }
+    public string? TargetNodeId { get; set; }
     public required bool Ok { get; set; }
     public string? Error { get; set; }
+    public JsonElement Payload { get; set; }
+}
+
+public sealed class ClusterProxyCommandRequest
+{
+    public string? Token { get; set; }
+    public string? CommandId { get; set; }
+    public string? SourceNodeId { get; set; }
+    public string? TargetNodeId { get; set; }
+    public string? Type { get; set; }
     public JsonElement Payload { get; set; }
 }
 

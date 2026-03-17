@@ -30,6 +30,7 @@ dotnet test apps/terminal-gateway-dotnet/TerminalGateway.Api.Tests/TerminalGatew
 - Resize ACK + Snapshot 同步（RequestResize）
 - 手动同步（RequestSync: screen/history）
 - 文件接口与实例退出回收
+- 进程执行接口（`/api/processes/run`、托管进程启动/等待/输出）
 
 ## 5. 环境变量
 与 Node 网关对齐的主要变量：
@@ -40,9 +41,26 @@ dotnet test apps/terminal-gateway-dotnet/TerminalGateway.Api.Tests/TerminalGatew
 - `TERMINAL_PROFILE_STORE_FILE`
 - `TERMINAL_SETTINGS_STORE_FILE`
 - `TERMINAL_MAX_OUTPUT_BUFFER_BYTES`
+- `TERMINAL_PROCESS_MANAGER_MAX_CONCURRENCY`
 - `TERMINAL_CODEX_CONFIG_PATH`
 - `TERMINAL_CLAUDE_CONFIG_PATH`
+- `TERMINAL_PATH_PREFIXES`（逗号分隔；用于补齐 PTY 子进程 `PATH` 前缀，如 Node/Codex 安装目录）
 - `TERMINAL_FS_ALLOWED_ROOTS`
+
+## 7. ProcessRunner 合并结果
+- 源码位置：`TerminalGateway.Api/ProcessRunner/*`
+- 新增 HTTP API：
+  - `POST /api/processes/run`
+  - `POST /api/processes`
+  - `GET /api/processes`
+  - `GET /api/processes/{processId}`
+  - `GET /api/processes/{processId}/output`
+  - `POST /api/processes/{processId}/wait`
+  - `POST /api/processes/{processId}/stop`
+- 行为说明：
+  - 支持单命令执行和多段管道执行
+  - 托管进程使用内置 `ProcessManager` 做并发控制和输出留存
+  - `cwd` 按 `FILES_BASE_PATH` 进行约束
 
 ## 6. 联调状态
 - 当前 MVP 以 Dotnet 网关 + Web 前端为主链路。

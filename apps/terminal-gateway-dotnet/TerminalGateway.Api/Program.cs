@@ -18,21 +18,25 @@ builder.Services.AddSingleton<InstanceManager>(sp => new InstanceManager(
     options.DefaultRows,
     options.NodeId,
     options.NodeName,
-    options.GatewayRole));
+    options.GatewayRole,
+    options.PathPrefixes));
 builder.Services.AddSingleton<TerminalConnectionRegistry>();
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<TerminalEventRelay>();
 builder.Services.AddSingleton<NodeRegistry>();
 builder.Services.AddSingleton<RemoteInstanceRegistry>();
 builder.Services.AddSingleton<ClusterCommandBroker>();
+builder.Services.AddSingleton<ClusterCommandExecutor>();
 builder.Services.AddSingleton<ClusterEventDeduplicator>();
 builder.Services.AddSingleton<FileApiService>();
 builder.Services.AddSingleton<ProjectApiService>();
+builder.Services.AddSingleton<ProcessApiService>();
 builder.Services.AddHostedService<SlaveClusterBridgeService>();
 
 var app = builder.Build();
 
 app.MapApiRoutes();
+app.MapProcessEndpoints();
 app.MapHub<TerminalHub>("/hubs/terminal");
 app.MapHub<ClusterHub>("/hubs/cluster");
 

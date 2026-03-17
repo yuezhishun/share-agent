@@ -2,10 +2,37 @@
   <div class="app">
     <div class="toolbar">
       <div class="logo"><i class="fa-solid fa-terminal" /> 多终端管理器 (实时)</div>
+      <div class="toolbar-actions">
+        <button
+          type="button"
+          class="sidebar-toggle-btn"
+          data-testid="toggle-left-sidebar"
+          @click="toggleLeftSidebar"
+        >
+          <i :class="leftSidebarCollapsed ? 'fa-solid fa-chevron-right' : 'fa-solid fa-chevron-left'" />
+          {{ leftSidebarCollapsed ? '显示左栏' : '隐藏左栏' }}
+        </button>
+        <button
+          type="button"
+          class="sidebar-toggle-btn"
+          data-testid="toggle-right-sidebar"
+          @click="toggleRightSidebar"
+        >
+          <i :class="rightSidebarCollapsed ? 'fa-solid fa-chevron-left' : 'fa-solid fa-chevron-right'" />
+          {{ rightSidebarCollapsed ? '显示右栏' : '隐藏右栏' }}
+        </button>
+      </div>
     </div>
 
-    <div class="main">
-      <div class="sidebar-column left-sidebar">
+    <div
+      class="main"
+      :class="{
+        'left-collapsed': leftSidebarCollapsed,
+        'right-collapsed': rightSidebarCollapsed,
+        'both-collapsed': leftSidebarCollapsed && rightSidebarCollapsed
+      }"
+    >
+      <div v-show="!leftSidebarCollapsed" class="sidebar-column left-sidebar">
         <div class="sidebar-section sessions">
           <div class="section-header">
             <span><i class="fa-regular fa-window-maximize" /> 终端会话</span>
@@ -29,9 +56,34 @@
               @click="connect(item.id)"
             >
               <i class="fa-regular fa-terminal" />
-              <span class="terminal-name" :title="formatInstanceDisplayName(item)">{{ formatInstanceDisplayName(item) }}</span>
+              <input
+                v-if="renamingInstanceId === item.id"
+                :ref="setRenameInstanceInputRef"
+                v-model="renameInstanceValue"
+                class="terminal-rename-input"
+                :data-testid="`rename-instance-input-${item.id}`"
+                maxlength="60"
+                placeholder="输入会话名称"
+                @click.stop
+                @blur="saveRenameInstance(item.id)"
+                @keydown.enter.prevent.stop="saveRenameInstance(item.id)"
+                @keydown.esc.prevent.stop="cancelRenameInstance"
+              />
+              <span
+                v-else
+                class="terminal-name"
+                :title="formatInstanceTooltip(item)"
+              >{{ formatInstanceDisplayName(item) }}</span>
               <span v-if="item.node_online === false" class="instance-state offline">offline</span>
-              <span class="close-btn" title="关闭" @click.stop="closeTerminal(item.id)"><i class="fa-regular fa-circle-xmark" /></span>
+              <span class="terminal-actions">
+                <span
+                  class="rename-btn"
+                  :title="terminalStore.getInstanceAlias(item.id) ? '修改会话名' : '设置会话名'"
+                  :data-testid="`rename-instance-${item.id}`"
+                  @click.stop="beginRenameInstance(item)"
+                ><i class="fa-regular fa-pen-to-square" /></span>
+                <span class="close-btn" title="关闭" @click.stop="closeTerminal(item.id)"><i class="fa-regular fa-circle-xmark" /></span>
+              </span>
             </li>
           </ul>
         </div>
@@ -46,7 +98,7 @@
             <input v-model="recipeEditor.name" type="text" placeholder="显示名（可选）" />
             <input v-model="recipeEditor.cwd" type="text" placeholder="文件夹(CWD)，如 /home/yueyuan" />
             <input v-model="recipeEditor.command" type="text" placeholder="指令，如 bash" required />
-            <input v-model="recipeEditor.argsInput" type="text" placeholder='参数(JSON数组)，如 ["-l"]' />
+            <input v-model="recipeEditor.argsInput" type="text" placeholder='参数(JSON数组)，如 ["-i"]' />
             <textarea v-model="recipeEditor.envInput" rows="3" placeholder='环境变量(JSON对象)，如 {"TERM":"xterm-256color"}' />
             <div class="recipe-editor-actions">
               <button type="submit" class="primary">{{ editingRecipeId ? '更新配方' : '保存配方' }}</button>
@@ -134,7 +186,7 @@
         </div>
       </div>
 
-      <div class="sidebar-column right-sidebar">
+      <div v-show="!rightSidebarCollapsed" class="sidebar-column right-sidebar">
         <div class="sidebar-section file-browser">
           <div class="section-header">
             <span>
@@ -260,6 +312,7 @@ import { useWebCliTerminalStore } from '../stores/webcli-terminal.js';
 import { useWebCliFilesStore } from '../stores/webcli-files.js';
 import { useWebCliRecipesStore } from '../stores/webcli-recipes.js';
 import { createTerminalProtocolRenderer } from '../composables/useTerminalProtocol.js';
+import { isTerminalViewportRenderable } from './desktop-terminal-resize.js';
 
 const terminalStore = useWebCliTerminalStore();
 const filesStore = useWebCliFilesStore();
@@ -269,7 +322,7 @@ const terminalRef = ref(null);
 const uploadFilesInputRef = ref(null);
 
 const command = ref('bash');
-const argsInput = ref('["-l"]');
+const argsInput = ref('["-i"]');
 const envInput = ref('{}');
 const cwd = ref('');
 const createNodeId = ref('');
@@ -282,6 +335,8 @@ const editingRecipeId = ref('');
 const showRecipeEditor = ref(false);
 const recipeEditor = ref(buildRecipeEditor());
 const defaultCreateRecipeId = ref('');
+const leftSidebarCollapsed = ref(false);
+const rightSidebarCollapsed = ref(false);
 const customShortcutItems = ref([]);
 const shortcutEditor = ref({
   label: '',
@@ -289,11 +344,16 @@ const shortcutEditor = ref({
   group: 'custom',
   pressEnter: true
 });
+const renamingInstanceId = ref('');
+const renameInstanceValue = ref('');
+const renameInstanceInputRef = ref(null);
 
 let term = null;
 let fitAddon = null;
 let unsubscribe = null;
 let renderer = null;
+let terminalResizeObserver = null;
+let suppressRemoteResize = false;
 
 const recipeItems = computed(() => [...recipesStore.items].sort((a, b) => {
   const groupCompare = String(a.group || 'general').localeCompare(String(b.group || 'general'), 'zh-Hans-CN');
@@ -325,6 +385,7 @@ const customShortcutStorageKey = 'webcli-shortcuts-v1';
 const codexQuickCommand = 'codex --dangerously-bypass-approvals-and-sandbox';
 const comboKeyIntervalMs = 120;
 const quickCommandIntervalMs = 300;
+const mobileAutoCollapseWidth = 820;
 
 const builtInShortcutItems = [
   { id: 'esc', label: 'esc', group: '控制键', value: '\u001b' },
@@ -398,7 +459,7 @@ function buildRecipeEditor(seed = null) {
     name: String(source.name || ''),
     cwd: String(source.cwd || ''),
     command: String(source.command || 'bash') || 'bash',
-    argsInput: JSON.stringify(Array.isArray(source.args) ? source.args : ['-l']),
+    argsInput: JSON.stringify(Array.isArray(source.args) ? source.args : ['-i']),
     envInput: JSON.stringify(source.env && typeof source.env === 'object' && !Array.isArray(source.env) ? source.env : {}, null, 2),
     group: String(source.group || 'general')
   };
@@ -529,7 +590,10 @@ function persistCustomShortcuts() {
   const payload = customShortcutItems.value
     .map((item) => toShortcutPayload(item))
     .filter(Boolean);
-  localStorage.setItem(customShortcutStorageKey, JSON.stringify({ items: payload }));
+  try {
+    localStorage.setItem(customShortcutStorageKey, JSON.stringify({ items: payload }));
+  } catch {
+  }
 }
 
 function hydrateDefaultCreateRecipe() {
@@ -543,11 +607,14 @@ function hydrateDefaultCreateRecipe() {
 
 function persistDefaultCreateRecipe() {
   const id = String(defaultCreateRecipeId.value || '').trim();
-  if (!id) {
-    localStorage.removeItem(defaultRecipeStorageKey);
-    return;
+  try {
+    if (!id) {
+      localStorage.removeItem(defaultRecipeStorageKey);
+      return;
+    }
+    localStorage.setItem(defaultRecipeStorageKey, id);
+  } catch {
   }
-  localStorage.setItem(defaultRecipeStorageKey, id);
 }
 
 function isDefaultCreateRecipe(recipeId) {
@@ -604,16 +671,99 @@ function focusTerminal() {
   term?.focus();
 }
 
+function getTerminalSelectionText() {
+  return String(term?.getSelection?.() || '');
+}
+
+function hasTerminalSelection() {
+  return getTerminalSelectionText().length > 0;
+}
+
+function isCopyKeyboardEvent(event) {
+  if (!event) {
+    return false;
+  }
+  const key = String(event.key || '').toLowerCase();
+  return (event.ctrlKey || event.metaKey) && !event.altKey && key === 'c';
+}
+
 async function fitTerminal() {
   await nextTick();
+  if (!isTerminalViewportRenderable(activeCenterTab.value, terminalRef.value)) {
+    return;
+  }
+
   fitAddon?.fit();
+}
+
+function handleTerminalResize({ cols: c, rows: r }) {
+  if (suppressRemoteResize || !isTerminalViewportRenderable(activeCenterTab.value, terminalRef.value)) {
+    return;
+  }
+
+  terminalStore.sendResize(c, r);
+}
+
+function isMobileViewport() {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  return window.innerWidth <= mobileAutoCollapseWidth;
+}
+
+function applyResponsiveSidebarCollapse() {
+  if (!isMobileViewport()) {
+    return;
+  }
+  if (!leftSidebarCollapsed.value) {
+    leftSidebarCollapsed.value = true;
+  }
+  if (!rightSidebarCollapsed.value) {
+    rightSidebarCollapsed.value = true;
+  }
+}
+
+function onWindowResize() {
+  applyResponsiveSidebarCollapse();
+  fitTerminal();
+}
+
+async function fitAfterFontsReady() {
+  if (typeof document === 'undefined') {
+    return;
+  }
+  const fonts = document.fonts;
+  if (!fonts?.ready || typeof fonts.ready.then !== 'function') {
+    return;
+  }
+  try {
+    await fonts.ready;
+    await fitTerminal();
+  } catch {
+  }
+}
+
+async function toggleLeftSidebar() {
+  leftSidebarCollapsed.value = !leftSidebarCollapsed.value;
+  await fitTerminal();
+  if (activeCenterTab.value === 'terminal') {
+    focusTerminal();
+  }
+}
+
+async function toggleRightSidebar() {
+  rightSidebarCollapsed.value = !rightSidebarCollapsed.value;
+  await fitTerminal();
+  if (activeCenterTab.value === 'terminal') {
+    focusTerminal();
+  }
 }
 
 function switchCenterTab(tabId) {
   activeCenterTab.value = tabId;
   if (tabId === 'terminal') {
     nextTick(() => {
-      fitAddon?.fit();
+      fitTerminal();
       focusTerminal();
     });
   }
@@ -625,9 +775,56 @@ function switchRightTab(tabId) {
 }
 
 function formatInstanceDisplayName(instance) {
+  const instanceAlias = terminalStore.getInstanceAlias(instance?.id);
+  if (instanceAlias) {
+    return instanceAlias;
+  }
+  return formatInstanceSummary(instance);
+}
+
+function formatInstanceSummary(instance) {
   const instanceCwd = String(instance?.cwd || '').trim() || '~';
   const instanceCommand = String(instance?.command || '').trim() || 'bash';
   return `${instanceCwd} | ${instanceCommand}`;
+}
+
+function formatInstanceTooltip(instance) {
+  const instanceAlias = terminalStore.getInstanceAlias(instance?.id);
+  const summary = formatInstanceSummary(instance);
+  if (!instanceAlias) {
+    return summary;
+  }
+  return `${instanceAlias}\n${summary}\n${String(instance?.id || '').trim()}`;
+}
+
+function setRenameInstanceInputRef(element) {
+  renameInstanceInputRef.value = element;
+}
+
+function beginRenameInstance(instance) {
+  renamingInstanceId.value = String(instance?.id || '').trim();
+  renameInstanceValue.value = terminalStore.getInstanceAlias(instance?.id) || '';
+  nextTick(() => {
+    renameInstanceInputRef.value?.focus?.();
+    renameInstanceInputRef.value?.select?.();
+  });
+}
+
+function cancelRenameInstance() {
+  renamingInstanceId.value = '';
+  renameInstanceValue.value = '';
+  renameInstanceInputRef.value = null;
+}
+
+function saveRenameInstance(instanceId) {
+  const id = String(instanceId || '').trim();
+  if (!id || renamingInstanceId.value !== id) {
+    return;
+  }
+  terminalStore.setInstanceAlias(id, renameInstanceValue.value);
+  const label = terminalStore.getInstanceAlias(id);
+  terminalStore.setStatus(label ? `已更新会话名：${label}` : `已清除会话名：${id}`);
+  cancelRenameInstance();
 }
 
 function formatRecipeSummary(item) {
@@ -703,8 +900,8 @@ async function createInstance() {
     const parsedArgs = selectedRecipe
       ? (Array.isArray(selectedRecipe.args) ? selectedRecipe.args.map((x) => String(x)) : [])
       : (() => {
-          const parsed = parseJsonOrDefault(argsInput.value, ['-l']);
-          return Array.isArray(parsed) ? parsed.map((x) => String(x)) : ['-l'];
+          const parsed = parseJsonOrDefault(argsInput.value, ['-i']);
+          return Array.isArray(parsed) ? parsed.map((x) => String(x)) : ['-i'];
         })();
     const parsedEnv = selectedRecipe
       ? (selectedRecipe.env && typeof selectedRecipe.env === 'object' && !Array.isArray(selectedRecipe.env) ? selectedRecipe.env : {})
@@ -761,6 +958,7 @@ async function closeTerminal(instanceId) {
       throw new Error(`terminate failed: ${response.status}`);
     }
 
+    terminalStore.clearInstanceAlias(id);
     if (terminalStore.selectedInstanceId === id) {
       terminalStore.disconnect();
     }
@@ -1134,10 +1332,25 @@ async function readClipboardText() {
   return '';
 }
 
+function onTerminalCopy(event) {
+  const selected = getTerminalSelectionText();
+  if (!selected) {
+    return;
+  }
+
+  event.preventDefault();
+  if (event?.clipboardData?.setData) {
+    event.clipboardData.setData('text/plain', selected);
+    return;
+  }
+
+  writeClipboardText(selected).catch(() => {});
+}
+
 function onTerminalContextMenu(event) {
   event.preventDefault();
 
-  const selected = term?.getSelection?.() || '';
+  const selected = getTerminalSelectionText();
   if (selected) {
     writeClipboardText(selected).catch(() => {}).finally(() => {
       term?.clearSelection?.();
@@ -1156,7 +1369,20 @@ function onTerminalContextMenu(event) {
     .catch(() => {})
     .finally(() => {
       focusTerminal();
-    });
+  });
+}
+
+function onTerminalKeyEvent(event) {
+  if (!isCopyKeyboardEvent(event) || !hasTerminalSelection()) {
+    return true;
+  }
+
+  if (event.type === 'keydown') {
+    writeClipboardText(getTerminalSelectionText()).catch(() => {});
+  }
+
+  event.preventDefault();
+  return false;
 }
 
 function wait(ms) {
@@ -1199,6 +1425,7 @@ onMounted(async () => {
     defaultCreateRecipeId.value = '';
     persistDefaultCreateRecipe();
   }
+  applyResponsiveSidebarCollapse();
 
   term = new Terminal({
     convertEol: true,
@@ -1215,6 +1442,10 @@ onMounted(async () => {
   fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.open(terminalRef.value);
+  term.attachCustomKeyEventHandler(onTerminalKeyEvent);
+  if (typeof window !== 'undefined' && typeof window.__WEBCLI_DESKTOP_TERM_HOOK__ === 'function') {
+    window.__WEBCLI_DESKTOP_TERM_HOOK__(term);
+  }
 
   renderer = createTerminalProtocolRenderer(term);
   unsubscribe = terminalStore.subscribe((message) => {
@@ -1222,12 +1453,29 @@ onMounted(async () => {
   });
 
   term.onData((data) => terminalStore.sendInput(data));
-  term.onResize(({ cols: c, rows: r }) => terminalStore.sendResize(c, r));
+  term.onResize(handleTerminalResize);
+  terminalRef.value?.addEventListener('copy', onTerminalCopy);
   terminalRef.value?.addEventListener('paste', onTerminalPaste);
   terminalRef.value?.addEventListener('contextmenu', onTerminalContextMenu);
-  window.addEventListener('resize', fitTerminal);
+  if (typeof ResizeObserver === 'function' && terminalRef.value) {
+    terminalResizeObserver = new ResizeObserver(() => {
+      if (!isTerminalViewportRenderable(activeCenterTab.value, terminalRef.value)) {
+        return;
+      }
+
+      suppressRemoteResize = activeCenterTab.value !== 'terminal';
+      try {
+        fitAddon?.fit();
+      } finally {
+        suppressRemoteResize = false;
+      }
+    });
+    terminalResizeObserver.observe(terminalRef.value);
+  }
+  window.addEventListener('resize', onWindowResize);
 
   await fitTerminal();
+  fitAfterFontsReady().catch(() => {});
   await refreshTerminals();
   focusTerminal();
 });
@@ -1235,7 +1483,10 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   unsubscribe?.();
   terminalStore.disconnect();
-  window.removeEventListener('resize', fitTerminal);
+  window.removeEventListener('resize', onWindowResize);
+  terminalResizeObserver?.disconnect();
+  terminalResizeObserver = null;
+  terminalRef.value?.removeEventListener('copy', onTerminalCopy);
   terminalRef.value?.removeEventListener('paste', onTerminalPaste);
   terminalRef.value?.removeEventListener('contextmenu', onTerminalContextMenu);
   term?.dispose();
@@ -1253,7 +1504,9 @@ onBeforeUnmount(() => {
   font-family: 'Inter', sans-serif;
   background-color: #1e1e1e;
   min-height: 100vh;
+  min-height: 100dvh;
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1281,6 +1534,24 @@ onBeforeUnmount(() => {
 
 .toolbar .logo i {
   color: #007acc;
+}
+
+.toolbar-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sidebar-toggle-btn {
+  border-color: #3f5b77;
+  background-color: #23364a;
+  color: #dbefff;
+  font-size: 0.8rem;
+}
+
+.sidebar-toggle-btn:hover {
+  background-color: #2a4560;
 }
 
 .plain-output-probe {
@@ -1451,6 +1722,17 @@ button.primary:hover {
   font-family: 'JetBrains Mono', monospace;
 }
 
+.terminal-rename-input {
+  width: 100%;
+  min-width: 0;
+  background: #141b24;
+  border: 1px solid #3d4b5b;
+  color: #e0e0e0;
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 0.8rem;
+}
+
 .instance-state {
   font-size: 0.72rem;
   color: #97c6f2;
@@ -1460,6 +1742,13 @@ button.primary:hover {
   color: #ef6a62;
 }
 
+.terminal-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.rename-btn,
 .close-btn {
   color: #9e9e9e;
   border-radius: 4px;
@@ -1468,10 +1757,12 @@ button.primary:hover {
   visibility: hidden;
 }
 
+.terminal-item:hover .rename-btn,
 .terminal-item:hover .close-btn {
   visibility: visible;
 }
 
+.rename-btn:hover,
 .close-btn:hover {
   background-color: #4a4a4a;
   color: #fff;
@@ -1951,7 +2242,6 @@ button.primary:hover {
 
 .terminal-viewport :deep(.xterm) {
   height: 100%;
-  padding: 16px;
 }
 
 .terminal-viewport :deep(.xterm-viewport) {
@@ -1987,6 +2277,13 @@ button.primary:hover {
     flex-wrap: wrap;
   }
 
+  .toolbar-actions {
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
   .main {
     grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
   }
@@ -2004,8 +2301,38 @@ button.primary:hover {
 }
 
 @media (max-width: 820px) {
+  .app {
+    min-height: 100vh;
+    min-height: 100dvh;
+    height: auto;
+    overflow-y: auto;
+  }
+
+  .toolbar {
+    padding: 10px 12px;
+    gap: 10px;
+  }
+
+  .toolbar .logo {
+    font-size: 0.98rem;
+  }
+
+  .toolbar-actions {
+    justify-content: stretch;
+    gap: 6px;
+  }
+
+  .sidebar-toggle-btn {
+    flex: 1 1 0;
+    justify-content: center;
+    min-width: 0;
+  }
+
   .main {
-    grid-template-columns: 1fr;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: visible;
   }
 
   .left-sidebar,
@@ -2015,11 +2342,151 @@ button.primary:hover {
     border-left: none;
     border-top: none;
     border-bottom: 1px solid #3c3c3c;
-    max-height: 48vh;
+    max-height: none;
+    flex: 0 0 auto;
+  }
+
+  .left-sidebar {
+    min-height: 34dvh;
   }
 
   .terminal-panel {
-    min-height: 52vh;
+    flex: 0 0 auto;
+    min-height: 0;
+    min-height: 42dvh;
+    padding: 8px;
+  }
+
+  .right-sidebar {
+    min-height: 38dvh;
+    border-bottom: none;
+    border-top: 1px solid #3c3c3c;
+  }
+
+  .sidebar-section,
+  .file-browser-panel,
+  .shortcut-panel,
+  .terminal-viewport,
+  .editor-viewport,
+  .terminal-tabs,
+  .terminal-list,
+  .recipe-list,
+  .file-list {
+    min-height: 0;
+  }
+
+  .terminal-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .terminal-tabs,
+  .status-text,
+  .tab-btn {
+    max-width: 100%;
+  }
+
+  .tab-btn {
+    flex-shrink: 0;
+  }
+
+  .shortcut-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .shortcut-editor {
+    grid-template-columns: 1fr;
+  }
+
+  .recipe-editor-actions,
+  .editor-toolbar,
+  .right-tab-footer {
+    flex-wrap: wrap;
+  }
+
+  .editor-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .file-item,
+  .terminal-item,
+  .recipe-item {
+    margin-left: 6px;
+    margin-right: 6px;
+  }
+}
+
+@media (max-width: 640px) {
+  .left-sidebar {
+    min-height: 32dvh;
+  }
+
+  .terminal-panel {
+    min-height: 40dvh;
+  }
+
+  .right-sidebar {
+    min-height: 36dvh;
+  }
+
+  .sessions {
+    flex: 2;
+  }
+
+  .recipes {
+    flex: 3;
+  }
+
+  .section-header {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .terminal-item,
+  .recipe-item,
+  .file-item {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  .tab-btn {
+    padding: 4px 8px;
+  }
+
+  .path-breadcrumb {
+    width: 100%;
+    flex: 1 1 100%;
+  }
+}
+
+.main.left-collapsed {
+  grid-template-columns: minmax(520px, 1fr) minmax(300px, 380px);
+}
+
+.main.right-collapsed {
+  grid-template-columns: minmax(250px, 340px) minmax(520px, 1fr);
+}
+
+.main.both-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@media (max-width: 1380px) {
+  .main.left-collapsed {
+    grid-template-columns: minmax(460px, 1fr) minmax(280px, 340px);
+  }
+
+  .main.right-collapsed {
+    grid-template-columns: minmax(230px, 300px) minmax(460px, 1fr);
+  }
+}
+
+@media (max-width: 980px) {
+  .main.left-collapsed,
+  .main.both-collapsed {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

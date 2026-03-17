@@ -182,10 +182,13 @@ export const useWebCliRecipesStore = defineStore('webcliRecipes', {
     },
 
     persist() {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        nextId: this.nextId,
-        items: this.items
-      }));
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          nextId: this.nextId,
+          items: this.items
+        }));
+      } catch {
+      }
     },
 
     addRecipe(input) {

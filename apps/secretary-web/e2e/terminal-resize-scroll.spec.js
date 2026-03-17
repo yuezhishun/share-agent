@@ -59,7 +59,7 @@ test('desktop seq gap route should auto trigger resync request', async ({ page }
     .toBeGreaterThan(before);
 });
 
-test('desktop switch between two instances should use incremental raw sync after warm-up', async ({ page }) => {
+test('desktop should auto join all instances and sync selected instance from server baseline', async ({ page }) => {
   await installMockRuntime(page);
   await page.goto('/');
 
@@ -69,14 +69,82 @@ test('desktop switch between two instances should use incremental raw sync after
   await page.getByTestId('create-button').click();
   await expect(page.locator('#instance-list .terminal-item')).toHaveCount(2);
 
-  await page.locator('#instance-list .terminal-item').nth(1).click();
+  await page.locator('#instance-list .terminal-item').nth(0).click();
   await expect(page.getByTestId('status')).toContainText('Connected');
 
-  const latestSyncSinceSeq = await page.evaluate(() => {
-    const syncs = globalThis.__PW_MOCK_STATE__.invokes.filter((x) => x.method === 'RequestSync');
-    const last = syncs.at(-1);
-    return Number(last?.payload?.sinceSeq || 0);
+  await expect.poll(async () => page.evaluate(() => {
+    const joined = globalThis.__PW_MOCK_STATE__.joinedInstanceIds || [];
+    return joined.slice().sort();
+  })).toEqual(['mock-1', 'mock-2']);
+
+  await page.evaluate(() => {
+    globalThis.__PW_MOCK_STATE__.emitServerRaw('mock-1', 'background-log-1\\r\\n');
   });
 
-  expect(latestSyncSinceSeq).toBeGreaterThan(0);
+  const beforeSwitchSyncCount = await page.evaluate(
+    () => globalThis.__PW_MOCK_STATE__.invokes.filter((x) => x.method === 'RequestSync').length
+  );
+
+  await page.locator('#instance-list .terminal-item').nth(1).click();
+  await expect(page.getByTestId('status')).toContainText('Connected');
+  await expect(page.getByTestId('plain-output')).toContainText('background-log-1');
+
+  const afterSwitchSyncCount = await page.evaluate(
+    () => globalThis.__PW_MOCK_STATE__.invokes.filter((x) => x.method === 'RequestSync').length
+  );
+  expect(afterSwitchSyncCount).toBe(beforeSwitchSyncCount + 1);
+});
+
+test('desktop should always request server baseline sync when switching to a newly discovered instance', async ({ page }) => {
+  await installMockRuntime(page);
+  await page.goto('/');
+
+  await page.locator('#instance-list .terminal-item').first().click();
+  await expect(page.getByTestId('status')).toContainText('Connected');
+
+  const beforeSyncCount = await page.evaluate(
+    () => globalThis.__PW_MOCK_STATE__.invokes.filter((x) => x.method === 'RequestSync').length
+  );
+
+  await page.evaluate(() => {
+    const state = globalThis.__PW_MOCK_STATE__;
+    state.instances.unshift({
+      id: 'mock-3',
+      command: 'codex --dangerously-bypass-approvals-and-sandbox',
+      cwd: '/home/yueyuan/new',
+      cols: 80,
+      rows: 25,
+      status: 'running',
+      created_at: new Date().toISOString(),
+      clients: 0,
+      node_id: 'master-mock',
+      node_name: 'Master Mock',
+      node_role: 'master',
+      node_online: true
+    });
+    state.screenByInstance['mock-3'] = {
+      cols: 80,
+      rows: 25,
+      lines: ['booting'],
+      seq: 1,
+      inputBuffer: '',
+      rawChunks: [{ seq: 1, data: 'booting\\r\\n' }]
+    };
+  });
+
+  await page.locator('#refreshTerminalIcon').click();
+  await expect(page.locator('#instance-list .terminal-item')).toHaveCount(2);
+
+  await page.evaluate(() => {
+    globalThis.__PW_MOCK_STATE__.emitServerRaw('mock-3', 'welcome-fragment\\r\\n');
+  });
+
+  await page.locator('#instance-list .terminal-item').nth(0).click();
+  await expect(page.getByTestId('status')).toContainText('Connected');
+  await expect(page.getByTestId('plain-output')).toContainText('welcome-fragment');
+
+  const afterSyncCount = await page.evaluate(
+    () => globalThis.__PW_MOCK_STATE__.invokes.filter((x) => x.method === 'RequestSync').length
+  );
+  expect(afterSyncCount).toBeGreaterThan(beforeSyncCount);
 });

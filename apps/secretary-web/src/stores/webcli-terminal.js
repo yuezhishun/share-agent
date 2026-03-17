@@ -48,9 +48,48 @@ function parseSeq(value, fallback = 0) {
 const MAX_PLAIN_OUTPUT_CHARS = 12000;
 const MAX_ANSI_REPLAY_BYTES_PER_INSTANCE = 4 * 1024 * 1024;
 const AUTO_RESPONSE_ROUTE_TTL_MS = 1800;
+const INSTANCE_ALIAS_STORAGE_KEY = 'webcli-instance-aliases-v1';
 const textEncoder = typeof TextEncoder === 'function' ? new TextEncoder() : null;
 const TERMINAL_QUERY_PROBE_PATTERN = /(?:\u001b\[6n)|(?:\u001b\[(?:\?|>)?[0-9;]*c)|(?:\u001b\](?:10|11|12|13|14|15|16|17|18|19|4;\d+);\?)/;
 const TERMINAL_AUTO_RESPONSE_PATTERN = /(?:\u001b\[\d{1,4};\d{1,4}R)|(?:\u001b\[(?:\?|>)[0-9;]*c)|(?:\u001b\][0-9]+;[^\u0007\u001b]*(?:\u0007|\u001b\\)?)/;
+
+function readInstanceAliases() {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+  try {
+    const storage = window.localStorage;
+    if (!storage) {
+      return {};
+    }
+    const raw = storage.getItem(INSTANCE_ALIAS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .map(([key, value]) => [String(key || '').trim(), String(value || '').trim()])
+        .filter(([key, value]) => key.length > 0 && value.length > 0)
+    );
+  } catch {
+    return {};
+  }
+}
+
+function persistInstanceAliases(aliases) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const storage = window.localStorage;
+    if (!storage) {
+      return;
+    }
+    storage.setItem(INSTANCE_ALIAS_STORAGE_KEY, JSON.stringify(aliases || {}));
+  } catch {
+  }
+}
 
 function utf8ByteLength(input) {
   const value = String(input || '');
@@ -82,6 +121,7 @@ export function looksLikeTerminalAutoResponse(input) {
 export const useWebCliTerminalStore = defineStore('webcliTerminal', {
   state: () => ({
     instances: [],
+    instanceAliases: readInstanceAliases(),
     nodes: [],
     projects: [],
     selectedInstanceId: '',
@@ -130,6 +170,36 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
   actions: {
     setStatus(value) {
       this.status = String(value || 'Ready');
+    },
+
+    getInstanceAlias(instanceId) {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return '';
+      }
+      return String(this.instanceAliases[id] || '').trim();
+    },
+
+    setInstanceAlias(instanceId, alias) {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return;
+      }
+
+      const normalizedAlias = String(alias || '').trim();
+      const nextAliases = { ...this.instanceAliases };
+      if (normalizedAlias) {
+        nextAliases[id] = normalizedAlias;
+      } else {
+        delete nextAliases[id];
+      }
+
+      this.instanceAliases = nextAliases;
+      persistInstanceAliases(this.instanceAliases);
+    },
+
+    clearInstanceAlias(instanceId) {
+      this.setInstanceAlias(instanceId, '');
     },
 
     setUiSession(patch) {

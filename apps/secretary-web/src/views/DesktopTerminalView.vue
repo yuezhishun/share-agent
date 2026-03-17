@@ -56,9 +56,34 @@
               @click="connect(item.id)"
             >
               <i class="fa-regular fa-terminal" />
-              <span class="terminal-name" :title="formatInstanceDisplayName(item)">{{ formatInstanceDisplayName(item) }}</span>
+              <input
+                v-if="renamingInstanceId === item.id"
+                :ref="setRenameInstanceInputRef"
+                v-model="renameInstanceValue"
+                class="terminal-rename-input"
+                :data-testid="`rename-instance-input-${item.id}`"
+                maxlength="60"
+                placeholder="输入会话名称"
+                @click.stop
+                @blur="saveRenameInstance(item.id)"
+                @keydown.enter.prevent.stop="saveRenameInstance(item.id)"
+                @keydown.esc.prevent.stop="cancelRenameInstance"
+              />
+              <span
+                v-else
+                class="terminal-name"
+                :title="formatInstanceTooltip(item)"
+              >{{ formatInstanceDisplayName(item) }}</span>
               <span v-if="item.node_online === false" class="instance-state offline">offline</span>
-              <span class="close-btn" title="关闭" @click.stop="closeTerminal(item.id)"><i class="fa-regular fa-circle-xmark" /></span>
+              <span class="terminal-actions">
+                <span
+                  class="rename-btn"
+                  :title="terminalStore.getInstanceAlias(item.id) ? '修改会话名' : '设置会话名'"
+                  :data-testid="`rename-instance-${item.id}`"
+                  @click.stop="beginRenameInstance(item)"
+                ><i class="fa-regular fa-pen-to-square" /></span>
+                <span class="close-btn" title="关闭" @click.stop="closeTerminal(item.id)"><i class="fa-regular fa-circle-xmark" /></span>
+              </span>
             </li>
           </ul>
         </div>
@@ -287,6 +312,7 @@ import { useWebCliTerminalStore } from '../stores/webcli-terminal.js';
 import { useWebCliFilesStore } from '../stores/webcli-files.js';
 import { useWebCliRecipesStore } from '../stores/webcli-recipes.js';
 import { createTerminalProtocolRenderer } from '../composables/useTerminalProtocol.js';
+import { isTerminalViewportRenderable } from './desktop-terminal-resize.js';
 
 const terminalStore = useWebCliTerminalStore();
 const filesStore = useWebCliFilesStore();
@@ -318,12 +344,16 @@ const shortcutEditor = ref({
   group: 'custom',
   pressEnter: true
 });
+const renamingInstanceId = ref('');
+const renameInstanceValue = ref('');
+const renameInstanceInputRef = ref(null);
 
 let term = null;
 let fitAddon = null;
 let unsubscribe = null;
 let renderer = null;
 let terminalResizeObserver = null;
+let suppressRemoteResize = false;
 
 const recipeItems = computed(() => [...recipesStore.items].sort((a, b) => {
   const groupCompare = String(a.group || 'general').localeCompare(String(b.group || 'general'), 'zh-Hans-CN');
@@ -560,7 +590,10 @@ function persistCustomShortcuts() {
   const payload = customShortcutItems.value
     .map((item) => toShortcutPayload(item))
     .filter(Boolean);
-  localStorage.setItem(customShortcutStorageKey, JSON.stringify({ items: payload }));
+  try {
+    localStorage.setItem(customShortcutStorageKey, JSON.stringify({ items: payload }));
+  } catch {
+  }
 }
 
 function hydrateDefaultCreateRecipe() {
@@ -574,11 +607,14 @@ function hydrateDefaultCreateRecipe() {
 
 function persistDefaultCreateRecipe() {
   const id = String(defaultCreateRecipeId.value || '').trim();
-  if (!id) {
-    localStorage.removeItem(defaultRecipeStorageKey);
-    return;
+  try {
+    if (!id) {
+      localStorage.removeItem(defaultRecipeStorageKey);
+      return;
+    }
+    localStorage.setItem(defaultRecipeStorageKey, id);
+  } catch {
   }
-  localStorage.setItem(defaultRecipeStorageKey, id);
 }
 
 function isDefaultCreateRecipe(recipeId) {
@@ -635,9 +671,37 @@ function focusTerminal() {
   term?.focus();
 }
 
+function getTerminalSelectionText() {
+  return String(term?.getSelection?.() || '');
+}
+
+function hasTerminalSelection() {
+  return getTerminalSelectionText().length > 0;
+}
+
+function isCopyKeyboardEvent(event) {
+  if (!event) {
+    return false;
+  }
+  const key = String(event.key || '').toLowerCase();
+  return (event.ctrlKey || event.metaKey) && !event.altKey && key === 'c';
+}
+
 async function fitTerminal() {
   await nextTick();
+  if (!isTerminalViewportRenderable(activeCenterTab.value, terminalRef.value)) {
+    return;
+  }
+
   fitAddon?.fit();
+}
+
+function handleTerminalResize({ cols: c, rows: r }) {
+  if (suppressRemoteResize || !isTerminalViewportRenderable(activeCenterTab.value, terminalRef.value)) {
+    return;
+  }
+
+  terminalStore.sendResize(c, r);
 }
 
 function isMobileViewport() {
@@ -699,7 +763,7 @@ function switchCenterTab(tabId) {
   activeCenterTab.value = tabId;
   if (tabId === 'terminal') {
     nextTick(() => {
-      fitAddon?.fit();
+      fitTerminal();
       focusTerminal();
     });
   }
@@ -711,9 +775,56 @@ function switchRightTab(tabId) {
 }
 
 function formatInstanceDisplayName(instance) {
+  const instanceAlias = terminalStore.getInstanceAlias(instance?.id);
+  if (instanceAlias) {
+    return instanceAlias;
+  }
+  return formatInstanceSummary(instance);
+}
+
+function formatInstanceSummary(instance) {
   const instanceCwd = String(instance?.cwd || '').trim() || '~';
   const instanceCommand = String(instance?.command || '').trim() || 'bash';
   return `${instanceCwd} | ${instanceCommand}`;
+}
+
+function formatInstanceTooltip(instance) {
+  const instanceAlias = terminalStore.getInstanceAlias(instance?.id);
+  const summary = formatInstanceSummary(instance);
+  if (!instanceAlias) {
+    return summary;
+  }
+  return `${instanceAlias}\n${summary}\n${String(instance?.id || '').trim()}`;
+}
+
+function setRenameInstanceInputRef(element) {
+  renameInstanceInputRef.value = element;
+}
+
+function beginRenameInstance(instance) {
+  renamingInstanceId.value = String(instance?.id || '').trim();
+  renameInstanceValue.value = terminalStore.getInstanceAlias(instance?.id) || '';
+  nextTick(() => {
+    renameInstanceInputRef.value?.focus?.();
+    renameInstanceInputRef.value?.select?.();
+  });
+}
+
+function cancelRenameInstance() {
+  renamingInstanceId.value = '';
+  renameInstanceValue.value = '';
+  renameInstanceInputRef.value = null;
+}
+
+function saveRenameInstance(instanceId) {
+  const id = String(instanceId || '').trim();
+  if (!id || renamingInstanceId.value !== id) {
+    return;
+  }
+  terminalStore.setInstanceAlias(id, renameInstanceValue.value);
+  const label = terminalStore.getInstanceAlias(id);
+  terminalStore.setStatus(label ? `已更新会话名：${label}` : `已清除会话名：${id}`);
+  cancelRenameInstance();
 }
 
 function formatRecipeSummary(item) {
@@ -847,6 +958,7 @@ async function closeTerminal(instanceId) {
       throw new Error(`terminate failed: ${response.status}`);
     }
 
+    terminalStore.clearInstanceAlias(id);
     if (terminalStore.selectedInstanceId === id) {
       terminalStore.disconnect();
     }
@@ -1220,10 +1332,25 @@ async function readClipboardText() {
   return '';
 }
 
+function onTerminalCopy(event) {
+  const selected = getTerminalSelectionText();
+  if (!selected) {
+    return;
+  }
+
+  event.preventDefault();
+  if (event?.clipboardData?.setData) {
+    event.clipboardData.setData('text/plain', selected);
+    return;
+  }
+
+  writeClipboardText(selected).catch(() => {});
+}
+
 function onTerminalContextMenu(event) {
   event.preventDefault();
 
-  const selected = term?.getSelection?.() || '';
+  const selected = getTerminalSelectionText();
   if (selected) {
     writeClipboardText(selected).catch(() => {}).finally(() => {
       term?.clearSelection?.();
@@ -1242,7 +1369,20 @@ function onTerminalContextMenu(event) {
     .catch(() => {})
     .finally(() => {
       focusTerminal();
-    });
+  });
+}
+
+function onTerminalKeyEvent(event) {
+  if (!isCopyKeyboardEvent(event) || !hasTerminalSelection()) {
+    return true;
+  }
+
+  if (event.type === 'keydown') {
+    writeClipboardText(getTerminalSelectionText()).catch(() => {});
+  }
+
+  event.preventDefault();
+  return false;
 }
 
 function wait(ms) {
@@ -1302,6 +1442,10 @@ onMounted(async () => {
   fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.open(terminalRef.value);
+  term.attachCustomKeyEventHandler(onTerminalKeyEvent);
+  if (typeof window !== 'undefined' && typeof window.__WEBCLI_DESKTOP_TERM_HOOK__ === 'function') {
+    window.__WEBCLI_DESKTOP_TERM_HOOK__(term);
+  }
 
   renderer = createTerminalProtocolRenderer(term);
   unsubscribe = terminalStore.subscribe((message) => {
@@ -1309,12 +1453,22 @@ onMounted(async () => {
   });
 
   term.onData((data) => terminalStore.sendInput(data));
-  term.onResize(({ cols: c, rows: r }) => terminalStore.sendResize(c, r));
+  term.onResize(handleTerminalResize);
+  terminalRef.value?.addEventListener('copy', onTerminalCopy);
   terminalRef.value?.addEventListener('paste', onTerminalPaste);
   terminalRef.value?.addEventListener('contextmenu', onTerminalContextMenu);
   if (typeof ResizeObserver === 'function' && terminalRef.value) {
     terminalResizeObserver = new ResizeObserver(() => {
-      fitTerminal();
+      if (!isTerminalViewportRenderable(activeCenterTab.value, terminalRef.value)) {
+        return;
+      }
+
+      suppressRemoteResize = activeCenterTab.value !== 'terminal';
+      try {
+        fitAddon?.fit();
+      } finally {
+        suppressRemoteResize = false;
+      }
     });
     terminalResizeObserver.observe(terminalRef.value);
   }
@@ -1332,6 +1486,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', onWindowResize);
   terminalResizeObserver?.disconnect();
   terminalResizeObserver = null;
+  terminalRef.value?.removeEventListener('copy', onTerminalCopy);
   terminalRef.value?.removeEventListener('paste', onTerminalPaste);
   terminalRef.value?.removeEventListener('contextmenu', onTerminalContextMenu);
   term?.dispose();
@@ -1567,6 +1722,17 @@ button.primary:hover {
   font-family: 'JetBrains Mono', monospace;
 }
 
+.terminal-rename-input {
+  width: 100%;
+  min-width: 0;
+  background: #141b24;
+  border: 1px solid #3d4b5b;
+  color: #e0e0e0;
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 0.8rem;
+}
+
 .instance-state {
   font-size: 0.72rem;
   color: #97c6f2;
@@ -1576,6 +1742,13 @@ button.primary:hover {
   color: #ef6a62;
 }
 
+.terminal-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.rename-btn,
 .close-btn {
   color: #9e9e9e;
   border-radius: 4px;
@@ -1584,10 +1757,12 @@ button.primary:hover {
   visibility: hidden;
 }
 
+.terminal-item:hover .rename-btn,
 .terminal-item:hover .close-btn {
   visibility: visible;
 }
 
+.rename-btn:hover,
 .close-btn:hover {
   background-color: #4a4a4a;
   color: #fff;

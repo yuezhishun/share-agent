@@ -13,7 +13,7 @@
         <select v-model="selectedId">
           <option value="">Select instance</option>
           <option v-for="item in terminalStore.instances" :key="item.id" :value="item.id">
-            {{ item.node_name || item.node_id || 'node' }} | {{ item.cwd || '-' }} | {{ item.command }}
+            {{ formatInstanceOptionLabel(item) }}
           </option>
         </select>
       </label>
@@ -175,6 +175,17 @@ let renderer = null;
 
 function focusTerminal() {
   term?.focus();
+}
+
+function formatInstanceOptionLabel(instance) {
+  const alias = terminalStore.getInstanceAlias(instance?.id);
+  const cwd = String(instance?.cwd || '').trim() || '-';
+  const command = String(instance?.command || '').trim() || 'bash';
+  if (alias) {
+    return `${alias} | ${cwd} | ${command}`;
+  }
+  const node = String(instance?.node_name || instance?.node_id || 'node').trim() || 'node';
+  return `${node} | ${cwd} | ${command}`;
 }
 
 function sendShortcut(value) {

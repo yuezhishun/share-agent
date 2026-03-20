@@ -70,6 +70,16 @@ public sealed class ProcessApiService : IDisposable
         };
     }
 
+    public object RemoveManaged(string processId)
+    {
+        _manager.RemoveProcess(processId);
+        return new
+        {
+            ok = true,
+            processId
+        };
+    }
+
     public IReadOnlyList<object> GetOutput(string processId)
     {
         return _manager.GetProcessOutput(processId)

@@ -129,4 +129,23 @@ public class ProcessRunnerTests
         Assert.True(command.Context.IsExited);
         Assert.Equal(-1, command.Context.ExitCode);
     }
+
+    [Fact]
+    public async Task ProcessManager_RemoveProcess_ShouldForceRemoveRunningProcess()
+    {
+        using var manager = new ProcessManager(maxConcurrency: 1);
+        var processId = manager.RegisterProcess(
+            new ProcessCommand("sh")
+                .AddArguments("-c", "sleep 2")
+                .SetTimeout(TimeSpan.FromSeconds(5)));
+
+        await manager.StartProcessAsync(processId);
+        Assert.Equal(ProcessManager.ProcessStatus.Running, manager.GetProcessStatus(processId));
+
+        manager.RemoveProcess(processId);
+
+        var exception = Assert.Throws<ArgumentException>(() => manager.GetProcessInfo(processId));
+        Assert.Contains("不存在", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(manager.GetAllProcesses(), item => item.Id == processId);
+    }
 }

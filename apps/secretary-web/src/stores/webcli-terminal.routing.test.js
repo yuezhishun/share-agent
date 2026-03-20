@@ -75,6 +75,39 @@ test('sendInput should route terminal auto response for parameterized DA probes'
   assert.equal(invokes[0].payload.data, '\u001b[?1;2c');
 });
 
+test('sendInput should drop terminal auto response when there is no valid probe route', async () => {
+  const { store, invokes } = setupStore();
+
+  store.selectedInstanceId = 'bash-1';
+  await store.sendInput('\u001b[1;1R');
+
+  assert.equal(invokes.length, 0);
+});
+
+test('sendInput should route terminal auto response to the most recent valid probe instance', async () => {
+  const { store, invokes } = setupStore();
+
+  store.selectedInstanceId = 'codex-1';
+  store.emitMessage({
+    type: 'term.raw',
+    instance_id: 'codex-1',
+    data: '\u001b[6n'
+  });
+
+  store.selectedInstanceId = 'bash-1';
+  store.emitMessage({
+    type: 'term.raw',
+    instance_id: 'bash-1',
+    data: '\u001b[c'
+  });
+
+  store.selectedInstanceId = 'codex-1';
+  await store.sendInput('\u001b[?1;2c');
+
+  assert.equal(invokes.length, 1);
+  assert.equal(invokes[0].payload.instanceId, 'bash-1');
+});
+
 test('sendInput should keep regular user input on selected instance', async () => {
   const { store, invokes } = setupStore();
 
@@ -112,6 +145,61 @@ test('processIncomingMessage should not suppress first snapshot right after resi
   assert.equal(emitted[0].type, 'term.snapshot');
 });
 
+test('processIncomingMessage should request resync on render epoch mismatch', () => {
+  const { store } = setupStore();
+  const syncRequests = [];
+  store.selectedInstanceId = 'bash-1';
+  store.cachedScreens['bash-1'] = {
+    type: 'term.snapshot',
+    instance_id: 'bash-1',
+    render_epoch: 2,
+    seq: 4,
+    base_seq: 4,
+    rows: [{ y: 0, segs: [['prompt$', 0]] }]
+  };
+  store.requestScreenSync = async (instanceId, reason) => {
+    syncRequests.push({ instanceId, reason });
+  };
+
+  const emitted = store.processIncomingMessage({
+    type: 'term.patch',
+    instance_id: 'bash-1',
+    render_epoch: 3,
+    seq: 5,
+    rows: [{ y: 0, segs: [['changed', 0]] }]
+  });
+
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0].type, 'term.sync.required');
+  assert.deepEqual(syncRequests, [{ instanceId: 'bash-1', reason: 'render_epoch_mismatch' }]);
+});
+
+test('processIncomingMessage should cache selected patch without forcing full snapshot redraw', () => {
+  const { store } = setupStore();
+  store.selectedInstanceId = 'bash-1';
+  store.cachedScreens['bash-1'] = {
+    type: 'term.snapshot',
+    instance_id: 'bash-1',
+    render_epoch: 2,
+    seq: 4,
+    base_seq: 4,
+    cursor: { x: 0, y: 0, visible: true },
+    rows: [{ y: 0, segs: [['prompt$', 0]] }]
+  };
+
+  const emitted = store.processIncomingMessage({
+    type: 'term.patch',
+    instance_id: 'bash-1',
+    render_epoch: 2,
+    seq: 5,
+    cursor: { x: 1, y: 0, visible: true },
+    rows: [{ y: 0, segs: [['/model', 0]] }]
+  });
+
+  assert.deepEqual(emitted, []);
+  assert.equal(store.cachedScreens['bash-1'].rows[0].segs[0][0], '/model');
+});
+
 test('connect should prioritize selected instance even if background sync fails', async () => {
   const { store } = setupStore();
   const invocations = [];
@@ -129,10 +217,9 @@ test('connect should prioritize selected instance even if background sync fails'
     syncAttempted += 1;
     throw new Error('background sync failed');
   };
-  store.requestRawSync = async (instanceId, reason, options) => {
-    invocations.push({ type: 'sync', instanceId, reason, options });
+  store.requestScreenSync = async (instanceId, reason) => {
+    invocations.push({ type: 'sync', instanceId, reason });
   };
-  store.waitForSnapshot = async () => null;
   store.wsConnected = true;
 
   await store.connect('bash-1');

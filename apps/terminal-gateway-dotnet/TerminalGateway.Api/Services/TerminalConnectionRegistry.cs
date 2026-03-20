@@ -5,6 +5,7 @@ namespace TerminalGateway.Api.Services;
 public sealed class TerminalConnectionRegistry
 {
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _connectionToInstances = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _instanceToConnections = new(StringComparer.Ordinal);
 
     public IReadOnlyList<string> GetInstances(string connectionId)
     {
@@ -20,6 +21,9 @@ public sealed class TerminalConnectionRegistry
     {
         var instances = _connectionToInstances.GetOrAdd(connectionId, static _ => new ConcurrentDictionary<string, byte>(StringComparer.Ordinal));
         instances[instanceId] = 0;
+
+        var connections = _instanceToConnections.GetOrAdd(instanceId, static _ => new ConcurrentDictionary<string, byte>(StringComparer.Ordinal));
+        connections[connectionId] = 0;
     }
 
     public bool Unbind(string connectionId, string instanceId)
@@ -34,6 +38,16 @@ public sealed class TerminalConnectionRegistry
         {
             _connectionToInstances.TryRemove(connectionId, out _);
         }
+
+        if (_instanceToConnections.TryGetValue(instanceId, out var connections))
+        {
+            connections.TryRemove(connectionId, out _);
+            if (connections.IsEmpty)
+            {
+                _instanceToConnections.TryRemove(instanceId, out _);
+            }
+        }
+
         return removed;
     }
 
@@ -41,9 +55,32 @@ public sealed class TerminalConnectionRegistry
     {
         if (_connectionToInstances.TryRemove(connectionId, out var instances))
         {
-            return instances.Keys.ToList();
+            var items = instances.Keys.ToList();
+            foreach (var instanceId in items)
+            {
+                if (_instanceToConnections.TryGetValue(instanceId, out var connections))
+                {
+                    connections.TryRemove(connectionId, out _);
+                    if (connections.IsEmpty)
+                    {
+                        _instanceToConnections.TryRemove(instanceId, out _);
+                    }
+                }
+            }
+
+            return items;
         }
 
         return Array.Empty<string>();
+    }
+
+    public IReadOnlyList<string> GetConnections(string instanceId)
+    {
+        if (!_instanceToConnections.TryGetValue(instanceId, out var connections))
+        {
+            return Array.Empty<string>();
+        }
+
+        return connections.Keys.ToList();
     }
 }

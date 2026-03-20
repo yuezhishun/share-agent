@@ -184,6 +184,43 @@ public class GatewayApiTests
     }
 
     [Fact]
+    public async Task Managed_Process_Delete_Removes_Completed_Process()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tg-process-delete-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["FILES_BASE_PATH"] = tempDir
+        });
+        using var client = app.CreateClient();
+
+        var createResponse = await client.PostAsJsonAsync("/api/processes", new
+        {
+            file = "sh",
+            args = new[] { "-c", "echo done" },
+            cwd = tempDir
+        });
+
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+        var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
+        var processId = created.GetProperty("process_id").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(processId));
+
+        var waitResponse = await client.PostAsync($"/api/processes/{processId}/wait?timeout_ms=5000", content: null);
+        Assert.Equal(HttpStatusCode.OK, waitResponse.StatusCode);
+
+        var deleteResponse = await client.DeleteAsync($"/api/processes/{processId}");
+        Assert.Equal(HttpStatusCode.OK, deleteResponse.StatusCode);
+
+        var deleted = JsonDocument.Parse(await deleteResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.True(deleted.GetProperty("ok").GetBoolean());
+
+        var getResponse = await client.GetAsync($"/api/processes/{processId}");
+        Assert.Equal(HttpStatusCode.NotFound, getResponse.StatusCode);
+    }
+
+    [Fact]
     public async Task Process_Run_Endpoint_Rejects_Cwd_Outside_Base()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"tg-process-cwd-{Guid.NewGuid():N}");
@@ -307,7 +344,7 @@ public class GatewayApiTests
         {
             snapshotCountAfterResize = messages.Count(msg => GetType(msg) == "term.snapshot");
         }
-        Assert.Equal(snapshotCountBeforeResize, snapshotCountAfterResize);
+        Assert.True(snapshotCountAfterResize > snapshotCountBeforeResize);
 
         await hub.InvokeAsync("SendInput", new { instanceId, data = "echo raw-sync-check\r" });
         _ = await WaitForMessageAsync(messages, gate,
@@ -362,6 +399,77 @@ public class GatewayApiTests
         Assert.Equal(HttpStatusCode.OK, readRes.StatusCode);
         var payload = JsonDocument.Parse(await readRes.Content.ReadAsStringAsync()).RootElement;
         Assert.True(payload.GetProperty("truncated").GetBoolean());
+        Assert.Equal("preview", payload.GetProperty("mode").GetString());
+
+        var editReadRes = await client.GetAsync($"/api/files/read?path={Uri.EscapeDataString(file)}&mode=edit");
+        Assert.Equal(HttpStatusCode.OK, editReadRes.StatusCode);
+        var editPayload = JsonDocument.Parse(await editReadRes.Content.ReadAsStringAsync()).RootElement;
+        Assert.False(editPayload.GetProperty("truncated").GetBoolean());
+        Assert.Equal("edit", editPayload.GetProperty("mode").GetString());
+        Assert.Equal("line1\nline2\nline3\n", editPayload.GetProperty("content").GetString());
+    }
+
+    [Fact]
+    public async Task Files_Edit_Mode_Should_Fall_Back_To_ReadOnly_Progressive_For_Large_File()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tg-files-edit-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        var file = Path.Combine(tempDir, "large.txt");
+        var oversized = string.Join('\n', Enumerable.Range(1, 2500).Select(index => $"line-{index:D4}-{new string('a', 120)}"));
+        await File.WriteAllTextAsync(file, oversized);
+
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["FILES_BASE_PATH"] = tempDir
+        });
+        using var client = app.CreateClient();
+
+        var response = await client.GetAsync($"/api/files/read?path={Uri.EscapeDataString(file)}&mode=edit");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        Assert.True(payload.GetProperty("read_only").GetBoolean());
+        Assert.True(payload.GetProperty("large_file").GetBoolean());
+        Assert.Equal("progressive", payload.GetProperty("mode").GetString());
+        Assert.True(payload.GetProperty("has_more_after").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Files_Progressive_Read_Should_Support_Load_More_And_Tail()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tg-files-progressive-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        var file = Path.Combine(tempDir, "progressive.txt");
+        await File.WriteAllTextAsync(file, string.Join('\n', Enumerable.Range(1, 40).Select(index => $"line-{index:D2}")));
+
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["FILES_BASE_PATH"] = tempDir,
+            ["TERMINAL_LARGE_FILE_THRESHOLD_BYTES"] = "16",
+            ["TERMINAL_FILE_CHUNK_MAX_LINES"] = "5",
+            ["TERMINAL_FILE_CHUNK_BYTES"] = "256"
+        });
+        using var client = app.CreateClient();
+
+        var headResponse = await client.GetAsync($"/api/files/read?path={Uri.EscapeDataString(file)}&mode=edit");
+        Assert.Equal(HttpStatusCode.OK, headResponse.StatusCode);
+        var head = JsonDocument.Parse(await headResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(0, head.GetProperty("cursor_start").GetInt32());
+        Assert.Equal(5, head.GetProperty("cursor_end").GetInt32());
+        Assert.True(head.GetProperty("has_more_after").GetBoolean());
+
+        var moreResponse = await client.GetAsync($"/api/files/read?path={Uri.EscapeDataString(file)}&mode=progressive&line_offset=5&max_lines=5&chunk_bytes=256&direction=forward");
+        Assert.Equal(HttpStatusCode.OK, moreResponse.StatusCode);
+        var more = JsonDocument.Parse(await moreResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(5, more.GetProperty("cursor_start").GetInt32());
+        Assert.Equal(10, more.GetProperty("cursor_end").GetInt32());
+        Assert.Contains("line-06", more.GetProperty("content").GetString() ?? string.Empty, StringComparison.Ordinal);
+
+        var tailResponse = await client.GetAsync($"/api/files/read?path={Uri.EscapeDataString(file)}&mode=progressive&max_lines=5&chunk_bytes=256&direction=tail");
+        Assert.Equal(HttpStatusCode.OK, tailResponse.StatusCode);
+        var tail = JsonDocument.Parse(await tailResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("tail", tail.GetProperty("mode").GetString());
+        Assert.False(tail.GetProperty("has_more_after").GetBoolean());
+        Assert.Contains("line-40", tail.GetProperty("content").GetString() ?? string.Empty, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -805,6 +913,77 @@ public class GatewayApiTests
         Assert.Equal(HttpStatusCode.OK, outputResponse.StatusCode);
         var outputPayload = JsonDocument.Parse(await outputResponse.Content.ReadAsStringAsync()).RootElement;
         Assert.NotEmpty(outputPayload.GetProperty("items").EnumerateArray());
+
+        var deleteResponse = await client.DeleteAsync($"/api/nodes/slave-process/processes/{processId}");
+        Assert.Equal(HttpStatusCode.OK, deleteResponse.StatusCode);
+
+        var afterDeleteResponse = await client.GetAsync($"/api/nodes/slave-process/processes/{processId}");
+        Assert.Equal(HttpStatusCode.NotFound, afterDeleteResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task Master_Node_Proxy_File_APIs_Should_Route_To_Slave_Through_ClusterHub()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tg-cluster-files-slave-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        Directory.CreateDirectory(Path.Combine(tempDir, "alpha"));
+        await File.WriteAllTextAsync(Path.Combine(tempDir, "alpha", "hello.txt"), "from-slave-file");
+
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-files-token",
+            ["NODE_ID"] = "master-files",
+            ["NODE_NAME"] = "Master Files",
+            ["FILES_BASE_PATH"] = tempDir
+        });
+        using var client = app.CreateClient();
+
+        var slaveFiles = new FileApiService();
+        await using var slaveHub = BuildClusterHubConnection(client);
+        slaveHub.On<ClusterCommandEnvelope>("ClusterCommand", async command =>
+        {
+            await SubmitFileCommandResultAsync(slaveHub, slaveFiles, tempDir, command);
+        });
+
+        await slaveHub.StartAsync();
+        await slaveHub.InvokeAsync("RegisterNode", new
+        {
+            token = "cluster-files-token",
+            nodeId = "slave-files",
+            nodeName = "Slave Files",
+            instanceCount = 0
+        });
+
+        var listResponse = await client.GetAsync($"/api/nodes/slave-files/files/list?path={Uri.EscapeDataString(tempDir)}");
+        Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
+        var listPayload = JsonDocument.Parse(await listResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Contains(listPayload.GetProperty("items").EnumerateArray(), item => item.GetProperty("name").GetString() == "alpha");
+
+        var readResponse = await client.GetAsync($"/api/nodes/slave-files/files/read?path={Uri.EscapeDataString(Path.Combine(tempDir, "alpha", "hello.txt"))}");
+        Assert.Equal(HttpStatusCode.OK, readResponse.StatusCode);
+        var readPayload = JsonDocument.Parse(await readResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("from-slave-file", readPayload.GetProperty("content").GetString());
+
+        var writePath = Path.Combine(tempDir, "alpha", "new.txt");
+        var writeResponse = await client.PostAsJsonAsync("/api/nodes/slave-files/files/write", new
+        {
+            path = writePath,
+            content = "new-slave-content"
+        });
+        Assert.Equal(HttpStatusCode.OK, writeResponse.StatusCode);
+        Assert.Equal("new-slave-content", await File.ReadAllTextAsync(writePath));
+
+        var mkdirResponse = await client.PostAsJsonAsync("/api/nodes/slave-files/files/mkdir", new
+        {
+            path = tempDir,
+            name = "beta"
+        });
+        Assert.Equal(HttpStatusCode.OK, mkdirResponse.StatusCode);
+        Assert.True(Directory.Exists(Path.Combine(tempDir, "beta")));
+
+        var downloadResponse = await client.GetAsync($"/api/nodes/slave-files/files/download?path={Uri.EscapeDataString(writePath)}");
+        Assert.Equal(HttpStatusCode.OK, downloadResponse.StatusCode);
+        Assert.Equal("new-slave-content", await downloadResponse.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -1389,6 +1568,7 @@ public class GatewayApiTests
                 "process.stop" => await slaveProcesses.StopManagedAsync(
                     command.Payload.GetProperty("process_id").GetString() ?? string.Empty,
                     command.Payload.TryGetProperty("force", out var force) && force.ValueKind == JsonValueKind.True),
+                "process.remove" => slaveProcesses.RemoveManaged(command.Payload.GetProperty("process_id").GetString() ?? string.Empty),
                 _ => throw new InvalidOperationException($"unsupported command: {command.Type}")
             };
             var normalizedPayload = JsonSerializer.SerializeToElement(payload, new JsonSerializerOptions
@@ -1415,6 +1595,105 @@ public class GatewayApiTests
                 payload = new { }
             });
         }
+    }
+
+    private static async Task SubmitFileCommandResultAsync(HubConnection slaveHub, FileApiService slaveFiles, string basePath, ClusterCommandEnvelope command)
+    {
+        try
+        {
+            object? payload = command.Type switch
+            {
+                "files.list" => slaveFiles.List(
+                    basePath,
+                    TryGetPropertyInsensitive(command.Payload, "path", out var listPath) ? listPath.GetString() : null,
+                    TryGetPropertyInsensitive(command.Payload, "show_hidden", out var showHidden) && (
+                        showHidden.ValueKind == JsonValueKind.True
+                        || (showHidden.ValueKind == JsonValueKind.Number && showHidden.GetInt32() != 0)
+                        || (showHidden.ValueKind == JsonValueKind.String && bool.TryParse(showHidden.GetString(), out var showHiddenBool) && showHiddenBool))),
+                "files.read" => await slaveFiles.ReadAsync(
+                    basePath,
+                    TryGetPropertyInsensitive(command.Payload, "path", out var readPath) ? readPath.GetString() : null,
+                    TryGetPropertyInsensitive(command.Payload, "max_lines", out var maxLines) && maxLines.ValueKind == JsonValueKind.Number ? maxLines.GetInt32() : 500,
+                    TryGetPropertyInsensitive(command.Payload, "mode", out var mode) ? mode.GetString() : null,
+                    CancellationToken.None,
+                    TryGetPropertyInsensitive(command.Payload, "chunk_bytes", out var chunkBytes) && chunkBytes.ValueKind == JsonValueKind.Number ? chunkBytes.GetInt32() : null,
+                    TryGetPropertyInsensitive(command.Payload, "line_offset", out var lineOffset) && lineOffset.ValueKind == JsonValueKind.Number ? lineOffset.GetInt32() : null,
+                    TryGetPropertyInsensitive(command.Payload, "direction", out var direction) ? direction.GetString() : null),
+                "files.write" => await slaveFiles.WriteAsync(
+                    basePath,
+                    TryGetPropertyInsensitive(command.Payload, "path", out var writePath) ? writePath.GetString() : null,
+                    TryGetPropertyInsensitive(command.Payload, "content", out var content) ? content.GetString() : string.Empty,
+                    CancellationToken.None),
+                "files.mkdir" => slaveFiles.CreateDirectory(
+                    basePath,
+                    TryGetPropertyInsensitive(command.Payload, "path", out var mkdirPath) ? mkdirPath.GetString() : null,
+                    TryGetPropertyInsensitive(command.Payload, "name", out var mkdirName) ? mkdirName.GetString() : null),
+                "files.download" => await BuildDownloadPayloadAsync(
+                    slaveFiles,
+                    basePath,
+                    TryGetPropertyInsensitive(command.Payload, "path", out var downloadPath) ? downloadPath.GetString() : null,
+                    CancellationToken.None),
+                _ => throw new InvalidOperationException($"unsupported command: {command.Type}")
+            };
+            var normalizedPayload = JsonSerializer.SerializeToElement(payload, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+            });
+
+            await slaveHub.InvokeAsync("SubmitCommandResult", new
+            {
+                commandId = command.CommandId,
+                nodeId = command.NodeId,
+                ok = true,
+                payload = normalizedPayload
+            });
+        }
+        catch (Exception ex)
+        {
+            await slaveHub.InvokeAsync("SubmitCommandResult", new
+            {
+                commandId = command.CommandId,
+                nodeId = command.NodeId,
+                ok = false,
+                error = ex.Message,
+                payload = new { }
+            });
+        }
+    }
+
+    private static async Task<object> BuildDownloadPayloadAsync(FileApiService slaveFiles, string basePath, string? path, CancellationToken cancellationToken)
+    {
+        var download = slaveFiles.OpenDownloadStream(basePath, path);
+        await using var stream = download.Stream;
+        using var buffer = new MemoryStream();
+        await stream.CopyToAsync(buffer, cancellationToken);
+        return new
+        {
+            name = download.Name,
+            content_type = download.ContentType,
+            enable_range_processing = download.EnableRangeProcessing,
+            content_base64 = Convert.ToBase64String(buffer.ToArray())
+        };
+    }
+
+    private static bool TryGetPropertyInsensitive(JsonElement payload, string name, out JsonElement value)
+    {
+        if (payload.TryGetProperty(name, out value))
+        {
+            return true;
+        }
+
+        foreach (var property in payload.EnumerateObject())
+        {
+            if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+
+        value = default;
+        return false;
     }
 
     private static HubConnection BuildHubConnection(HttpClient client)

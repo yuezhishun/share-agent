@@ -2,10 +2,32 @@ export function installMockRuntime(page) {
   return page.addInitScript(() => {
     const state = {
       nextId: 2,
+      nextProcessId: 2,
       invokes: [],
       wsInputs: [],
       resizeRequests: [],
       joinedInstanceIds: [],
+      nodes: [
+        {
+          node_id: 'master-mock',
+          node_name: 'Master Mock',
+          node_role: 'master',
+          node_online: true
+        },
+        {
+          node_id: 'slave-mock',
+          node_name: 'Slave Mock',
+          node_role: 'slave',
+          node_online: true
+        }
+      ],
+      files: {
+        '/home': { kind: 'dir' },
+        '/home/yueyuan': { kind: 'dir' },
+        '/home/yueyuan/demo': { kind: 'dir' },
+        '/home/yueyuan/demo/readme.txt': { kind: 'file', content: 'hello from mock file\n' },
+        '/home/yueyuan/demo/script.sh': { kind: 'file', content: 'echo mock\n' }
+      },
       instances: [
         {
           id: 'mock-1',
@@ -31,6 +53,48 @@ export function installMockRuntime(page) {
           inputBuffer: '',
           rawChunks: [{ seq: 1, data: 'mock ready\r\n' }]
         }
+      },
+      processesByNode: {
+        'master-mock': [
+          {
+            processId: 'proc-1',
+            status: 'running',
+            startTime: new Date().toISOString(),
+            endTime: null,
+            durationMs: 800,
+            command: 'bash -lc "npm run dev"',
+            outputCount: 2,
+            metadata: { source: 'processes-view' },
+            result: null
+          }
+        ],
+        'slave-mock': [
+          {
+            processId: 'proc-2',
+            status: 'completed',
+            startTime: new Date(Date.now() - 8000).toISOString(),
+            endTime: new Date(Date.now() - 3000).toISOString(),
+            durationMs: 5000,
+            command: 'dotnet test -v minimal',
+            outputCount: 2,
+            metadata: { source: 'processes-view' },
+            result: { exitCode: 0 }
+          }
+        ]
+      },
+      processOutputByNode: {
+        'master-mock': {
+          'proc-1': [
+            { timestamp: new Date().toISOString(), processId: 'proc-1', outputType: 'standardoutput', content: 'dev server booting\n' },
+            { timestamp: new Date().toISOString(), processId: 'proc-1', outputType: 'systemmessage', content: 'watching for changes\n' }
+          ]
+        },
+        'slave-mock': {
+          'proc-2': [
+            { timestamp: new Date().toISOString(), processId: 'proc-2', outputType: 'standardoutput', content: 'Test run successful\n' },
+            { timestamp: new Date().toISOString(), processId: 'proc-2', outputType: 'systemmessage', content: 'process completed\n' }
+          ]
+        }
       }
     };
 
@@ -39,7 +103,79 @@ export function installMockRuntime(page) {
       headers: { 'content-type': 'application/json' }
     });
 
+    const textResponse = (payload, status = 200, headers = {}) => new Response(payload, {
+      status,
+      headers
+    });
+
+    const normalizePath = (value) => {
+      const text = String(value || '').trim() || '/home/yueyuan';
+      const compact = text.replace(/\/+/g, '/');
+      if (compact.length > 1 && compact.endsWith('/')) {
+        return compact.slice(0, -1);
+      }
+      return compact;
+    };
+
+    const getParentPath = (path) => {
+      const normalized = normalizePath(path);
+      if (normalized === '/' || normalized === '/home' || normalized === '/home/yueyuan') {
+        return normalized === '/home/yueyuan' ? '/home' : '';
+      }
+      const index = normalized.lastIndexOf('/');
+      if (index <= 0) {
+        return '/';
+      }
+      return normalized.slice(0, index);
+    };
+
+    const getName = (path) => {
+      const normalized = normalizePath(path);
+      if (normalized === '/') {
+        return '/';
+      }
+      return normalized.split('/').pop() || normalized;
+    };
+
+    const listDirectory = (path, showHidden) => {
+      const dirPath = normalizePath(path);
+      const names = [];
+      for (const [candidatePath, item] of Object.entries(state.files)) {
+        if (!item || candidatePath === dirPath) {
+          continue;
+        }
+        if (getParentPath(candidatePath) !== dirPath) {
+          continue;
+        }
+        const name = getName(candidatePath);
+        if (!showHidden && name.startsWith('.')) {
+          continue;
+        }
+        names.push({
+          path: candidatePath,
+          name,
+          kind: item.kind,
+          size: item.kind === 'file' ? String(item.content || '').length : 0
+        });
+      }
+      return names.sort((left, right) => {
+        if (left.kind !== right.kind) {
+          return left.kind === 'dir' ? -1 : 1;
+        }
+        return left.name.localeCompare(right.name, 'en');
+      });
+    };
+
     globalThis.__PW_MOCK_STATE__ = state;
+
+    const listNodeProcesses = (nodeId) => Array.isArray(state.processesByNode[nodeId]) ? state.processesByNode[nodeId] : [];
+    const ensureNodeProcessOutput = (nodeId) => {
+      if (!state.processOutputByNode[nodeId]) {
+        state.processOutputByNode[nodeId] = {};
+      }
+      return state.processOutputByNode[nodeId];
+    };
+    const findProcess = (nodeId, processId) => listNodeProcesses(nodeId).find((item) => item.processId === processId) || null;
 
     const nativeFetch = globalThis.fetch.bind(globalThis);
     globalThis.fetch = async (input, init = {}) => {
@@ -47,35 +183,31 @@ export function installMockRuntime(page) {
       const url = new URL(reqUrl, globalThis.location.origin);
       const method = String(init.method || 'GET').toUpperCase();
       const pathname = url.pathname.replace(/^\/web-pty/, '');
+      const normalizedPathname = pathname.replace(/^\/api\/v2/, '/api');
 
       if (!pathname.startsWith('/api/')) {
         return nativeFetch(input, init);
       }
 
-      if (pathname === '/api/instances' && method === 'GET') {
+      if (normalizedPathname === '/api/instances' && method === 'GET') {
         return json({ items: state.instances });
       }
 
-      if (pathname === '/api/nodes' && method === 'GET') {
+      if (normalizedPathname === '/api/nodes' && method === 'GET') {
         return json({
-          items: [
-            {
-              node_id: 'master-mock',
-              node_name: 'Master Mock',
-              node_role: 'master',
-              node_online: true,
-              instance_count: state.instances.length,
-              last_seen_at: new Date().toISOString()
-            }
-          ]
+          items: state.nodes.map((node) => ({
+            ...node,
+            instance_count: state.instances.filter((item) => item.node_id === node.node_id).length,
+            last_seen_at: new Date().toISOString()
+          }))
         });
       }
 
-      if (pathname === '/api/projects' && method === 'GET') {
+      if (normalizedPathname === '/api/projects' && method === 'GET') {
         return json({ base: '/home/yueyuan', items: [{ name: 'demo', path: '/home/yueyuan/demo' }] });
       }
 
-      if (pathname === '/api/instances' && method === 'POST') {
+      if (normalizedPathname === '/api/instances' && method === 'POST') {
         const body = init.body ? JSON.parse(String(init.body)) : {};
         const id = `mock-${state.nextId++}`;
         const cols = Number(body.cols || 80);
@@ -102,18 +234,248 @@ export function installMockRuntime(page) {
           inputBuffer: '',
           rawChunks: [{ seq: 1, data: 'mock ready\r\n' }]
         };
-        return json({ instance_id: id, node_id: 'master-mock', hub_url: `${globalThis.location.origin}/hubs/terminal` });
+        const hubPath = pathname.startsWith('/api/v2/') ? '/hubs/terminal-v2' : '/hubs/terminal';
+        return json({ instance_id: id, node_id: 'master-mock', hub_url: `${globalThis.location.origin}${hubPath}` });
       }
 
-      if (pathname.startsWith('/api/instances/') && method === 'DELETE') {
-        const id = decodeURIComponent(pathname.split('/').pop() || '');
+      const nodeInstanceMatch = normalizedPathname.match(/^\/api\/nodes\/([^/]+)\/instances$/);
+      if (nodeInstanceMatch && method === 'POST') {
+        const nodeId = decodeURIComponent(nodeInstanceMatch[1] || '');
+        const targetNode = state.nodes.find((item) => item.node_id === nodeId);
+        if (!targetNode) {
+          return textResponse('node not found', 404);
+        }
+        const body = init.body ? JSON.parse(String(init.body)) : {};
+        const id = `mock-${state.nextId++}`;
+        const cols = Number(body.cols || 80);
+        const rows = Number(body.rows || 25);
+        state.instances.unshift({
+          id,
+          command: String(body.command || 'bash'),
+          cwd: String(body.cwd || '/home/yueyuan'),
+          cols,
+          rows,
+          status: 'running',
+          created_at: new Date().toISOString(),
+          clients: 0,
+          node_id: nodeId,
+          node_name: targetNode.node_name,
+          node_role: targetNode.node_role,
+          node_online: targetNode.node_online
+        });
+        state.screenByInstance[id] = {
+          cols,
+          rows,
+          lines: [`${nodeId} ready`],
+          seq: 1,
+          inputBuffer: '',
+          rawChunks: [{ seq: 1, data: `${nodeId} ready\r\n` }]
+        };
+        return json({ instance_id: id, node_id: nodeId, hub_url: `${globalThis.location.origin}/hubs/terminal-v2` });
+      }
+
+      if (normalizedPathname.startsWith('/api/instances/') && method === 'DELETE') {
+        const id = decodeURIComponent(normalizedPathname.split('/').pop() || '');
         state.instances = state.instances.filter((x) => x.id !== id);
         delete state.screenByInstance[id];
         return json({ ok: true });
       }
 
-      if (pathname.startsWith('/api/nodes/') && pathname.endsWith('/files/upload') && method === 'POST') {
+      const nodeInstanceDeleteMatch = normalizedPathname.match(/^\/api\/nodes\/([^/]+)\/instances\/([^/]+)$/);
+      if (nodeInstanceDeleteMatch && method === 'DELETE') {
+        const instanceId = decodeURIComponent(nodeInstanceDeleteMatch[2] || '');
+        state.instances = state.instances.filter((x) => x.id !== instanceId);
+        delete state.screenByInstance[instanceId];
+        return json({ ok: true, node_id: decodeURIComponent(nodeInstanceDeleteMatch[1] || ''), instance_id: instanceId });
+      }
+
+      const nodeProcessesMatch = normalizedPathname.match(/^\/api\/nodes\/([^/]+)\/processes(?:\/([^/]+)(?:\/(output|wait|stop))?)?$/);
+      if (nodeProcessesMatch) {
+        const nodeId = decodeURIComponent(nodeProcessesMatch[1] || '');
+        const processId = nodeProcessesMatch[2] ? decodeURIComponent(nodeProcessesMatch[2]) : '';
+        const action = nodeProcessesMatch[3] || '';
+        if (!state.nodes.some((item) => item.node_id === nodeId)) {
+          return textResponse('node not found', 404);
+        }
+
+        if (!processId && method === 'GET') {
+          return json({ items: listNodeProcesses(nodeId) });
+        }
+
+        if (!processId && method === 'POST') {
+          const body = init.body ? JSON.parse(String(init.body)) : {};
+          const nextId = `proc-${state.nextProcessId++}`;
+          const command = String([body.file, ...(Array.isArray(body.args) ? body.args : [])].filter(Boolean).join(' ') || 'bash');
+          const item = {
+            processId: nextId,
+            status: 'running',
+            startTime: new Date().toISOString(),
+            endTime: null,
+            durationMs: 0,
+            command,
+            outputCount: 1,
+            metadata: body.metadata || {},
+            result: null
+          };
+          state.processesByNode[nodeId] = [item, ...listNodeProcesses(nodeId)];
+          ensureNodeProcessOutput(nodeId)[nextId] = [
+            { timestamp: new Date().toISOString(), processId: nextId, outputType: 'systemmessage', content: `started on ${nodeId}\n` }
+          ];
+          return json({ processId: nextId, status: 'running' });
+        }
+
+        const item = findProcess(nodeId, processId);
+        if (!item) {
+          return textResponse('process not found', 404);
+        }
+
+        if (!action && method === 'GET') {
+          return json(item);
+        }
+
+        if (action === 'output' && method === 'GET') {
+          return json({ items: ensureNodeProcessOutput(nodeId)[processId] || [] });
+        }
+
+        if (action === 'wait' && method === 'POST') {
+          return json({ processId, status: item.status, completed: item.status !== 'running', result: item.result });
+        }
+
+        if (action === 'stop' && method === 'POST') {
+          item.status = 'completed';
+          item.endTime = new Date().toISOString();
+          item.durationMs = Math.max(1000, Number(item.durationMs || 0));
+          item.result = { exitCode: 0 };
+          const outputs = ensureNodeProcessOutput(nodeId)[processId] || [];
+          outputs.push({ timestamp: new Date().toISOString(), processId, outputType: 'systemmessage', content: 'stopped by user\n' });
+          ensureNodeProcessOutput(nodeId)[processId] = outputs;
+          return json({ ok: true, processId, status: 'completed' });
+        }
+
+        if (!action && method === 'DELETE') {
+          state.processesByNode[nodeId] = listNodeProcesses(nodeId).filter((entry) => entry.processId !== processId);
+          delete ensureNodeProcessOutput(nodeId)[processId];
+          return json({ ok: true, processId });
+        }
+      }
+
+      if (normalizedPathname.startsWith('/api/nodes/') && normalizedPathname.endsWith('/files/upload') && method === 'POST') {
         return json({ node_id: 'master-mock', instance_id: 'mock-1', upload: { path: '/tmp/mock-upload.png', size: 11 } });
+      }
+
+      if (normalizedPathname === '/api/files/list' && method === 'GET') {
+        const path = normalizePath(url.searchParams.get('path'));
+        const target = state.files[path];
+        if (!target || target.kind !== 'dir') {
+          return textResponse('path not found', 404);
+        }
+        return json({
+          base: '/home/yueyuan',
+          path,
+          parent: getParentPath(path),
+          items: listDirectory(path, url.searchParams.get('show_hidden') === '1')
+        });
+      }
+
+      if (normalizedPathname === '/api/files/read' && method === 'GET') {
+        const path = normalizePath(url.searchParams.get('path'));
+        const target = state.files[path];
+        if (!target || target.kind !== 'file') {
+          return textResponse('file not found', 404);
+        }
+        const content = String(target.content || '');
+        return json({
+          path,
+          content,
+          size: content.length,
+          lines_shown: content.split('\n').length,
+          truncated: false,
+          truncate_reason: null
+        });
+      }
+
+      if (normalizedPathname === '/api/files/write' && method === 'POST') {
+        const body = init.body ? JSON.parse(String(init.body)) : {};
+        const path = normalizePath(body.path);
+        if (!state.files[path] || state.files[path].kind !== 'file') {
+          return textResponse('file not found', 404);
+        }
+        const content = String(body.content ?? '');
+        state.files[path] = {
+          kind: 'file',
+          content
+        };
+        return json({ ok: true, path, size: content.length });
+      }
+
+      if (normalizedPathname === '/api/files/mkdir' && method === 'POST') {
+        const body = init.body ? JSON.parse(String(init.body)) : {};
+        const parentPath = normalizePath(body.path);
+        const name = String(body.name || '').trim();
+        if (!name) {
+          return textResponse('name is required', 400);
+        }
+        const nextPath = normalizePath(`${parentPath}/${name}`);
+        state.files[nextPath] = { kind: 'dir' };
+        return json({ item: { path: nextPath, name, kind: 'dir', size: 0 } });
+      }
+
+      if (normalizedPathname === '/api/files/rename' && method === 'POST') {
+        const body = init.body ? JSON.parse(String(init.body)) : {};
+        const path = normalizePath(body.path);
+        const newName = String(body.new_name || '').trim();
+        const target = state.files[path];
+        if (!target) {
+          return textResponse('path not found', 404);
+        }
+        if (!newName) {
+          return textResponse('new name is required', 400);
+        }
+        const nextPath = normalizePath(`${getParentPath(path)}/${newName}`);
+        const nextFiles = {};
+        for (const [candidatePath, item] of Object.entries(state.files)) {
+          if (candidatePath === path || candidatePath.startsWith(`${path}/`)) {
+            const suffix = candidatePath.slice(path.length);
+            nextFiles[`${nextPath}${suffix}`] = item;
+          } else {
+            nextFiles[candidatePath] = item;
+          }
+        }
+        state.files = nextFiles;
+        return json({ item: { path: nextPath, name: newName, kind: target.kind, size: String(target.content || '').length } });
+      }
+
+      if (normalizedPathname === '/api/files/remove' && method === 'DELETE') {
+        const path = normalizePath(url.searchParams.get('path'));
+        const nextFiles = {};
+        for (const [candidatePath, item] of Object.entries(state.files)) {
+          if (candidatePath === path || candidatePath.startsWith(`${path}/`)) {
+            continue;
+          }
+          nextFiles[candidatePath] = item;
+        }
+        state.files = nextFiles;
+        return json({ ok: true });
+      }
+
+      if (normalizedPathname === '/api/files/upload' && method === 'POST') {
+        const targetPath = normalizePath(init.body?.get?.('path') || url.searchParams.get('path') || '/home/yueyuan/demo');
+        const fileName = 'upload.txt';
+        const filePath = normalizePath(`${targetPath}/${fileName}`);
+        state.files[filePath] = {
+          kind: 'file',
+          content: 'uploaded mock\n'
+        };
+        return json({ upload: { path: filePath, size: 14 } });
+      }
+
+      if (normalizedPathname === '/api/files/download' && method === 'GET') {
+        const path = normalizePath(url.searchParams.get('path'));
+        const name = getName(path);
+        return textResponse('mock download', 200, {
+          'content-type': 'application/octet-stream',
+          'content-disposition': `attachment; filename="${name || 'download.bin'}"`
+        });
       }
 
       return new Response(`unhandled mock api: ${pathname} ${method}`, { status: 500 });
@@ -165,6 +527,23 @@ export function installMockRuntime(page) {
         styles: { '0': {} },
         rows: screen.lines.map((line, y) => ({ y, segs: [[line, 0]] })),
         history: { available: 0, newest_cursor: 'h-1' }
+      };
+    }
+
+    function toSnapshotV2(instanceId) {
+      const screen = getScreen(instanceId);
+      screen.seq += 1;
+      return {
+        v: 2,
+        type: 'term.v2.snapshot',
+        instance_id: instanceId,
+        seq: screen.seq,
+        ts: Date.now(),
+        size: { cols: screen.cols, rows: screen.rows },
+        cursor: { x: 0, y: Math.max(0, screen.lines.length - 1), visible: true },
+        alternate_screen: false,
+        styles: { '0': {} },
+        rows: screen.lines.map((line, y) => ({ y, segs: [[line, 0]] }))
       };
     }
 
@@ -258,13 +637,15 @@ export function installMockRuntime(page) {
     state.emitServerRaw = emitServerRaw;
 
     class MockHubConnection {
-      constructor() {
+      constructor(url = '') {
         this.handlers = new Map();
         this.state = 'Disconnected';
         this.instanceId = 'mock-1';
         this.reconnectingHandler = null;
         this.reconnectedHandler = null;
         this.closeHandler = null;
+        this.url = String(url || '');
+        this.isV2 = this.url.includes('/hubs/terminal-v2');
       }
 
       on(event, handler) {
@@ -329,7 +710,7 @@ export function installMockRuntime(page) {
           if (!state.joinedInstanceIds.includes(this.instanceId)) {
             state.joinedInstanceIds.push(this.instanceId);
           }
-          this.emit('TerminalEvent', toSnapshot(this.instanceId));
+          this.emit('TerminalEvent', this.isV2 ? toSnapshotV2(this.instanceId) : toSnapshot(this.instanceId));
           return;
         }
 
@@ -348,18 +729,26 @@ export function installMockRuntime(page) {
           if (String(payload.type || 'raw').toLowerCase() === 'raw') {
             const reqId = String(payload.reqId || `raw-sync-${Date.now()}`);
             const replay = toRawReplay(id, reqId, payload.sinceSeq);
-            this.emit('TerminalEvent', replay);
-            this.emit('TerminalEvent', {
-              v: 1,
-              type: 'term.sync.complete',
-              instance_id: id,
-              req_id: reqId,
-              to_seq: replay.to_seq,
-              ts: Date.now()
-            });
+            if (this.isV2) {
+              this.emit('TerminalEvent', {
+                ...replay,
+                v: 2,
+                type: 'term.v2.raw'
+              });
+            } else {
+              this.emit('TerminalEvent', replay);
+              this.emit('TerminalEvent', {
+                v: 1,
+                type: 'term.sync.complete',
+                instance_id: id,
+                req_id: reqId,
+                to_seq: replay.to_seq,
+                ts: Date.now()
+              });
+            }
             return;
           }
-          this.emit('TerminalEvent', toSnapshot(id));
+          this.emit('TerminalEvent', this.isV2 ? toSnapshotV2(id) : toSnapshot(id));
           return;
         }
 
@@ -368,7 +757,11 @@ export function installMockRuntime(page) {
           state.wsInputs.push(String(payload.data || ''));
           const raw = appendInput(id, payload.data);
           if (raw) {
-            this.emit('TerminalEvent', raw);
+            this.emit('TerminalEvent', this.isV2 ? {
+              ...raw,
+              v: 2,
+              type: 'term.v2.raw'
+            } : raw);
           }
           return;
         }
@@ -380,19 +773,27 @@ export function installMockRuntime(page) {
           screen.rows = Number(payload.rows || screen.rows);
           state.resizeRequests.push({ cols: screen.cols, rows: screen.rows });
           this.emit('TerminalEvent', {
-            v: 1,
-            type: 'term.resize.ack',
+            v: this.isV2 ? 2 : 1,
+            type: this.isV2 ? 'term.v2.resize.ack' : 'term.resize.ack',
             instance_id: id,
             req_id: String(payload.reqId || ''),
+            accepted: true,
             size: { cols: screen.cols, rows: screen.rows },
             ts: Date.now()
           });
+          if (this.isV2) {
+            this.emit('TerminalEvent', toSnapshotV2(id));
+          }
         }
       }
     }
 
     class MockHubConnectionBuilder {
-      withUrl() {
+      constructor() {
+        this.url = '';
+      }
+      withUrl(url) {
+        this.url = url;
         return this;
       }
       withAutomaticReconnect() {
@@ -402,7 +803,7 @@ export function installMockRuntime(page) {
         return this;
       }
       build() {
-        const conn = new MockHubConnection();
+        const conn = new MockHubConnection(this.url);
         state.hubConnection = conn;
         return conn;
       }

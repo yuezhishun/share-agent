@@ -207,6 +207,10 @@
           <div v-if="activeRightTab === 'files'" class="file-browser-panel">
             <div class="file-header">
               <span id="currentPath" class="path-breadcrumb">{{ filesStore.currentPath }}</span>
+              <label class="file-hidden-toggle">
+                <input v-model="filesStore.showHidden" type="checkbox" @change="reloadFilesList" />
+                显示隐藏文件
+              </label>
               <span id="uploadBtn" class="upload-btn" @click="pickUploadFiles"><i class="fa-solid fa-upload" /> 上传</span>
             </div>
             <ul id="fileList" class="file-list">
@@ -312,7 +316,7 @@ import { useWebCliTerminalStore } from '../stores/webcli-terminal.js';
 import { useWebCliFilesStore } from '../stores/webcli-files.js';
 import { useWebCliRecipesStore } from '../stores/webcli-recipes.js';
 import { createTerminalProtocolRenderer } from '../composables/useTerminalProtocol.js';
-import { isTerminalViewportRenderable } from './desktop-terminal-resize.js';
+import { isTerminalViewportRenderable, measureStableTerminalGeometry } from './desktop-terminal-resize.js';
 
 const terminalStore = useWebCliTerminalStore();
 const filesStore = useWebCliFilesStore();
@@ -696,8 +700,29 @@ async function fitTerminal() {
   fitAddon?.fit();
 }
 
+async function ensureMeasuredTerminalReady() {
+  await nextTick();
+  const fontsReady = typeof document !== 'undefined' && document.fonts?.ready && typeof document.fonts.ready.then === 'function'
+    ? Promise.race([
+        document.fonts.ready.catch(() => {}),
+        wait(700)
+      ])
+    : Promise.resolve();
+  await fontsReady;
+
+  const measured = await measureStableTerminalGeometry({
+    activeCenterTab: activeCenterTab.value,
+    hostElement: terminalRef.value,
+    fitAddon,
+    term,
+    isDocumentHidden: () => typeof document !== 'undefined' && document.hidden === true,
+    wait
+  });
+  return measured;
+}
+
 function handleTerminalResize({ cols: c, rows: r }) {
-  if (suppressRemoteResize || !isTerminalViewportRenderable(activeCenterTab.value, terminalRef.value)) {
+  if (suppressRemoteResize || document.hidden || !isTerminalViewportRenderable(activeCenterTab.value, terminalRef.value)) {
     return;
   }
 
@@ -726,6 +751,24 @@ function applyResponsiveSidebarCollapse() {
 function onWindowResize() {
   applyResponsiveSidebarCollapse();
   fitTerminal();
+}
+
+function syncVisibleTerminal(reason = 'visible') {
+  if (activeCenterTab.value !== 'terminal' || !terminalStore.wsConnected || !terminalStore.selectedInstanceId) {
+    return;
+  }
+
+  terminalStore.resync().catch(() => {
+    terminalStore.setStatus(`screen sync failed: ${reason}`);
+  });
+}
+
+function onDocumentVisibilityChange() {
+  applyResponsiveSidebarCollapse();
+  fitTerminal();
+  if (typeof document !== 'undefined' && document.hidden === false) {
+    syncVisibleTerminal('visibility');
+  }
 }
 
 async function fitAfterFontsReady() {
@@ -765,6 +808,7 @@ function switchCenterTab(tabId) {
     nextTick(() => {
       fitTerminal();
       focusTerminal();
+      syncVisibleTerminal('tab_switch');
     });
   }
 }
@@ -862,7 +906,14 @@ async function connect(instanceId) {
     return;
   }
   try {
+    const geometry = await ensureMeasuredTerminalReady();
+    if (!geometry) {
+      terminalStore.setStatus('Terminal viewport is not ready');
+      return;
+    }
+
     await terminalStore.connect(id);
+    terminalStore.sendResize(geometry.cols, geometry.rows);
     await fitTerminal();
     if (activeCenterTab.value === 'terminal') {
       focusTerminal();
@@ -980,6 +1031,10 @@ async function goParentDir() {
     return;
   }
   await filesStore.loadList(filesStore.parentPath);
+}
+
+async function reloadFilesList() {
+  await filesStore.loadList(filesStore.currentPath);
 }
 
 async function downloadFileEntry(item) {
@@ -1459,7 +1514,7 @@ onMounted(async () => {
   terminalRef.value?.addEventListener('contextmenu', onTerminalContextMenu);
   if (typeof ResizeObserver === 'function' && terminalRef.value) {
     terminalResizeObserver = new ResizeObserver(() => {
-      if (!isTerminalViewportRenderable(activeCenterTab.value, terminalRef.value)) {
+      if (document.hidden || !isTerminalViewportRenderable(activeCenterTab.value, terminalRef.value)) {
         return;
       }
 
@@ -1473,6 +1528,7 @@ onMounted(async () => {
     terminalResizeObserver.observe(terminalRef.value);
   }
   window.addEventListener('resize', onWindowResize);
+  document.addEventListener('visibilitychange', onDocumentVisibilityChange);
 
   await fitTerminal();
   fitAfterFontsReady().catch(() => {});
@@ -1484,6 +1540,7 @@ onBeforeUnmount(() => {
   unsubscribe?.();
   terminalStore.disconnect();
   window.removeEventListener('resize', onWindowResize);
+  document.removeEventListener('visibilitychange', onDocumentVisibilityChange);
   terminalResizeObserver?.disconnect();
   terminalResizeObserver = null;
   terminalRef.value?.removeEventListener('copy', onTerminalCopy);
@@ -2040,6 +2097,20 @@ button.primary:hover {
   overflow-x: auto;
   white-space: nowrap;
   scrollbar-width: thin;
+}
+
+.file-hidden-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: #c8c8c8;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.file-hidden-toggle input {
+  margin: 0;
 }
 
 .upload-btn {

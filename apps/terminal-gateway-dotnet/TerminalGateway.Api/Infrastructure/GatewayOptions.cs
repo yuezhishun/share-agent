@@ -16,6 +16,9 @@ public sealed class GatewayOptions
     public int Port { get; init; } = 8080;
     public int HistoryLimit { get; init; } = 1000;
     public string FilesBasePath { get; init; } = "/home/yueyuan";
+    public int LargeFileThresholdBytes { get; init; } = 100 * 1024;
+    public int FileChunkBytes { get; init; } = 64 * 1024;
+    public int FileChunkMaxLines { get; init; } = 800;
     public int RawReplayMaxBytes { get; init; } = 512 * 1024;
     public int DefaultCols { get; init; } = 80;
     public int DefaultRows { get; init; } = 25;
@@ -52,6 +55,9 @@ public sealed class GatewayOptions
             Port = ParseInt(config, 8080, "PORT", "Gateway:Port"),
             HistoryLimit = ParseInt(config, 1000, "HISTORY_LIMIT", "Gateway:HistoryLimit"),
             FilesBasePath = Read(config, "FILES_BASE_PATH", "Gateway:FilesBasePath") ?? "/home/yueyuan",
+            LargeFileThresholdBytes = ParseInt(config, 100 * 1024, "TERMINAL_LARGE_FILE_THRESHOLD_BYTES", "Gateway:LargeFileThresholdBytes"),
+            FileChunkBytes = ParseInt(config, 64 * 1024, "TERMINAL_FILE_CHUNK_BYTES", "Gateway:FileChunkBytes"),
+            FileChunkMaxLines = ParseInt(config, 800, "TERMINAL_FILE_CHUNK_MAX_LINES", "Gateway:FileChunkMaxLines"),
             RawReplayMaxBytes = ParseInt(config, 512 * 1024, "RAW_REPLAY_MAX_BYTES", "Gateway:RawReplayMaxBytes"),
             DefaultCols = ParseInt(config, 80, "DEFAULT_COLS", "Gateway:DefaultCols"),
             DefaultRows = ParseInt(config, 25, "DEFAULT_ROWS", "Gateway:DefaultRows"),

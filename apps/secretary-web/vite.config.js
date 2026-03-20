@@ -3,6 +3,30 @@ import vue from '@vitejs/plugin-vue';
 
 export default defineConfig({
   plugins: [vue()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) {
+            return null;
+          }
+          if (id.includes('vditor')) {
+            return 'markdown-editor';
+          }
+          if (id.includes('xterm')) {
+            return 'terminal-vendor';
+          }
+          if (id.includes('@microsoft/signalr')) {
+            return 'signalr';
+          }
+          if (id.includes('vue') || id.includes('pinia') || id.includes('vue-router')) {
+            return 'vue-core';
+          }
+          return null;
+        }
+      }
+    }
+  },
   server: {
     host: '0.0.0.0',
     port: 3000,

@@ -19,6 +19,14 @@ function buildApiPath(pathname, params) {
   return relative;
 }
 
+function buildNodeFilesApiPath(pathname, nodeId, params) {
+  const normalizedNodeId = String(nodeId || '').trim();
+  if (!normalizedNodeId) {
+    return buildApiPath(pathname, params);
+  }
+  return buildApiPath(`/api/nodes/${encodeURIComponent(normalizedNodeId)}${pathname}`, params);
+}
+
 async function parseErrorMessage(response, fallback) {
   const text = await response.text();
   if (!text) {
@@ -68,6 +76,7 @@ function parseDownloadName(headerValue) {
 
 export const useWebCliFilesStore = defineStore('webcliFiles', {
   state: () => ({
+    currentNodeId: '',
     basePath: '/home/yueyuan',
     currentPath: '/home/yueyuan',
     parentPath: '',
@@ -95,12 +104,18 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
       this.currentPath = String(path || this.basePath);
     },
 
-    async loadList(path) {
+    setCurrentNodeId(nodeId) {
+      this.currentNodeId = String(nodeId || '').trim();
+    },
+
+    async loadList(path, nodeId = this.currentNodeId) {
+      const targetNodeId = String(nodeId || '').trim();
+      this.setCurrentNodeId(targetNodeId);
       this.loading = true;
       this.error = '';
       this.resetPreview();
       try {
-        const response = await fetch(buildApiPath('/api/files/list', {
+        const response = await fetch(buildNodeFilesApiPath('/files/list', targetNodeId, {
           path: path || this.currentPath,
           show_hidden: this.showHidden ? '1' : '0'
         }));
@@ -122,10 +137,12 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
       }
     },
 
-    async readFile(path) {
+    async readFile(path, nodeId = this.currentNodeId) {
+      const targetNodeId = String(nodeId || '').trim();
+      this.setCurrentNodeId(targetNodeId);
       this.previewError = '';
       try {
-        const response = await fetch(buildApiPath('/api/files/read', {
+        const response = await fetch(buildNodeFilesApiPath('/files/read', targetNodeId, {
           path,
           max_lines: 500
         }));
@@ -148,11 +165,13 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
       }
     },
 
-    async saveFile(path, content) {
+    async saveFile(path, content, nodeId = this.currentNodeId) {
+      const targetNodeId = String(nodeId || '').trim();
+      this.setCurrentNodeId(targetNodeId);
       this.actionLoading = true;
       this.setActionError('');
       try {
-        const response = await fetch(buildApiPath('/api/files/write'), {
+        const response = await fetch(buildNodeFilesApiPath('/files/write', targetNodeId), {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
@@ -184,25 +203,27 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
       }
     },
 
-    async openEntry(item) {
+    async openEntry(item, nodeId = this.currentNodeId) {
       if (!item || !item.path) {
         return;
       }
       if (item.kind === 'dir') {
-        await this.loadList(item.path);
+        await this.loadList(item.path, nodeId);
         return;
       }
       if (item.kind === 'file') {
-        await this.readFile(item.path);
+        await this.readFile(item.path, nodeId);
       }
     },
 
-    async createDirectory(name, parentPath) {
+    async createDirectory(name, parentPath, nodeId = this.currentNodeId) {
+      const targetNodeId = String(nodeId || '').trim();
+      this.setCurrentNodeId(targetNodeId);
       this.actionLoading = true;
       this.setActionError('');
       try {
         const targetPath = String(parentPath || this.currentPath || this.basePath);
-        const response = await fetch(buildApiPath('/api/files/mkdir'), {
+        const response = await fetch(buildNodeFilesApiPath('/files/mkdir', targetNodeId), {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
@@ -215,7 +236,7 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
         }
 
         const payload = await response.json();
-        await this.loadList(targetPath);
+        await this.loadList(targetPath, targetNodeId);
         return payload?.item || null;
       } catch (error) {
         const message = String(error?.message || error);
@@ -281,12 +302,15 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
       }
     },
 
-    async uploadFiles(fileList, targetPath) {
+    async uploadFiles(fileList, targetPath, nodeId = this.currentNodeId, options = {}) {
       const files = Array.from(fileList || []).filter(Boolean);
       if (files.length === 0) {
         return [];
       }
 
+      const targetNodeId = String(nodeId || '').trim();
+      const instanceId = String(options?.instanceId || '').trim();
+      this.setCurrentNodeId(targetNodeId);
       this.actionLoading = true;
       this.setActionError('');
       try {
@@ -295,8 +319,16 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
         for (const file of files) {
           const form = new FormData();
           form.append('file', file);
-          form.append('path', path);
-          const response = await fetch(buildApiPath('/api/files/upload'), {
+          if (targetNodeId) {
+            if (instanceId) {
+              form.append('instance_id', instanceId);
+            } else {
+              form.append('path', path);
+            }
+          } else {
+            form.append('path', path);
+          }
+          const response = await fetch(buildNodeFilesApiPath('/files/upload', targetNodeId), {
             method: 'POST',
             body: form
           });
@@ -306,7 +338,7 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
           const payload = await response.json();
           uploaded.push(payload?.upload || null);
         }
-        await this.loadList(path);
+        await this.loadList(path, targetNodeId);
         return uploaded;
       } catch (error) {
         const message = String(error?.message || error);
@@ -317,11 +349,13 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
       }
     },
 
-    async downloadEntry(path) {
+    async downloadEntry(path, nodeId = this.currentNodeId) {
+      const targetNodeId = String(nodeId || '').trim();
+      this.setCurrentNodeId(targetNodeId);
       this.actionLoading = true;
       this.setActionError('');
       try {
-        const response = await fetch(buildApiPath('/api/files/download', { path }));
+        const response = await fetch(buildNodeFilesApiPath('/files/download', targetNodeId, { path }));
         if (!response.ok) {
           throw new Error(await parseErrorMessage(response, `download failed: ${response.status}`));
         }
@@ -338,8 +372,8 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
       }
     },
 
-    async downloadFile(path) {
-      return this.downloadEntry(path);
+    async downloadFile(path, nodeId = this.currentNodeId) {
+      return this.downloadEntry(path, nodeId);
     }
   }
 });

@@ -43,6 +43,10 @@ public sealed class TerminalHub : Hub
         {
             await Groups.AddToGroupAsync(connectionId, BuildInstanceGroup(instanceId));
             _registry.Bind(connectionId, instanceId);
+            if (string.IsNullOrWhiteSpace(_manager.GetDisplayOwner(instanceId)))
+            {
+                _manager.SetDisplayOwner(instanceId, connectionId);
+            }
         }
 
         var snapshot = _manager.Snapshot(instanceId, advanceSeq: false);
@@ -79,6 +83,7 @@ public sealed class TerminalHub : Hub
             foreach (var item in bound)
             {
                 await Groups.RemoveFromGroupAsync(connectionId, BuildInstanceGroup(item));
+                await ReassignDisplayOwnerAsync(item);
             }
             return;
         }
@@ -86,6 +91,7 @@ public sealed class TerminalHub : Hub
         if (_registry.Unbind(connectionId, instanceId))
         {
             await Groups.RemoveFromGroupAsync(connectionId, BuildInstanceGroup(instanceId));
+            await ReassignDisplayOwnerAsync(instanceId);
         }
     }
 
@@ -131,8 +137,9 @@ public sealed class TerminalHub : Hub
 
         var cols = request.Cols ?? 0;
         var rows = request.Rows ?? 0;
-        var resized = _manager.Resize(instanceId, cols, rows);
-        if (resized is null)
+        var reqId = string.IsNullOrWhiteSpace(request.ReqId) ? $"resize-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}" : request.ReqId;
+        var resized = _manager.RequestResize(instanceId, Context.ConnectionId, cols, rows);
+        if (!resized.Found)
         {
             if (!TryResolveRemoteNode(instanceId, out var nodeId))
             {
@@ -162,8 +169,42 @@ public sealed class TerminalHub : Hub
                 instance_id = instanceId,
                 node_id = nodeId,
                 node_name = nodeId,
-                req_id = string.IsNullOrWhiteSpace(request.ReqId) ? $"resize-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}" : request.ReqId,
+                req_id = reqId,
+                accepted = true,
                 size = new { cols, rows },
+                ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            });
+            return;
+        }
+
+        if (!resized.Accepted)
+        {
+            await Clients.Caller.SendAsync("TerminalEvent", new
+            {
+                v = 1,
+                type = "term.viewport.rejected",
+                instance_id = instanceId,
+                node_id = _options.NodeId,
+                node_name = _options.NodeName,
+                req_id = reqId,
+                reason = "not_owner",
+                owner_connection_id = resized.OwnerConnectionId,
+                size = new { cols = resized.Cols, rows = resized.Rows },
+                render_epoch = resized.RenderEpoch,
+                ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            });
+            await Clients.Caller.SendAsync("TerminalEvent", new
+            {
+                v = 1,
+                type = "term.resize.ack",
+                instance_id = instanceId,
+                node_id = _options.NodeId,
+                node_name = _options.NodeName,
+                req_id = reqId,
+                accepted = false,
+                reason = "not_owner",
+                size = new { cols = resized.Cols, rows = resized.Rows },
+                render_epoch = resized.RenderEpoch,
                 ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
             });
             return;
@@ -176,10 +217,16 @@ public sealed class TerminalHub : Hub
             instance_id = instanceId,
             node_id = _options.NodeId,
             node_name = _options.NodeName,
-            req_id = string.IsNullOrWhiteSpace(request.ReqId) ? $"resize-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}" : request.ReqId,
-            size = new { cols, rows },
+            req_id = reqId,
+            accepted = true,
+            size = new { cols = resized.Cols, rows = resized.Rows },
+            render_epoch = resized.RenderEpoch,
             ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
         });
+        if (resized.Snapshot is not null)
+        {
+            await Clients.Group(BuildInstanceGroup(instanceId)).SendAsync("TerminalEvent", resized.Snapshot);
+        }
     }
 
     public async Task RequestSync(TerminalSyncRequest request)
@@ -193,6 +240,7 @@ public sealed class TerminalHub : Hub
         var syncType = (request.Type ?? "raw").Trim().ToLowerInvariant();
         if (syncType == "raw")
         {
+            _manager.RecordMetric("resync_requested_total");
             var reqId = string.IsNullOrWhiteSpace(request.ReqId) ? $"raw-sync-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}" : request.ReqId;
             request.ReqId = reqId;
             var sinceSeq = request.SinceSeq is null
@@ -203,6 +251,7 @@ public sealed class TerminalHub : Hub
             {
                 await Clients.Caller.SendAsync("TerminalEvent", replay);
                 await Clients.Caller.SendAsync("TerminalEvent", BuildRawSyncComplete(instanceId, reqId, ReadLong(System.Text.Json.JsonSerializer.SerializeToElement(replay), "to_seq")));
+                _manager.RecordMetric("resync_completed_total");
                 return;
             }
 
@@ -221,6 +270,7 @@ public sealed class TerminalHub : Hub
             {
                 await Clients.Caller.SendAsync("TerminalEvent", remoteRaw);
                 await Clients.Caller.SendAsync("TerminalEvent", BuildRawSyncComplete(instanceId, reqId, ReadLong(remoteRaw, "to_seq") ?? ReadLong(remoteRaw, "seq")));
+                _manager.RecordMetric("resync_completed_total");
                 return;
             }
 
@@ -259,6 +309,7 @@ public sealed class TerminalHub : Hub
         }
 
         var snapshot = _manager.Snapshot(instanceId, advanceSeq: false);
+        _manager.RecordMetric("resync_requested_total");
         if (snapshot is null)
         {
             if (!TryResolveRemoteNode(instanceId, out var nodeId))
@@ -277,10 +328,12 @@ public sealed class TerminalHub : Hub
                 throw new HubException("remote screen sync failed");
             }
             await Clients.Caller.SendAsync("TerminalEvent", remoteSnapshot);
+            _manager.RecordMetric("resync_completed_total");
             return;
         }
 
         await Clients.Caller.SendAsync("TerminalEvent", snapshot);
+        _manager.RecordMetric("resync_completed_total");
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)
@@ -289,9 +342,22 @@ public sealed class TerminalHub : Hub
         foreach (var instanceId in bound)
         {
             await Groups.RemoveFromGroupAsync(Context.ConnectionId, BuildInstanceGroup(instanceId));
+            await ReassignDisplayOwnerAsync(instanceId);
         }
 
         await base.OnDisconnectedAsync(exception);
+    }
+
+    private async Task ReassignDisplayOwnerAsync(string instanceId)
+    {
+        var currentOwner = _manager.GetDisplayOwner(instanceId);
+        if (!string.Equals(currentOwner, Context.ConnectionId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var nextOwner = _registry.GetConnections(instanceId).FirstOrDefault();
+        _manager.SetDisplayOwner(instanceId, nextOwner);
     }
 
     private bool TryResolveRemoteNode(string instanceId, out string nodeId)

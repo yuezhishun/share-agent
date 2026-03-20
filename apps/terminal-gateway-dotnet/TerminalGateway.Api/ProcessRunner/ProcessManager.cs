@@ -385,6 +385,34 @@ namespace ProcessRunner
             }).ToList();
         }
 
+        /// <summary>
+        /// 删除指定进程记录
+        /// </summary>
+        /// <param name="processId">进程ID</param>
+        public void RemoveProcess(string processId)
+        {
+            if (!_processes.TryGetValue(processId, out var managedProcess))
+                throw new ArgumentException($"进程 {processId} 不存在", nameof(processId));
+
+            if (managedProcess.Status == ProcessStatus.Running || managedProcess.Status == ProcessStatus.NotStarted)
+            {
+                try
+                {
+                    managedProcess.CancellationTokenSource.Cancel();
+                    WaitProcessCompletionAsync(processId, TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    AddOutputRecord(processId, ProcessOutputType.SystemMessage, $"删除进程时发生错误: {ex.Message}");
+                }
+            }
+
+            if (_processes.TryRemove(processId, out var removed))
+            {
+                removed.CancellationTokenSource.Dispose();
+            }
+        }
+
         #endregion
 
         #region 输出管理方法

@@ -3,6 +3,7 @@ using System.Collections;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using TerminalGateway.Api.Infrastructure;
 using TerminalGateway.Api.Models;
 using TerminalGateway.Api.Pty;
@@ -25,9 +26,13 @@ public sealed class InstanceManager
     public event Action<string, object>? Patch;
     public event Action<string, object>? Raw;
     public event Action<string, object>? Exited;
+    public event Action<string, object>? StateChanged;
+    public event Action<string>? Created;
+    public event Action<string, int, int>? Resized;
     public string NodeId => _nodeId;
     public string NodeName => _nodeName;
     public string NodeRole => _nodeRole;
+    private readonly ConcurrentDictionary<string, long> _metrics = new(StringComparer.Ordinal);
 
     public InstanceManager(
         IPtyEngine ptyEngine,
@@ -103,7 +108,9 @@ public sealed class InstanceManager
             CreatedAt = DateTimeOffset.UtcNow,
             Pty = runtime,
             History = new HistoryRing(_historyLimit),
-            Buffer = new TerminalStateBuffer(_historyLimit * 2)
+            Buffer = new TerminalStateBuffer(_historyLimit * 2),
+            InstanceEpoch = 1,
+            RenderEpoch = 1
         };
 
         runtime.OutputReceived += data => OnOutput(state, data);
@@ -114,6 +121,8 @@ public sealed class InstanceManager
             await runtime.DisposeAsync();
             throw new InvalidOperationException("instance id collision");
         }
+
+        Created?.Invoke(id);
 
         return ToSummary(state);
     }
@@ -181,12 +190,58 @@ public sealed class InstanceManager
             return null;
         }
 
-        var safeCols = SanitizeDimension(cols, state.Cols, 1, 500);
-        var safeRows = SanitizeDimension(rows, state.Rows, 1, 300);
-        state.Cols = safeCols;
-        state.Rows = safeRows;
+        RecordMetric("resize_requests_total");
+        int safeCols;
+        int safeRows;
+        object snapshot;
+        lock (state.Sync)
+        {
+            safeCols = SanitizeDimension(cols, state.Cols, 1, 500);
+            safeRows = SanitizeDimension(rows, state.Rows, 1, 300);
+            state.Cols = safeCols;
+            state.Rows = safeRows;
+            state.RenderEpoch++;
+            snapshot = BuildSnapshotUnsafe(state);
+        }
+
         _ = state.Pty.ResizeAsync(safeCols, safeRows, CancellationToken.None);
-        return Snapshot(state, advanceSeq: true);
+        Resized?.Invoke(instanceId, safeCols, safeRows);
+        RecordMetric("resize_applied_total");
+        return snapshot;
+    }
+
+    public ResizeDecision RequestResize(string instanceId, string connectionId, int cols, int rows)
+    {
+        var state = Get(instanceId);
+        if (state is null)
+        {
+            return ResizeDecision.NotFound();
+        }
+
+        RecordMetric("resize_requests_total");
+        int safeCols;
+        int safeRows;
+        object snapshot;
+        lock (state.Sync)
+        {
+            if (!string.Equals(state.DisplayOwnerConnectionId, connectionId, StringComparison.Ordinal))
+            {
+                RecordMetric("resize_rejected_not_owner_total");
+                return ResizeDecision.Rejected(state.Cols, state.Rows, state.RenderEpoch, state.DisplayOwnerConnectionId);
+            }
+
+            safeCols = SanitizeDimension(cols, state.Cols, 1, 500);
+            safeRows = SanitizeDimension(rows, state.Rows, 1, 300);
+            state.Cols = safeCols;
+            state.Rows = safeRows;
+            state.RenderEpoch++;
+            snapshot = BuildSnapshotUnsafe(state);
+        }
+
+        _ = state.Pty.ResizeAsync(safeCols, safeRows, CancellationToken.None);
+        Resized?.Invoke(instanceId, safeCols, safeRows);
+        RecordMetric("resize_applied_total");
+        return ResizeDecision.FromAccepted(snapshot, safeCols, safeRows, GetRenderEpoch(snapshot));
     }
 
     public object? Snapshot(string instanceId, bool advanceSeq)
@@ -434,8 +489,11 @@ public sealed class InstanceManager
             instance_id = state.Id,
             node_id = _nodeId,
             node_name = _nodeName,
+            instance_epoch = state.InstanceEpoch,
+            render_epoch = state.RenderEpoch,
             seq = state.Seq,
             ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            size = new { cols = state.Cols, rows = state.Rows },
             cursor,
             styles = new Dictionary<string, object>
             {
@@ -449,30 +507,139 @@ public sealed class InstanceManager
     {
         lock (state.Sync)
         {
-            var lines = GetVisibleTail(state.Buffer.VisibleLines, state.Rows);
-            var cursor = BuildCursor(state, lines);
-            state.LastVisibleSignatures = lines;
-
-            return new
-            {
-                v = 1,
-                type = "term.snapshot",
-                instance_id = state.Id,
-                node_id = _nodeId,
-                node_name = _nodeName,
-                seq = state.Seq,
-                base_seq = state.Seq,
-                ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                size = new { cols = state.Cols, rows = state.Rows },
-                cursor,
-                styles = new Dictionary<string, object>
-                {
-                    ["0"] = new { fg = (int?)null, bg = (int?)null, bold = false, italic = false, underline = false, inverse = false }
-                },
-                rows = lines.Select((line, index) => new { y = index, segs = new object[] { new object[] { line, 0 } } }).ToList(),
-                history = new { available = state.History.Count, newest_cursor = state.History.NewestCursor() }
-            };
+            var snapshot = BuildSnapshotUnsafe(state);
+            RecordMetric("snapshot_sent_total");
+            return snapshot;
         }
+    }
+
+    private object BuildSnapshotUnsafe(InstanceState state)
+    {
+        var lines = GetVisibleTail(state.Buffer.VisibleLines, state.Rows);
+        var cursor = BuildCursor(state, lines);
+        state.LastVisibleSignatures = lines;
+        var ansi = string.Concat(state.RawChunks.Select(x => x.Data));
+        var ansiTruncated = state.RawChunks.Count > 0 && state.RawChunks[0].Seq > 1;
+
+        return new
+        {
+            v = 1,
+            type = "term.snapshot",
+            instance_id = state.Id,
+            node_id = _nodeId,
+            node_name = _nodeName,
+            instance_epoch = state.InstanceEpoch,
+            render_epoch = state.RenderEpoch,
+            owner_connection_id = state.DisplayOwnerConnectionId,
+            seq = state.Seq,
+            base_seq = state.Seq,
+            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            size = new { cols = state.Cols, rows = state.Rows },
+            cursor,
+            ansi,
+            ansi_truncated = ansiTruncated,
+            styles = new Dictionary<string, object>
+            {
+                ["0"] = new { fg = (int?)null, bg = (int?)null, bold = false, italic = false, underline = false, inverse = false }
+            },
+            rows = lines.Select((line, index) => new { y = index, segs = new object[] { new object[] { line, 0 } } }).ToList(),
+            history = new { available = state.History.Count, newest_cursor = state.History.NewestCursor() }
+        };
+    }
+
+    public bool IsDisplayOwner(string instanceId, string connectionId)
+    {
+        var state = Get(instanceId);
+        if (state is null)
+        {
+            return false;
+        }
+
+        lock (state.Sync)
+        {
+            return string.Equals(state.DisplayOwnerConnectionId, connectionId, StringComparison.Ordinal);
+        }
+    }
+
+    public object? SetDisplayOwner(string instanceId, string? connectionId)
+    {
+        var state = Get(instanceId);
+        if (state is null)
+        {
+            return null;
+        }
+
+        object? changed = null;
+        lock (state.Sync)
+        {
+            var normalized = (connectionId ?? string.Empty).Trim();
+            if (string.Equals(state.DisplayOwnerConnectionId, normalized, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            state.DisplayOwnerConnectionId = normalized;
+            changed = BuildOwnerChangedUnsafe(state);
+        }
+
+        StateChanged?.Invoke(state.Id, changed);
+        return changed;
+    }
+
+    public string? GetDisplayOwner(string instanceId)
+    {
+        var state = Get(instanceId);
+        if (state is null)
+        {
+            return null;
+        }
+
+        lock (state.Sync)
+        {
+            return state.DisplayOwnerConnectionId;
+        }
+    }
+
+    public IReadOnlyDictionary<string, long> MetricsSnapshot()
+    {
+        return _metrics.ToDictionary(x => x.Key, x => x.Value, StringComparer.Ordinal);
+    }
+
+    public void RecordMetric(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return;
+        }
+
+        _metrics.AddOrUpdate(name.Trim(), 1, static (_, current) => current + 1);
+    }
+
+    private object BuildOwnerChangedUnsafe(InstanceState state)
+    {
+        return new
+        {
+            v = 1,
+            type = "term.owner.changed",
+            instance_id = state.Id,
+            node_id = _nodeId,
+            node_name = _nodeName,
+            instance_epoch = state.InstanceEpoch,
+            render_epoch = state.RenderEpoch,
+            owner_connection_id = state.DisplayOwnerConnectionId,
+            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
+    }
+
+    private static long GetRenderEpoch(object snapshot)
+    {
+        var element = JsonSerializer.SerializeToElement(snapshot);
+        if (element.TryGetProperty("render_epoch", out var renderEpoch) && renderEpoch.TryGetInt64(out var value))
+        {
+            return value;
+        }
+
+        return 0;
     }
 
     private static object BuildCursor(InstanceState state, IReadOnlyList<string> lines)
@@ -739,6 +906,9 @@ public sealed class InstanceManager
         public int Rows { get; set; }
         public DateTimeOffset CreatedAt { get; init; }
         public string Status { get; set; } = "running";
+        public long InstanceEpoch { get; set; }
+        public long RenderEpoch { get; set; }
+        public string DisplayOwnerConnectionId { get; set; } = string.Empty;
         public int Seq { get; set; }
         public required IPtyRuntimeSession Pty { get; init; }
         public required HistoryRing History { get; init; }
@@ -755,5 +925,38 @@ public sealed class InstanceManager
             public required string Data { get; init; }
             public required int Bytes { get; init; }
         }
+    }
+
+    public sealed class ResizeDecision
+    {
+        public bool Found { get; init; }
+        public bool Accepted { get; init; }
+        public object? Snapshot { get; init; }
+        public int Cols { get; init; }
+        public int Rows { get; init; }
+        public long RenderEpoch { get; init; }
+        public string OwnerConnectionId { get; init; } = string.Empty;
+
+        public static ResizeDecision NotFound() => new() { Found = false };
+
+        public static ResizeDecision Rejected(int cols, int rows, long renderEpoch, string? ownerConnectionId) => new()
+        {
+            Found = true,
+            Accepted = false,
+            Cols = cols,
+            Rows = rows,
+            RenderEpoch = renderEpoch,
+            OwnerConnectionId = (ownerConnectionId ?? string.Empty).Trim()
+        };
+
+        public static ResizeDecision FromAccepted(object snapshot, int cols, int rows, long renderEpoch) => new()
+        {
+            Found = true,
+            Accepted = true,
+            Snapshot = snapshot,
+            Cols = cols,
+            Rows = rows,
+            RenderEpoch = renderEpoch
+        };
     }
 }

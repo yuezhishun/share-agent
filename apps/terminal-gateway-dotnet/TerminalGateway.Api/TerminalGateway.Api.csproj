@@ -8,6 +8,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" />
     <PackageReference Include="Porta.Pty" />
+    <PackageReference Include="XTerm.NET" />
   </ItemGroup>
 
   <ItemGroup>

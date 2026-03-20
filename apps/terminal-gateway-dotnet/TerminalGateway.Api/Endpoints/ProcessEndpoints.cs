@@ -89,6 +89,22 @@ public static class ProcessEndpoints
             }
         });
 
+        app.MapDelete("/api/processes/{processId}", (string processId, ProcessApiService processes) =>
+        {
+            try
+            {
+                return Results.Ok(processes.RemoveManaged(processId));
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                return Results.NotFound(new { error = ex.Message });
+            }
+        });
+
         return app;
     }
 }

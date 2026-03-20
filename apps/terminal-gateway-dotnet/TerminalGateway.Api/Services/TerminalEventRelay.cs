@@ -13,8 +13,10 @@ public sealed class TerminalEventRelay
     {
         _hub = hub;
 
+        manager.Patch += (instanceId, payload) => Enqueue(instanceId, payload);
         manager.Raw += (instanceId, payload) => Enqueue(instanceId, payload);
         manager.Exited += (instanceId, payload) => Enqueue(instanceId, payload);
+        manager.StateChanged += (instanceId, payload) => Enqueue(instanceId, payload);
     }
 
     private void Enqueue(string instanceId, object payload)

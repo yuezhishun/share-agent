@@ -14,7 +14,8 @@ public static class ApiRoutes
             {
                 ok = true,
                 now = DateTimeOffset.UtcNow.ToString("O"),
-                instances = manager.List().Count
+                instances = manager.List().Count,
+                metrics = manager.MetricsSnapshot()
             }));
 
         app.MapGet("/api/instances", (InstanceManager manager) => Results.Ok(new { items = manager.List() }));
@@ -355,6 +356,37 @@ public static class ApiRoutes
             }
         });
 
+        app.MapDelete("/api/nodes/{nodeId}/processes/{processId}", async (string nodeId, string processId, ProcessApiService processes, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        {
+            if (IsLocalNode(nodeId, options))
+            {
+                try
+                {
+                    return Results.Ok(processes.RemoveManaged(processId));
+                }
+                catch (InvalidOperationException ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message, node_id = nodeId, process_id = processId });
+                }
+                catch (Exception ex)
+                {
+                    return Results.NotFound(new { error = ex.Message, node_id = nodeId, process_id = processId });
+                }
+            }
+
+            try
+            {
+                var result = await broker.SendAsync(nodeId, "process.remove", new { process_id = processId }, ct);
+                return result.Ok
+                    ? Results.Ok(result.Payload)
+                    : Results.NotFound(new { error = result.Error ?? "remote process remove failed", node_id = nodeId, process_id = processId });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, process_id = processId });
+            }
+        });
+
         app.MapPost("/api/nodes/{nodeId}/files/upload", async (HttpRequest request, string nodeId, InstanceManager manager, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
         {
             if (!request.HasFormContentType)
@@ -370,32 +402,40 @@ public static class ApiRoutes
             }
 
             var instanceId = form["instance_id"].ToString();
-            if (instanceId.Length == 0)
+            var targetPath = form["path"].ToString();
+            if (instanceId.Length == 0 && targetPath.Length == 0)
             {
-                return Results.BadRequest(new { error = "instance_id is required", node_id = nodeId });
+                return Results.BadRequest(new { error = "instance_id or path is required", node_id = nodeId });
             }
 
             if (IsLocalNode(nodeId, options))
             {
-                var state = manager.Get(instanceId);
-                if (state is null)
-                {
-                    return Results.NotFound(new { error = "instance not found", node_id = nodeId, instance_id = instanceId });
-                }
-
                 try
                 {
                     await using var stream = file.OpenReadStream();
-                    var uploaded = await files.SaveUploadAsync(options.FilesBasePath, state.Cwd, file.FileName, stream, file.Length, ct);
-                    return Results.Ok(new { node_id = nodeId, instance_id = instanceId, upload = uploaded });
+                    object uploaded;
+                    if (instanceId.Length > 0)
+                    {
+                        var state = manager.Get(instanceId);
+                        if (state is null)
+                        {
+                            return Results.NotFound(new { error = "instance not found", node_id = nodeId, instance_id = instanceId });
+                        }
+                        uploaded = await files.SaveUploadAsync(options.FilesBasePath, state.Cwd, file.FileName, stream, file.Length, ct);
+                    }
+                    else
+                    {
+                        uploaded = await files.UploadToPathAsync(options.FilesBasePath, targetPath, file.FileName, stream, file.Length, ct);
+                    }
+                    return Results.Ok(new { node_id = nodeId, instance_id = instanceId, path = targetPath, upload = uploaded });
                 }
                 catch (InvalidDataException ex)
                 {
-                    return Results.BadRequest(new { error = ex.Message, node_id = nodeId, instance_id = instanceId });
+                    return Results.BadRequest(new { error = ex.Message, node_id = nodeId, instance_id = instanceId, path = targetPath });
                 }
                 catch (Exception ex)
                 {
-                    return Results.BadRequest(new { error = ex.Message, node_id = nodeId, instance_id = instanceId });
+                    return Results.BadRequest(new { error = ex.Message, node_id = nodeId, instance_id = instanceId, path = targetPath });
                 }
             }
 
@@ -412,24 +452,274 @@ public static class ApiRoutes
                 var result = await broker.SendAsync(nodeId, "files.upload", new
                 {
                     instance_id = instanceId,
+                    path = targetPath,
                     file_name = file.FileName,
                     content_base64 = Convert.ToBase64String(buffer.ToArray())
                 }, ct);
 
                 if (!result.Ok)
                 {
-                    return Results.BadRequest(new { error = result.Error ?? "remote upload failed", node_id = nodeId, instance_id = instanceId });
+                    return Results.BadRequest(new { error = result.Error ?? "remote upload failed", node_id = nodeId, instance_id = instanceId, path = targetPath });
                 }
 
-                return Results.Ok(new { node_id = nodeId, instance_id = instanceId, upload = result.Payload });
+                return Results.Ok(new { node_id = nodeId, instance_id = instanceId, path = targetPath, upload = result.Payload });
             }
             catch (InvalidDataException ex)
             {
-                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, instance_id = instanceId });
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, instance_id = instanceId, path = targetPath });
             }
             catch (Exception ex)
             {
-                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, instance_id = instanceId });
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, instance_id = instanceId, path = targetPath });
+            }
+        });
+
+        app.MapGet("/api/nodes/{nodeId}/files/list", async (string nodeId, string? path, string? show_hidden, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        {
+            var showHidden = ParseBooleanFlag(show_hidden);
+            if (IsLocalNode(nodeId, options))
+            {
+                try
+                {
+                    return Results.Ok(files.List(options.FilesBasePath, path, showHidden));
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    return Results.Json(new { error = ex.Message, @base = options.FilesBasePath, node_id = nodeId }, statusCode: StatusCodes.Status403Forbidden);
+                }
+                catch (DirectoryNotFoundException ex)
+                {
+                    return Results.NotFound(new { error = ex.Message, path, node_id = nodeId });
+                }
+                catch (Exception ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message, node_id = nodeId });
+                }
+            }
+
+            try
+            {
+                var result = await broker.SendAsync(nodeId, "files.list", new
+                {
+                    path,
+                    show_hidden = showHidden
+                }, ct);
+                return result.Ok
+                    ? Results.Ok(result.Payload)
+                    : Results.BadRequest(new { error = result.Error ?? "remote file list failed", node_id = nodeId, path });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, path });
+            }
+        });
+
+        app.MapGet("/api/nodes/{nodeId}/files/read", async (string nodeId, string? path, int? max_lines, int? chunk_bytes, int? line_offset, string? direction, string? mode, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        {
+            var maxLines = Math.Clamp(max_lines ?? options.FileChunkMaxLines, 1, 5000);
+            var chunkBytes = Math.Clamp(chunk_bytes ?? options.FileChunkBytes, 1, 1024 * 1024);
+            var lineOffset = Math.Max(0, line_offset ?? 0);
+            if (IsLocalNode(nodeId, options))
+            {
+                try
+                {
+                    return Results.Ok(await files.ReadAsync(
+                        options.FilesBasePath,
+                        path,
+                        maxLines,
+                        mode,
+                        ct,
+                        chunkBytes,
+                        lineOffset,
+                        direction,
+                        options.LargeFileThresholdBytes));
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    return Results.Json(new { error = ex.Message, @base = options.FilesBasePath, node_id = nodeId }, statusCode: StatusCodes.Status403Forbidden);
+                }
+                catch (FileNotFoundException ex)
+                {
+                    return Results.NotFound(new { error = ex.Message, path = ex.FileName, node_id = nodeId });
+                }
+                catch (InvalidDataException ex)
+                {
+                    return Results.Json(new { error = ex.Message, path, node_id = nodeId }, statusCode: StatusCodes.Status415UnsupportedMediaType);
+                }
+                catch (Exception ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message, node_id = nodeId, path });
+                }
+            }
+
+            try
+            {
+                var result = await broker.SendAsync(nodeId, "files.read", new
+                {
+                    path,
+                    max_lines = maxLines,
+                    chunk_bytes = chunkBytes,
+                    line_offset = lineOffset,
+                    direction,
+                    mode
+                }, ct);
+                return result.Ok
+                    ? Results.Ok(result.Payload)
+                    : Results.BadRequest(new { error = result.Error ?? "remote file read failed", node_id = nodeId, path });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, path });
+            }
+        });
+
+        app.MapPost("/api/nodes/{nodeId}/files/write", async (string nodeId, FileWriteRequest body, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        {
+            if (IsLocalNode(nodeId, options))
+            {
+                try
+                {
+                    return Results.Ok(await files.WriteAsync(options.FilesBasePath, body.Path, body.Content, ct));
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    return Results.Json(new { error = ex.Message, @base = options.FilesBasePath, node_id = nodeId }, statusCode: StatusCodes.Status403Forbidden);
+                }
+                catch (DirectoryNotFoundException ex)
+                {
+                    return Results.NotFound(new { error = ex.Message, path = body.Path, node_id = nodeId });
+                }
+                catch (InvalidDataException ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message, path = body.Path, node_id = nodeId });
+                }
+                catch (Exception ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message, path = body.Path, node_id = nodeId });
+                }
+            }
+
+            try
+            {
+                var result = await broker.SendAsync(nodeId, "files.write", body, ct);
+                return result.Ok
+                    ? Results.Ok(result.Payload)
+                    : Results.BadRequest(new { error = result.Error ?? "remote file write failed", node_id = nodeId, path = body.Path });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, path = body.Path });
+            }
+        });
+
+        app.MapPost("/api/nodes/{nodeId}/files/mkdir", async (string nodeId, FileMkdirRequest body, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        {
+            var targetPath = string.IsNullOrWhiteSpace(body.Path) ? options.FilesBasePath : body.Path;
+            if (IsLocalNode(nodeId, options))
+            {
+                try
+                {
+                    var item = files.CreateDirectory(options.FilesBasePath, targetPath, body.Name);
+                    return Results.Ok(new { item });
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    return Results.Json(new { error = ex.Message, @base = options.FilesBasePath, node_id = nodeId }, statusCode: StatusCodes.Status403Forbidden);
+                }
+                catch (DirectoryNotFoundException ex)
+                {
+                    return Results.NotFound(new { error = ex.Message, path = targetPath, node_id = nodeId });
+                }
+                catch (InvalidDataException ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message, path = targetPath, node_id = nodeId });
+                }
+                catch (Exception ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message, path = targetPath, node_id = nodeId });
+                }
+            }
+
+            try
+            {
+                var result = await broker.SendAsync(nodeId, "files.mkdir", new
+                {
+                    path = targetPath,
+                    name = body.Name
+                }, ct);
+                return result.Ok
+                    ? Results.Ok(new { item = result.Payload })
+                    : Results.BadRequest(new { error = result.Error ?? "remote mkdir failed", node_id = nodeId, path = targetPath });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, path = targetPath });
+            }
+        });
+
+        app.MapGet("/api/nodes/{nodeId}/files/download", async (string nodeId, string? path, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        {
+            if (IsLocalNode(nodeId, options))
+            {
+                FileApiService.DownloadStreamResult? download = null;
+                try
+                {
+                    download = files.OpenDownloadStream(options.FilesBasePath, path);
+                    return Results.Stream(download.Stream, download.ContentType, download.Name, enableRangeProcessing: download.EnableRangeProcessing);
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    download?.Stream.Dispose();
+                    return Results.Json(new { error = ex.Message, @base = options.FilesBasePath, node_id = nodeId }, statusCode: StatusCodes.Status403Forbidden);
+                }
+                catch (FileNotFoundException ex)
+                {
+                    download?.Stream.Dispose();
+                    return Results.NotFound(new { error = ex.Message, path = ex.FileName ?? path, node_id = nodeId });
+                }
+                catch (Exception ex)
+                {
+                    download?.Stream.Dispose();
+                    return Results.BadRequest(new { error = ex.Message, path, node_id = nodeId });
+                }
+            }
+
+            try
+            {
+                var result = await broker.SendAsync(nodeId, "files.download", new { path }, ct);
+                if (!result.Ok)
+                {
+                    return Results.BadRequest(new { error = result.Error ?? "remote download failed", node_id = nodeId, path });
+                }
+
+                if (result.Payload.ValueKind != JsonValueKind.Object)
+                {
+                    return Results.BadRequest(new { error = "remote download response invalid", node_id = nodeId, path });
+                }
+
+                var fileName = result.Payload.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
+                var contentType = result.Payload.TryGetProperty("content_type", out var typeProp) ? typeProp.GetString() : null;
+                var contentBase64 = result.Payload.TryGetProperty("content_base64", out var bodyProp) ? bodyProp.GetString() : null;
+                if (string.IsNullOrWhiteSpace(fileName) || string.IsNullOrWhiteSpace(contentBase64))
+                {
+                    return Results.BadRequest(new { error = "remote download response missing file payload", node_id = nodeId, path });
+                }
+
+                byte[] bytes;
+                try
+                {
+                    bytes = Convert.FromBase64String(contentBase64);
+                }
+                catch
+                {
+                    return Results.BadRequest(new { error = "remote download response invalid", node_id = nodeId, path });
+                }
+
+                return Results.File(bytes, contentType ?? "application/octet-stream", fileName);
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, path });
             }
         });
 
@@ -456,12 +746,23 @@ public static class ApiRoutes
             }
         });
 
-        app.MapGet("/api/files/read", async (string? path, int? max_lines, FileApiService files, GatewayOptions options, CancellationToken ct) =>
+        app.MapGet("/api/files/read", async (string? path, int? max_lines, int? chunk_bytes, int? line_offset, string? direction, string? mode, FileApiService files, GatewayOptions options, CancellationToken ct) =>
         {
-            var maxLines = Math.Clamp(max_lines ?? 500, 1, 2000);
+            var maxLines = Math.Clamp(max_lines ?? options.FileChunkMaxLines, 1, 5000);
+            var chunkBytes = Math.Clamp(chunk_bytes ?? options.FileChunkBytes, 1, 1024 * 1024);
+            var lineOffset = Math.Max(0, line_offset ?? 0);
             try
             {
-                var result = await files.ReadAsync(options.FilesBasePath, path, maxLines, ct);
+                var result = await files.ReadAsync(
+                    options.FilesBasePath,
+                    path,
+                    maxLines,
+                    mode,
+                    ct,
+                    chunkBytes,
+                    lineOffset,
+                    direction,
+                    options.LargeFileThresholdBytes);
                 return Results.Ok(result);
             }
             catch (UnauthorizedAccessException ex)
@@ -668,5 +969,11 @@ public static class ApiRoutes
     {
         var normalized = (nodeId ?? string.Empty).Trim();
         return normalized.Length == 0 || string.Equals(normalized, options.NodeId, StringComparison.Ordinal);
+    }
+
+    private static bool ParseBooleanFlag(string? value)
+    {
+        var normalized = (value ?? string.Empty).Trim();
+        return normalized == "1" || string.Equals(normalized, "true", StringComparison.OrdinalIgnoreCase);
     }
 }

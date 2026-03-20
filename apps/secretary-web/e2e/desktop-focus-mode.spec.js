@@ -77,3 +77,24 @@ test('desktop view should auto-collapse both sidebars on phone viewport', async 
   await expect(leftSidebar).toBeHidden();
   await expect(rightSidebar).toBeHidden();
 });
+
+test('desktop file browser should expose top-row file actions and create folders inline', async ({ page }) => {
+  await installMockRuntime(page);
+  await page.goto('/');
+
+  const hiddenToggle = page.getByTestId('toggle-hidden-files');
+  const createFolderToggle = page.getByTestId('create-folder-toggle');
+  const uploadTrigger = page.getByTestId('upload-file-trigger');
+
+  await expect(hiddenToggle).toBeVisible();
+  await expect(createFolderToggle).toBeVisible();
+  await expect(uploadTrigger).toBeVisible();
+
+  await createFolderToggle.click();
+  await expect(page.getByTestId('folder-creator')).toBeVisible();
+  await page.getByTestId('folder-name-input').fill('workspace');
+  await page.getByRole('button', { name: '创建' }).click();
+
+  await expect(page.getByTestId('folder-creator')).toBeHidden();
+  await expect(page.locator('#fileList .file-item').filter({ hasText: 'workspace' })).toHaveCount(1);
+});

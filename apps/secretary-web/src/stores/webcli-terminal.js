@@ -141,12 +141,10 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
     routeResyncTimers: {},
     routeResyncInFlight: {},
     resizeAckByInstance: {},
+    hubConnectionId: '',
     plainOutput: '',
     plainOutputByInstance: {},
-    terminalResponseRoute: {
-      instanceId: '',
-      expiresAt: 0
-    },
+    terminalResponseRoutes: {},
     uiSession: {
       rightPanelCollapsed: false,
       activeRightTab: 'files'
@@ -253,10 +251,58 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
         return;
       }
 
-      this.terminalResponseRoute = {
-        instanceId,
-        expiresAt: Date.now() + AUTO_RESPONSE_ROUTE_TTL_MS
+      this.terminalResponseRoutes = {
+        ...this.terminalResponseRoutes,
+        [instanceId]: {
+          expiresAt: Date.now() + AUTO_RESPONSE_ROUTE_TTL_MS,
+          lastProbeAt: Date.now()
+        }
       };
+    },
+
+    pruneTerminalResponseRoutes(activeInstanceIds = null) {
+      const now = Date.now();
+      const activeIds = activeInstanceIds instanceof Set ? activeInstanceIds : null;
+      const next = {};
+
+      for (const [instanceId, route] of Object.entries(this.terminalResponseRoutes || {})) {
+        const normalizedId = String(instanceId || '').trim();
+        if (!normalizedId) {
+          continue;
+        }
+        if (activeIds && !activeIds.has(normalizedId)) {
+          continue;
+        }
+
+        const expiresAt = Number(route?.expiresAt || 0);
+        if (!Number.isFinite(expiresAt) || expiresAt < now) {
+          continue;
+        }
+
+        next[normalizedId] = {
+          expiresAt,
+          lastProbeAt: Number(route?.lastProbeAt || 0)
+        };
+      }
+
+      this.terminalResponseRoutes = next;
+    },
+
+    resolveTerminalResponseRouteInstanceId() {
+      this.pruneTerminalResponseRoutes();
+
+      let matchedInstanceId = '';
+      let latestProbeAt = -1;
+      for (const [instanceId, route] of Object.entries(this.terminalResponseRoutes || {})) {
+        const probeAt = Number(route?.lastProbeAt || 0);
+        if (!Number.isFinite(probeAt) || probeAt <= latestProbeAt) {
+          continue;
+        }
+        latestProbeAt = probeAt;
+        matchedInstanceId = instanceId;
+      }
+
+      return matchedInstanceId;
     },
 
     resolveInputTargetInstanceId(data) {
@@ -265,11 +311,9 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
         return selectedId;
       }
 
-      const routeInstanceId = String(this.terminalResponseRoute?.instanceId || '').trim();
-      const routeExpiresAt = Number(this.terminalResponseRoute?.expiresAt || 0);
-      if (!routeInstanceId || !Number.isFinite(routeExpiresAt) || routeExpiresAt < Date.now()) {
-        this.terminalResponseRoute = { instanceId: '', expiresAt: 0 };
-        return selectedId;
+      const routeInstanceId = String(this.resolveTerminalResponseRouteInstanceId() || '').trim();
+      if (!routeInstanceId) {
+        return '';
       }
 
       return routeInstanceId;
@@ -504,7 +548,15 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
           syncInFlight: false,
           activeReqId: '',
           pendingRaw: [],
-          syncTimeout: null
+          syncTimeout: null,
+          attachState: 'idle',
+          awaitingSnapshot: false,
+          renderEpoch: 0,
+          instanceEpoch: 0,
+          ownerConnectionId: '',
+          screenSyncInFlight: false,
+          screenSyncReqId: '',
+          screenSyncTimeout: null
         };
       }
       return this.streamStates[id];
@@ -561,8 +613,111 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
         syncInFlight: false,
         activeReqId: '',
         pendingRaw: [],
-        syncTimeout: null
+        syncTimeout: null,
+        attachState: 'idle',
+        awaitingSnapshot: false,
+        renderEpoch: 0,
+        instanceEpoch: 0,
+        ownerConnectionId: '',
+        screenSyncInFlight: false,
+        screenSyncReqId: '',
+        screenSyncTimeout: null
       };
+    },
+
+    markAwaitingSnapshot(instanceId, reason = 'screen_sync') {
+      const id = String(instanceId || '').trim();
+      const stream = this.ensureStreamState(id);
+      if (!stream) {
+        return;
+      }
+
+      stream.attachState = stream.attachState === 'idle' ? 'attaching' : 'awaiting_snapshot';
+      stream.awaitingSnapshot = true;
+      if (stream.screenSyncTimeout) {
+        clearTimeout(stream.screenSyncTimeout);
+      }
+      const reqId = stream.screenSyncReqId;
+      stream.screenSyncTimeout = setTimeout(() => {
+        const latest = this.streamStates[id];
+        if (!latest || latest.screenSyncReqId !== reqId || latest.awaitingSnapshot === false) {
+          return;
+        }
+        this.emitLocalSyncRequired(id, `${reason}_timeout`);
+      }, 1500);
+    },
+
+    markSnapshotReady(instanceId, message) {
+      const id = String(instanceId || '').trim();
+      const stream = this.ensureStreamState(id);
+      if (!stream) {
+        return;
+      }
+
+      stream.attachState = 'ready';
+      stream.awaitingSnapshot = false;
+      stream.renderEpoch = parseSeq(message?.render_epoch, stream.renderEpoch);
+      stream.instanceEpoch = parseSeq(message?.instance_epoch, stream.instanceEpoch);
+      stream.ownerConnectionId = String(message?.owner_connection_id || stream.ownerConnectionId || '').trim();
+      if (stream.screenSyncTimeout) {
+        clearTimeout(stream.screenSyncTimeout);
+        stream.screenSyncTimeout = null;
+      }
+      stream.screenSyncInFlight = false;
+      stream.screenSyncReqId = '';
+    },
+
+    emitLocalSyncRequired(instanceId, reason = 'screen_untrusted') {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return [];
+      }
+
+      const stream = this.ensureStreamState(id);
+      if (stream) {
+        stream.attachState = 'resyncing';
+        stream.awaitingSnapshot = true;
+      }
+
+      return [{
+        v: 1,
+        type: 'term.sync.required',
+        instance_id: id,
+        reason,
+        local: true,
+        ts: Date.now()
+      }];
+    },
+
+    async requestScreenSync(instanceId, reason = 'manual') {
+      const id = String(instanceId || '').trim();
+      if (!id || !this.connection || !this.wsConnected) {
+        return;
+      }
+
+      const stream = this.ensureStreamState(id);
+      if (!stream || stream.screenSyncInFlight) {
+        return;
+      }
+
+      stream.screenSyncInFlight = true;
+      stream.screenSyncReqId = `screen-sync-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+      this.markAwaitingSnapshot(id, reason);
+      try {
+        await this.connection.invoke('RequestSync', {
+          instanceId: id,
+          type: 'screen',
+          reqId: stream.screenSyncReqId
+        });
+      } catch (error) {
+        stream.screenSyncInFlight = false;
+        stream.screenSyncReqId = '';
+        if (stream.screenSyncTimeout) {
+          clearTimeout(stream.screenSyncTimeout);
+          stream.screenSyncTimeout = null;
+        }
+        throw error;
+      }
     },
 
     queuePendingRaw(stream, message) {
@@ -791,24 +946,85 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       }
       const instanceId = String(message.instance_id || '').trim();
       const isSelected = this.isMessageForSelected(message);
+      const stream = this.ensureStreamState(instanceId);
+
+      if (message.type === 'term.owner.changed') {
+        if (stream) {
+          stream.ownerConnectionId = String(message.owner_connection_id || '').trim();
+        }
+        return isSelected ? [message] : [];
+      }
+
       if (message.type === 'term.resize.ack') {
         if (instanceId) {
           this.resizeAckByInstance[instanceId] = Date.now();
         }
+        if (message.accepted === true) {
+          this.markAwaitingSnapshot(instanceId, 'resize');
+        }
         return isSelected ? [message] : [];
       }
-      if (message.type === 'term.snapshot' && this.shouldSuppressResizeSnapshot(instanceId, message)) {
+
+      if (message.type === 'term.viewport.rejected') {
+        return isSelected ? [message] : [];
+      }
+
+      if (message.type === 'term.snapshot') {
+        this.markSnapshotReady(instanceId, message);
+        return isSelected ? [message] : [message];
+      }
+
+      if (message.type === 'term.patch') {
+        const baseline = this.cachedScreens[instanceId];
+        if (!baseline || baseline.type !== 'term.snapshot') {
+          if (instanceId && isSelected) {
+            this.requestScreenSync(instanceId, 'patch_without_snapshot').catch(() => {});
+            return this.emitLocalSyncRequired(instanceId, 'patch_without_snapshot');
+          }
+          return [];
+        }
+
+        const expectedRenderEpoch = parseSeq(baseline.render_epoch, 0);
+        const nextRenderEpoch = parseSeq(message.render_epoch, expectedRenderEpoch);
+        if (expectedRenderEpoch > 0 && nextRenderEpoch > 0 && nextRenderEpoch !== expectedRenderEpoch) {
+          if (instanceId) {
+            this.requestScreenSync(instanceId, 'render_epoch_mismatch').catch(() => {});
+          }
+          return isSelected ? this.emitLocalSyncRequired(instanceId, 'render_epoch_mismatch') : [];
+        }
+
+        const previousSeq = parseSeq(baseline.seq, parseSeq(baseline.base_seq, 0));
+        const nextSeq = parseSeq(message.seq, previousSeq);
+        if (previousSeq > 0 && nextSeq > 0 && nextSeq !== previousSeq + 1) {
+          if (instanceId) {
+            this.requestScreenSync(instanceId, 'patch_seq_gap').catch(() => {});
+          }
+          return isSelected ? this.emitLocalSyncRequired(instanceId, 'patch_seq_gap') : [];
+        }
+
         this.rememberScreenFrame(message);
-        this.syncStreamSeq(instanceId, parseSeq(message.seq, parseSeq(message.base_seq, 0)));
+        const merged = this.cachedScreens[instanceId];
+        if (!merged || merged.type !== 'term.snapshot') {
+          return [];
+        }
+        this.markSnapshotReady(instanceId, merged);
         return [];
       }
+
+      if (message.type === 'term.sync.required') {
+        if (instanceId) {
+          this.requestScreenSync(instanceId, String(message.reason || 'screen_untrusted')).catch(() => {});
+        }
+        return isSelected ? [message] : [];
+      }
+
       if (message.type === 'term.raw') {
         return this.handleIncomingRaw(message);
       }
       if (message.type === 'term.sync.complete') {
         return this.handleIncomingSyncComplete(message);
       }
-      if (!isSelected && (message.type === 'term.snapshot' || message.type === 'term.patch' || message.type === 'term.exit')) {
+      if (!isSelected && (message.type === 'term.snapshot' || message.type === 'term.exit')) {
         return [message];
       }
       return isSelected ? [message] : [];
@@ -849,10 +1065,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
           delete this.resizeAckByInstance[id];
         }
       }
-      const routeInstanceId = String(this.terminalResponseRoute?.instanceId || '').trim();
-      if (routeInstanceId && !activeIds.has(routeInstanceId)) {
-        this.terminalResponseRoute = { instanceId: '', expiresAt: 0 };
-      }
+      this.pruneTerminalResponseRoutes(activeIds);
       if (this.selectedInstanceId && !this.instances.some((x) => x.id === this.selectedInstanceId)) {
         this.selectedInstanceId = '';
         this.setStatus('Current instance exited');
@@ -984,11 +1197,15 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       this.routeResyncInFlight = {};
       this.resizeAckByInstance = {};
       this.connection = null;
+      this.hubConnectionId = '';
       this.joinedInstanceId = '';
       this.joinedInstanceIds = [];
       for (const stream of Object.values(this.streamStates)) {
         if (stream?.syncTimeout) {
           clearTimeout(stream.syncTimeout);
+        }
+        if (stream?.screenSyncTimeout) {
+          clearTimeout(stream.screenSyncTimeout);
         }
       }
       this.streamStates = {};
@@ -997,7 +1214,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       this.plainOutput = '';
       this.plainOutputByInstance = {};
       this.ansiReplayByInstance = {};
-      this.terminalResponseRoute = { instanceId: '', expiresAt: 0 };
+      this.terminalResponseRoutes = {};
     },
 
     async leaveJoinedInstance(instanceId, options = {}) {
@@ -1111,6 +1328,12 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
             this.setStatus(String(message?.error || message?.message || 'error'));
           }
         }
+        if (message?.type === 'term.sync.required' && isSelectedMessage) {
+          this.setStatus(`Resync required: ${String(message?.reason || 'screen_untrusted')}`);
+        }
+        if (message?.type === 'term.viewport.rejected' && isSelectedMessage) {
+          this.setStatus('Resize rejected: observer');
+        }
         for (const item of this.processIncomingMessage(message)) {
           this.emitMessage(item);
         }
@@ -1125,6 +1348,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       connection.onreconnected(async () => {
         this.wsConnected = true;
         this.isReconnecting = false;
+        this.hubConnectionId = String(connection.connectionId || '');
         this.setStatus('Connected');
         try {
           const selected = String(this.selectedInstanceId || '').trim();
@@ -1132,14 +1356,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
           this.joinedInstanceIds = [];
           await this.syncJoinedInstances({ include: selected ? [selected] : [] });
           if (selected) {
-            const stream = this.ensureStreamState(selected);
-            const snapshot = await this.waitForSnapshot(selected, 600);
-            const baselineSeq = parseSeq(snapshot?.seq, parseSeq(snapshot?.base_seq, parseSeq(stream?.lastSeq, 0)));
-            if (baselineSeq > 0) {
-              await this.requestRawSync(selected, 'reconnect', { sinceSeq: baselineSeq });
-            } else {
-              await this.requestRawSync(selected, 'reconnect', { fromStart: true });
-            }
+            await this.requestScreenSync(selected, 'reconnect');
           }
         } catch (error) {
           this.setStatus(String(error?.message || error || 'reconnect sync failed'));
@@ -1156,6 +1373,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       try {
         await connection.start();
         this.wsConnected = true;
+        this.hubConnectionId = String(connection.connectionId || '');
         this.syncJoinedInstances().catch(() => {});
       } catch (error) {
         this.wsConnected = false;
@@ -1182,35 +1400,13 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       if (clearMessage) {
         this.emitMessage(clearMessage);
       }
-      const cachedSnapshot = this.cachedScreens[nextId];
-      if (cachedSnapshot?.type === 'term.snapshot') {
-        this.emitMessage(this.cloneFrame(cachedSnapshot));
-      }
 
       let lastError = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
           await this.joinInstance(nextId);
           this.syncJoinedInstances({ include: [nextId] }).catch(() => {});
-          const stream = this.ensureStreamState(nextId);
-          const liveSnapshot = this.cachedScreens[nextId];
-          const snapshot = liveSnapshot?.type === 'term.snapshot'
-            ? liveSnapshot
-            : await this.waitForSnapshot(nextId, 250);
-          const baselineSeq = parseSeq(snapshot?.seq, parseSeq(snapshot?.base_seq, parseSeq(stream?.lastSeq, 0)));
-          if (baselineSeq > 0) {
-            await this.requestRawSync(nextId, 'connect', { sinceSeq: baselineSeq });
-            this.setStatus('Connected');
-            return;
-          }
-
-          const localReplay = this.buildLocalReplayMessage(nextId);
-          if (localReplay) {
-            this.emitMessage(localReplay);
-            this.setStatus('Connected (local fallback)');
-          }
-
-          await this.requestRawSync(nextId, 'connect', { fromStart: true });
+          await this.requestScreenSync(nextId, 'connect');
           this.setStatus('Connected');
           return;
         } catch (error) {
@@ -1284,7 +1480,7 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
         return;
       }
 
-      await this.requestRawSync(this.selectedInstanceId, 'manual');
+      await this.requestScreenSync(this.selectedInstanceId, 'manual');
     },
 
     async terminateSelected() {

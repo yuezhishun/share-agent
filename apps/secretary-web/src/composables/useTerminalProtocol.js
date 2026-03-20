@@ -1,7 +1,9 @@
 export function createTerminalProtocolRenderer(term) {
   const RAW_WRITE_CHUNK_SIZE = 12 * 1024;
   const state = {
-    rawActive: true,
+    rawActive: false,
+    hasSnapshotBaseline: false,
+    renderSuspended: false,
     writeToken: 0,
     writing: false,
     pendingWrites: []
@@ -88,6 +90,11 @@ export function createTerminalProtocolRenderer(term) {
 
   function renderSnapshot(message) {
     hardReset();
+    const ansi = String(message?.ansi || '');
+    if (ansi) {
+      queueChunkedWrite(ansi);
+      return;
+    }
     const rows = Array.isArray(message?.rows) ? message.rows : [];
     const mapped = [];
     let maxY = -1;
@@ -120,16 +127,33 @@ export function createTerminalProtocolRenderer(term) {
 
     if (message.type === 'term.snapshot') {
       state.rawActive = false;
+      state.hasSnapshotBaseline = true;
+      state.renderSuspended = false;
       renderSnapshot(message);
       return;
     }
 
     if (message.type === 'term.raw') {
+      if (message.local !== true && state.renderSuspended) {
+        return;
+      }
       state.rawActive = true;
       if (message.replay && message.reset) {
         hardReset();
       }
       queueChunkedWrite(String(message.data || ''));
+      return;
+    }
+
+    if (message.type === 'term.sync.required') {
+      state.hasSnapshotBaseline = false;
+      state.renderSuspended = true;
+      return;
+    }
+
+    if (message.type === 'term.resize.ack' && message.accepted === true) {
+      state.hasSnapshotBaseline = false;
+      state.renderSuspended = true;
       return;
     }
 

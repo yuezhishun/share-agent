@@ -28,6 +28,7 @@ public sealed class GatewayOptions
     public string SettingsStoreFile { get; init; } = "/tmp/pty-agent-terminal-settings.json";
     public int MaxOutputBufferBytes { get; init; } = 8 * 1024 * 1024;
     public int ProcessManagerMaxConcurrency { get; init; } = 4;
+    public string GitBashPath { get; init; } = string.Empty;
     public string CodexConfigPath { get; init; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "config.toml");
     public string ClaudeConfigPath { get; init; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "config.json");
     public IReadOnlyList<string> FsAllowedRoots { get; init; } = DefaultFsAllowedRoots;
@@ -67,6 +68,7 @@ public sealed class GatewayOptions
             SettingsStoreFile = Read(config, "TERMINAL_SETTINGS_STORE_FILE", "Gateway:SettingsStoreFile") ?? "/tmp/pty-agent-terminal-settings.json",
             MaxOutputBufferBytes = ParseInt(config, 8 * 1024 * 1024, "TERMINAL_MAX_OUTPUT_BUFFER_BYTES", "Gateway:MaxOutputBufferBytes"),
             ProcessManagerMaxConcurrency = ParseInt(config, 4, "TERMINAL_PROCESS_MANAGER_MAX_CONCURRENCY", "Gateway:ProcessManagerMaxConcurrency"),
+            GitBashPath = Read(config, "TERMINAL_GIT_BASH_PATH", "Gateway:GitBashPath") ?? string.Empty,
             CodexConfigPath = Read(config, "TERMINAL_CODEX_CONFIG_PATH", "Gateway:CodexConfigPath") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "config.toml"),
             ClaudeConfigPath = Read(config, "TERMINAL_CLAUDE_CONFIG_PATH", "Gateway:ClaudeConfigPath") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "config.json"),
             FsAllowedRoots = ParseRoots(config),

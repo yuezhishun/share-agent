@@ -556,7 +556,7 @@ const emit = defineEmits([
 .file-info {
   flex: 1;
   min-width: 0;
-  padding-right: 34px;
+  padding-right: 30px;
   display: flex;
   align-items: center;
 }
@@ -909,6 +909,17 @@ const emit = defineEmits([
 
 .recipe-star-btn.active {
   color: #f0c96a;
+}
+
+.recipe-star-btn {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.recipe-item:hover .recipe-star-btn,
+.recipe-item:focus-within .recipe-star-btn {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .recipe-action-btn {

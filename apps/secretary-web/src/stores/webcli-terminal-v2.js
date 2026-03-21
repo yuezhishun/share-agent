@@ -74,6 +74,19 @@ function createHubConnectionBuilder() {
   return new signalR.HubConnectionBuilder();
 }
 
+async function parseErrorMessage(response, fallback) {
+  const text = await response.text();
+  if (!text) {
+    return fallback;
+  }
+  try {
+    const payload = JSON.parse(text);
+    return String(payload?.error || text);
+  } catch {
+    return text;
+  }
+}
+
 export const useWebCliTerminalStoreV2 = defineStore('webcliTerminalV2', {
   state: () => ({
     instances: [],
@@ -384,7 +397,7 @@ export const useWebCliTerminalStoreV2 = defineStore('webcliTerminalV2', {
         body: JSON.stringify(input)
       });
       if (!response.ok) {
-        throw new Error(`create instance failed: ${response.status}`);
+        throw new Error(await parseErrorMessage(response, `create instance failed: ${response.status}`));
       }
       const created = await response.json();
       await this.fetchInstances();

@@ -105,6 +105,125 @@ public class InstanceManagerLaunchArgsTests
     }
 
     [Fact]
+    public async Task CreateAsync_ShouldUseConfiguredGitBashPath_OnWindows()
+    {
+        var engine = new CapturePtyEngine();
+        const string gitBashPath = @"C:\Program Files\Git\bin\bash.exe";
+        var manager = CreateManager(
+            engine,
+            gitBashPath: gitBashPath,
+            isWindows: () => true,
+            fileExists: path => string.Equals(path, gitBashPath, StringComparison.OrdinalIgnoreCase));
+        var basePath = CreateBaseDirectory();
+
+        try
+        {
+            await manager.CreateAsync(new CreateInstanceRequest
+            {
+                Command = "bash",
+                Cwd = basePath
+            }, basePath, CancellationToken.None);
+
+            Assert.NotNull(engine.LastOptions);
+            Assert.Equal(gitBashPath, engine.LastOptions!.Executable);
+            Assert.Equal(["-i", "-l"], engine.LastOptions.Args);
+        }
+        finally
+        {
+            Directory.Delete(basePath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CreateAsync_ShouldPreserveExplicitBashCommandArgs_WhenMappedToGitBashOnWindows()
+    {
+        var engine = new CapturePtyEngine();
+        const string gitBashPath = @"C:\Program Files\Git\bin\bash.exe";
+        var manager = CreateManager(
+            engine,
+            gitBashPath: gitBashPath,
+            isWindows: () => true,
+            fileExists: path => string.Equals(path, gitBashPath, StringComparison.OrdinalIgnoreCase));
+        var basePath = CreateBaseDirectory();
+
+        try
+        {
+            await manager.CreateAsync(new CreateInstanceRequest
+            {
+                Command = "bash -lc \"echo hi\"",
+                Cwd = basePath
+            }, basePath, CancellationToken.None);
+
+            Assert.NotNull(engine.LastOptions);
+            Assert.Equal(gitBashPath, engine.LastOptions!.Executable);
+            Assert.Equal(["-lc", "echo hi"], engine.LastOptions.Args);
+        }
+        finally
+        {
+            Directory.Delete(basePath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CreateAsync_ShouldFallbackToPowerShell_WhenWindowsGitBashUnavailable()
+    {
+        var engine = new CapturePtyEngine();
+        var manager = CreateManager(
+            engine,
+            isWindows: () => true,
+            fileExists: _ => false,
+            resolveExecutableFromPath: (_, _) => string.Empty);
+        var basePath = CreateBaseDirectory();
+
+        try
+        {
+            await manager.CreateAsync(new CreateInstanceRequest
+            {
+                Command = "bash",
+                Cwd = basePath
+            }, basePath, CancellationToken.None);
+
+            Assert.NotNull(engine.LastOptions);
+            Assert.Equal("powershell.exe", engine.LastOptions!.Executable);
+            Assert.Equal(["-NoLogo", "-NoExit"], engine.LastOptions.Args);
+        }
+        finally
+        {
+            Directory.Delete(basePath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CreateAsync_ShouldResolveWindowsDefaultShell_WhenCommandIsEmpty()
+    {
+        var engine = new CapturePtyEngine();
+        const string gitBashPath = @"C:\Program Files\Git\bin\bash.exe";
+        var manager = CreateManager(
+            engine,
+            gitBashPath: gitBashPath,
+            isWindows: () => true,
+            fileExists: path => string.Equals(path, gitBashPath, StringComparison.OrdinalIgnoreCase));
+        var basePath = CreateBaseDirectory();
+
+        try
+        {
+            await manager.CreateAsync(new CreateInstanceRequest
+            {
+                Command = "",
+                Cwd = basePath
+            }, basePath, CancellationToken.None);
+
+            Assert.NotNull(engine.LastOptions);
+            Assert.Equal(gitBashPath, engine.LastOptions!.Executable);
+            Assert.Equal(["-i", "-l"], engine.LastOptions.Args);
+        }
+        finally
+        {
+            Directory.Delete(basePath, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task CreateAsync_ShouldPrefixPathAndDeduplicate_WhenPathPrefixesConfigured()
     {
         var engine = new CapturePtyEngine();
@@ -137,7 +256,13 @@ public class InstanceManagerLaunchArgsTests
         }
     }
 
-    private static InstanceManager CreateManager(IPtyEngine engine, IReadOnlyList<string>? pathPrefixes = null)
+    private static InstanceManager CreateManager(
+        IPtyEngine engine,
+        IReadOnlyList<string>? pathPrefixes = null,
+        string? gitBashPath = null,
+        Func<bool>? isWindows = null,
+        Func<string, bool>? fileExists = null,
+        Func<string, IDictionary<string, string>, string?>? resolveExecutableFromPath = null)
     {
         return new InstanceManager(
             engine,
@@ -148,7 +273,11 @@ public class InstanceManagerLaunchArgsTests
             nodeId: "node-a",
             nodeName: "Node A",
             nodeRole: "master",
-            pathPrefixes: pathPrefixes);
+            pathPrefixes: pathPrefixes,
+            gitBashPath: gitBashPath,
+            isWindows: isWindows,
+            fileExists: fileExists,
+            resolveExecutableFromPath: resolveExecutableFromPath);
     }
 
     private static string CreateBaseDirectory()

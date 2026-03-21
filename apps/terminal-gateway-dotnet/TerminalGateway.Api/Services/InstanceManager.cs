@@ -22,6 +22,10 @@ public sealed class InstanceManager
     private readonly string _nodeName;
     private readonly string _nodeRole;
     private readonly IReadOnlyList<string> _pathPrefixes;
+    private readonly string _gitBashPath;
+    private readonly Func<bool> _isWindows;
+    private readonly Func<string, bool> _fileExists;
+    private readonly Func<string, IDictionary<string, string>, string?> _resolveExecutableFromPath;
 
     public event Action<string, object>? Patch;
     public event Action<string, object>? Raw;
@@ -43,7 +47,11 @@ public sealed class InstanceManager
         string nodeId,
         string nodeName,
         string nodeRole,
-        IReadOnlyList<string>? pathPrefixes = null)
+        IReadOnlyList<string>? pathPrefixes = null,
+        string? gitBashPath = null,
+        Func<bool>? isWindows = null,
+        Func<string, bool>? fileExists = null,
+        Func<string, IDictionary<string, string>, string?>? resolveExecutableFromPath = null)
     {
         _ptyEngine = ptyEngine;
         _historyLimit = Math.Max(1, historyLimit);
@@ -54,17 +62,15 @@ public sealed class InstanceManager
         _nodeName = nodeName;
         _nodeRole = nodeRole;
         _pathPrefixes = NormalizePathPrefixes(pathPrefixes);
+        _gitBashPath = (gitBashPath ?? string.Empty).Trim();
+        _isWindows = isWindows ?? (() => OperatingSystem.IsWindows());
+        _fileExists = fileExists ?? File.Exists;
+        _resolveExecutableFromPath = resolveExecutableFromPath ?? ResolveExecutableFromPath;
     }
 
     public async Task<InstanceSummary> CreateAsync(CreateInstanceRequest input, string defaultBasePath, CancellationToken cancellationToken)
     {
         var id = Guid.NewGuid().ToString();
-        var command = (input.Command ?? string.Empty).Trim();
-        if (command.Length == 0)
-        {
-            throw new InvalidOperationException("command is required");
-        }
-
         var cols = SanitizeDimension(input.Cols ?? _defaultCols, _defaultCols, 1, 500);
         var rows = SanitizeDimension(input.Rows ?? _defaultRows, _defaultRows, 1, 300);
         var cwd = ResolveWithinBase(defaultBasePath, input.Cwd);
@@ -72,10 +78,6 @@ public sealed class InstanceManager
         {
             throw new UnauthorizedAccessException("cwd is outside allowed base");
         }
-
-        var parsed = CommandParser.Parse(command);
-        var args = (input.Args is { Count: > 0 } ? input.Args : parsed.Args).ToList();
-        args = EnsureInteractiveShellArgs(parsed.File, args);
         var env = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
         {
@@ -88,9 +90,19 @@ public sealed class InstanceManager
         }
         env["PATH"] = BuildPathWithPrefixes(env.TryGetValue("PATH", out var currentPath) ? currentPath : string.Empty, _pathPrefixes);
 
+        var launch = ResolveLaunchTarget((input.Command ?? string.Empty).Trim(), env);
+        if (launch.Executable.Length == 0)
+        {
+            throw new InvalidOperationException("command is required");
+        }
+
+        var command = launch.Command;
+        var args = (input.Args is { Count: > 0 } ? input.Args : launch.Args).ToList();
+        args = EnsureInteractiveShellArgs(launch.Executable, args);
+
         var runtime = await _ptyEngine.CreateAsync(new PtyLaunchOptions
         {
-            Executable = parsed.File,
+            Executable = launch.Executable,
             Args = args,
             Cwd = cwd,
             Env = env,
@@ -682,6 +694,11 @@ public sealed class InstanceManager
             return EnsureBashOrZshInteractiveLoginArgs(args);
         }
 
+        if (IsPowerShellExecutable(executable))
+        {
+            return EnsurePowerShellInteractiveArgs(args);
+        }
+
         if (!IsShExecutable(executable))
         {
             return args;
@@ -703,6 +720,25 @@ public sealed class InstanceManager
 
         var normalized = new List<string>(args.Count + 1) { "-i" };
         normalized.AddRange(args);
+        return normalized;
+    }
+
+    private static List<string> EnsurePowerShellInteractiveArgs(List<string> args)
+    {
+        if (HasAnyPowerShellCommandFlag(args))
+        {
+            return args;
+        }
+
+        var normalized = new List<string>(args);
+        if (!HasExactArg(args, "-NoLogo"))
+        {
+            normalized.Insert(0, "-NoLogo");
+        }
+        if (!HasExactArg(args, "-NoExit"))
+        {
+            normalized.Add("-NoExit");
+        }
         return normalized;
     }
 
@@ -744,14 +780,20 @@ public sealed class InstanceManager
 
     private static bool IsBashOrZshExecutable(string executable)
     {
-        var fileName = Path.GetFileName((executable ?? string.Empty).Trim()).ToLowerInvariant();
+        var fileName = GetExecutableFileName(executable).ToLowerInvariant();
         return fileName is "bash" or "bash.exe" or "zsh" or "zsh.exe";
     }
 
     private static bool IsShExecutable(string executable)
     {
-        var fileName = Path.GetFileName((executable ?? string.Empty).Trim()).ToLowerInvariant();
+        var fileName = GetExecutableFileName(executable).ToLowerInvariant();
         return fileName is "sh" or "sh.exe";
+    }
+
+    private static bool IsPowerShellExecutable(string executable)
+    {
+        var fileName = GetExecutableFileName(executable).ToLowerInvariant();
+        return fileName is "powershell" or "powershell.exe" or "pwsh" or "pwsh.exe";
     }
 
     private static bool HasShellFlag(IEnumerable<string> args, string shortFlag, string longFlag)
@@ -783,6 +825,42 @@ public sealed class InstanceManager
         return false;
     }
 
+    private static bool HasExactArg(IEnumerable<string> args, string expected)
+    {
+        foreach (var arg in args)
+        {
+            if (string.Equals((arg ?? string.Empty).Trim(), expected, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasAnyPowerShellCommandFlag(IEnumerable<string> args)
+    {
+        foreach (var arg in args)
+        {
+            var value = (arg ?? string.Empty).Trim();
+            if (value.Length == 0)
+            {
+                continue;
+            }
+
+            if (value.Equals("-Command", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("-c", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("-File", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("-EncodedCommand", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("-EncodedArguments", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static bool IsShortFlagCluster(string arg)
     {
         if (arg.Length < 3 || arg[0] != '-' || arg[1] == '-')
@@ -799,6 +877,112 @@ public sealed class InstanceManager
         }
 
         return true;
+    }
+
+    private (string Command, string Executable, IReadOnlyList<string> Args) ResolveLaunchTarget(string command, IDictionary<string, string> env)
+    {
+        if (!_isWindows())
+        {
+            var normalizedCommand = command.Length == 0 ? "bash" : command;
+            var normalizedParsed = CommandParser.Parse(normalizedCommand);
+            return (normalizedCommand, normalizedParsed.File, normalizedParsed.Args);
+        }
+
+        if (command.Length == 0)
+        {
+            var executable = ResolveWindowsDefaultShellExecutable(env);
+            return (executable, executable, []);
+        }
+
+        var parsed = CommandParser.Parse(command);
+        if (!IsDefaultShellAlias(parsed.File))
+        {
+            return (command, parsed.File, parsed.Args);
+        }
+
+        var resolvedExecutable = ResolveWindowsDefaultShellExecutable(env);
+        return (command, resolvedExecutable, parsed.Args);
+    }
+
+    private string ResolveWindowsDefaultShellExecutable(IDictionary<string, string> env)
+    {
+        foreach (var candidate in EnumerateWindowsBashCandidates(env))
+        {
+            if (candidate.Length == 0)
+            {
+                continue;
+            }
+
+            if (_fileExists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return "powershell.exe";
+    }
+
+    private IEnumerable<string> EnumerateWindowsBashCandidates(IDictionary<string, string> env)
+    {
+        if (_gitBashPath.Length > 0)
+        {
+            yield return _gitBashPath;
+        }
+
+        yield return @"C:\Program Files\Git\bin\bash.exe";
+        yield return @"C:\Program Files\Git\usr\bin\bash.exe";
+
+        var fromPath = _resolveExecutableFromPath("bash.exe", env);
+        if (!string.IsNullOrWhiteSpace(fromPath))
+        {
+            yield return fromPath.Trim();
+        }
+    }
+
+    private static string ResolveExecutableFromPath(string fileName, IDictionary<string, string> env)
+    {
+        var pathValue = env.TryGetValue("PATH", out var currentPath)
+            ? currentPath
+            : Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+        var comparer = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        foreach (var segment in (pathValue ?? string.Empty).Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var candidate = Path.Combine(segment, fileName);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+
+            if (!fileName.EndsWith(".exe", comparer))
+            {
+                var withExe = candidate + ".exe";
+                if (File.Exists(withExe))
+                {
+                    return withExe;
+                }
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static bool IsDefaultShellAlias(string executable)
+    {
+        var fileName = GetExecutableFileName(executable);
+        return string.Equals(fileName, "bash", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(fileName, "bash.exe", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string GetExecutableFileName(string executable)
+    {
+        var value = (executable ?? string.Empty).Trim().Replace('\\', '/');
+        if (value.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var lastSlash = value.LastIndexOf('/');
+        return lastSlash >= 0 ? value[(lastSlash + 1)..] : value;
     }
 
     private static IReadOnlyList<string> NormalizePathPrefixes(IReadOnlyList<string>? pathPrefixes)

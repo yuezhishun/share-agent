@@ -77,8 +77,8 @@ function parseDownloadName(headerValue) {
 export const useWebCliFilesStore = defineStore('webcliFiles', {
   state: () => ({
     currentNodeId: '',
-    basePath: '/home/yueyuan',
-    currentPath: '/home/yueyuan',
+    basePath: '',
+    currentPath: '',
     parentPath: '',
     showHidden: false,
     loading: false,
@@ -115,8 +115,9 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
       this.error = '';
       this.resetPreview();
       try {
+        const requestedPath = path === undefined || path === null ? this.currentPath : path;
         const response = await fetch(buildNodeFilesApiPath('/files/list', targetNodeId, {
-          path: path || this.currentPath,
+          path: requestedPath,
           show_hidden: this.showHidden ? '1' : '0'
         }));
         if (!response.ok) {

@@ -371,11 +371,6 @@ public class GatewayApiTests
         Assert.True(rawReplay.TryGetProperty("seq", out var replaySeqProp), "raw replay missing seq");
         Assert.Equal(toSeqProp.GetInt32(), replaySeqProp.GetInt32());
 
-        await hub.InvokeAsync("RequestSync", new { instanceId, type = "history", reqId = "history-test", before = "h-1", limit = 20 });
-        var history = await WaitForMessageAsync(messages, gate,
-            msg => GetType(msg) == "term.history.chunk" && GetString(msg, "req_id") == "history-test",
-            TimeSpan.FromSeconds(8));
-        Assert.Equal("term.history.chunk", GetType(history));
     }
 
     [Fact]
@@ -1269,6 +1264,128 @@ public class GatewayApiTests
     }
 
     [Fact]
+    public async Task TerminalHub_Should_Publish_Remote_Snapshot_After_Remote_Resize_Ack()
+    {
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-remote-resize-token",
+            ["GATEWAY_ROLE"] = "master",
+            ["NODE_ID"] = "master-resize",
+            ["NODE_NAME"] = "Master Resize"
+        });
+        using var client = app.CreateClient();
+
+        await using var slaveHub = BuildClusterHubConnection(client);
+        const string instanceId = "slave-resize-1";
+
+        slaveHub.On<ClusterCommandEnvelope>("ClusterCommand", async command =>
+        {
+            switch (command.Type)
+            {
+                case "instance.create":
+                    await slaveHub.InvokeAsync("SubmitCommandResult", new
+                    {
+                        commandId = command.CommandId,
+                        nodeId = command.NodeId,
+                        ok = true,
+                        payload = new
+                        {
+                            instance_id = instanceId,
+                            summary = new
+                            {
+                                id = instanceId,
+                                command = "bash",
+                                cwd = "/tmp",
+                                cols = 80,
+                                rows = 24,
+                                created_at = DateTimeOffset.UtcNow.ToString("O"),
+                                status = "running",
+                                clients = 0,
+                                node_id = "slave-resize",
+                                node_name = "Slave Resize",
+                                node_role = "slave",
+                                node_online = true
+                            }
+                        }
+                    });
+                    break;
+                case "instance.sync":
+                    await slaveHub.InvokeAsync("SubmitCommandResult", new
+                    {
+                        commandId = command.CommandId,
+                        nodeId = command.NodeId,
+                        ok = true,
+                        payload = BuildRemoteSnapshot(instanceId, "slave-resize", "Slave Resize", 80, 24, 1)
+                    });
+                    break;
+                case "instance.resize":
+                    await slaveHub.InvokeAsync("SubmitCommandResult", new
+                    {
+                        commandId = command.CommandId,
+                        nodeId = command.NodeId,
+                        ok = true,
+                        payload = new
+                        {
+                            ok = true,
+                            snapshot = BuildRemoteSnapshot(instanceId, "slave-resize", "Slave Resize", 110, 35, 2)
+                        }
+                    });
+                    break;
+            }
+        });
+
+        await slaveHub.StartAsync();
+        await slaveHub.InvokeAsync("RegisterNode", new
+        {
+            token = "cluster-remote-resize-token",
+            nodeId = "slave-resize",
+            nodeName = "Slave Resize",
+            instanceCount = 0
+        });
+
+        var createResponse = await client.PostAsJsonAsync("/api/nodes/slave-resize/instances", new
+        {
+            command = "bash",
+            args = new[] { "-i" },
+            cols = 80,
+            rows = 24,
+            cwd = "/tmp"
+        });
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+
+        await using var terminalHub = BuildHubConnection(client);
+        List<JsonElement> messages = [];
+        var gate = new object();
+        terminalHub.On<JsonElement>("TerminalEvent", msg =>
+        {
+            lock (gate)
+            {
+                messages.Add(msg.Clone());
+            }
+        });
+
+        await terminalHub.StartAsync();
+        await terminalHub.InvokeAsync("JoinInstance", new { instanceId });
+        _ = await WaitForMessageAsync(messages, gate, msg => GetType(msg) == "term.snapshot", TimeSpan.FromSeconds(8));
+
+        await terminalHub.InvokeAsync("RequestResize", new { instanceId, cols = 110, rows = 35, reqId = "remote-resize" });
+        _ = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.resize.ack" && GetString(msg, "req_id") == "remote-resize",
+            TimeSpan.FromSeconds(8));
+        var snapshot = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.snapshot"
+                && msg.TryGetProperty("size", out var size)
+                && size.TryGetProperty("cols", out var cols)
+                && cols.GetInt32() == 110
+                && size.TryGetProperty("rows", out var rows)
+                && rows.GetInt32() == 35,
+            TimeSpan.FromSeconds(8));
+
+        Assert.Equal("slave-resize", snapshot.GetProperty("node_id").GetString());
+        Assert.Equal("Slave Resize", snapshot.GetProperty("node_name").GetString());
+    }
+
+    [Fact]
     public async Task Reverse_Cluster_Command_Should_Reject_Unregistered_Or_Mismatched_Slave()
     {
         await using var app = new GatewayFactory(new Dictionary<string, string?>
@@ -1412,12 +1529,12 @@ public class GatewayApiTests
         var payloadSeq1 = new
         {
             v = 1,
-            type = "term.patch",
+            type = "term.raw",
             instance_id = instanceId,
             node_id = "slave-evt",
             node_name = "Slave EVT",
             seq = 1,
-            rows = new[] { new { y = 0, segs = new object[] { new object[] { "from-slave-seq1", 0 } } } }
+            data = "from-slave-seq1"
         };
         await clusterHub.InvokeAsync("PublishTerminalEvent", new
         {
@@ -1427,7 +1544,7 @@ public class GatewayApiTests
             instanceId,
             seq = 1,
             ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            type = "term.patch",
+            type = "term.raw",
             payload = payloadSeq1
         });
         _ = await WaitForMessageAsync(messages, gate, msg => JsonSerializer.Serialize(msg).Contains("from-slave-seq1", StringComparison.Ordinal), TimeSpan.FromSeconds(8));
@@ -1452,20 +1569,20 @@ public class GatewayApiTests
             instanceId,
             seq = 3,
             ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            type = "term.patch",
+            type = "term.raw",
             payload = new
             {
                 v = 1,
-                type = "term.patch",
+                type = "term.raw",
                 instance_id = instanceId,
                 node_id = "slave-evt",
                 node_name = "Slave EVT",
                 seq = 3,
-                rows = new[] { new { y = 0, segs = new object[] { new object[] { "from-slave-seq3", 0 } } } }
+                data = "from-slave-seq3"
             }
         });
 
-        _ = await WaitForMessageAsync(messages, gate, msg => GetType(msg) == "term.route" && GetString(msg, "reason") == "seq_gap", TimeSpan.FromSeconds(8));
+        _ = await WaitForMessageAsync(messages, gate, msg => GetType(msg) == "term.sync.required" && GetString(msg, "reason") == "seq_gap", TimeSpan.FromSeconds(8));
 
         var countSeq1 = 0;
         lock (gate)
@@ -1699,7 +1816,7 @@ public class GatewayApiTests
     private static HubConnection BuildHubConnection(HttpClient client)
     {
         var baseAddress = client.BaseAddress ?? throw new InvalidOperationException("missing base address");
-        var target = new Uri(baseAddress, "/hubs/terminal");
+        var target = new Uri(baseAddress, "/hubs/terminal-v2");
         return new HubConnectionBuilder()
             .WithUrl(target)
             .Build();
@@ -1718,9 +1835,27 @@ public class GatewayApiTests
 
     private static string? GetString(JsonElement msg, string name)
     {
-        return msg.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
-            ? value.GetString()
-            : null;
+        if (!msg.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        var text = value.GetString();
+        if (!string.Equals(name, "type", StringComparison.Ordinal))
+        {
+            return text;
+        }
+
+        return text switch
+        {
+            "term.v2.snapshot" => "term.snapshot",
+            "term.v2.raw" => "term.raw",
+            "term.v2.resize.ack" => "term.resize.ack",
+            "term.v2.sync.complete" => "term.sync.complete",
+            "term.v2.sync.required" => "term.sync.required",
+            "term.v2.owner.changed" => "term.owner.changed",
+            _ => text
+        };
     }
 
     private static async Task<JsonElement> WaitForMessageAsync(List<JsonElement> messages, object gate, Func<JsonElement, bool> predicate, TimeSpan timeout)
@@ -1753,6 +1888,29 @@ public class GatewayApiTests
             }));
             throw new TimeoutException($"timed out waiting signalr frame; received: [{summary}]");
         }
+    }
+
+    private static object BuildRemoteSnapshot(string instanceId, string nodeId, string nodeName, int cols, int rows, long renderEpoch)
+    {
+        return new
+        {
+            v = 1,
+            type = "term.snapshot",
+            instance_id = instanceId,
+            node_id = nodeId,
+            node_name = nodeName,
+            seq = renderEpoch,
+            base_seq = renderEpoch,
+            render_epoch = renderEpoch,
+            instance_epoch = 1,
+            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            size = new { cols, rows },
+            cursor = new { x = 0, y = 0, visible = true },
+            rows = new object[]
+            {
+                new { y = 0, segs = new object[] { new object[] { $"size={cols}x{rows}", 0 } } }
+            }
+        };
     }
 
 }

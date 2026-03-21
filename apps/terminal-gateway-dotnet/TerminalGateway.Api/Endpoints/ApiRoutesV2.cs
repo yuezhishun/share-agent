@@ -103,6 +103,32 @@ public static class ApiRoutesV2
             return manager.Terminate(id) ? Results.Ok(new { ok = true, protocol = "v2" }) : Results.NotFound(new { error = "instance not found" });
         });
 
+        app.MapDelete("/api/v2/nodes/{nodeId}/instances/{instanceId}", async (string nodeId, string instanceId, InstanceManager manager, GatewayOptions options, ClusterCommandBroker broker, RemoteInstanceRegistry remoteInstances, CancellationToken ct) =>
+        {
+            if (IsLocalNode(nodeId, options))
+            {
+                return manager.Terminate(instanceId)
+                    ? Results.Ok(new { ok = true, node_id = nodeId, instance_id = instanceId, protocol = "v2" })
+                    : Results.NotFound(new { error = "instance not found", node_id = nodeId, instance_id = instanceId });
+            }
+
+            try
+            {
+                var result = await broker.SendAsync(nodeId, "instance.terminate", new { instance_id = instanceId }, ct);
+                if (result.Ok)
+                {
+                    remoteInstances.Remove(instanceId);
+                    return Results.Ok(new { ok = true, node_id = nodeId, instance_id = instanceId, protocol = "v2" });
+                }
+
+                return Results.BadRequest(new { error = result.Error ?? "remote terminate failed", node_id = nodeId, instance_id = instanceId });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, instance_id = instanceId });
+            }
+        });
+
         return app;
     }
 

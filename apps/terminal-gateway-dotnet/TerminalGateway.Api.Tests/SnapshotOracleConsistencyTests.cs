@@ -122,7 +122,7 @@ public class SnapshotOracleConsistencyTests
     private static HubConnection BuildHubConnection(HttpClient client)
     {
         var baseAddress = client.BaseAddress ?? throw new InvalidOperationException("missing base address");
-        var target = new Uri(baseAddress, "/hubs/terminal");
+        var target = new Uri(baseAddress, "/hubs/terminal-v2");
         return new HubConnectionBuilder().WithUrl(target).Build();
     }
 
@@ -130,9 +130,27 @@ public class SnapshotOracleConsistencyTests
 
     private static string? GetString(JsonElement msg, string name)
     {
-        return msg.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
-            ? value.GetString()
-            : null;
+        if (!msg.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        var text = value.GetString();
+        if (!string.Equals(name, "type", StringComparison.Ordinal))
+        {
+            return text;
+        }
+
+        return text switch
+        {
+            "term.v2.snapshot" => "term.snapshot",
+            "term.v2.raw" => "term.raw",
+            "term.v2.resize.ack" => "term.resize.ack",
+            "term.v2.sync.complete" => "term.sync.complete",
+            "term.v2.sync.required" => "term.sync.required",
+            "term.v2.owner.changed" => "term.owner.changed",
+            _ => text
+        };
     }
 
     private static async Task<JsonElement> WaitForMessageAsync(List<JsonElement> messages, object gate, Func<JsonElement, bool> predicate, TimeSpan timeout)

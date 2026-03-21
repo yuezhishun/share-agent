@@ -14,7 +14,6 @@ public sealed class ClusterHub : Hub
     private readonly ClusterCommandExecutor _executor;
     private readonly ClusterEventDeduplicator _events;
     private readonly RemoteInstanceRegistry _remoteInstances;
-    private readonly IHubContext<TerminalHub> _terminalHub;
     private readonly IHubContext<TerminalHubV2> _terminalHubV2;
 
     public ClusterHub(
@@ -24,7 +23,6 @@ public sealed class ClusterHub : Hub
         ClusterCommandExecutor executor,
         ClusterEventDeduplicator events,
         RemoteInstanceRegistry remoteInstances,
-        IHubContext<TerminalHub> terminalHub,
         IHubContext<TerminalHubV2> terminalHubV2)
     {
         _options = options;
@@ -33,7 +31,6 @@ public sealed class ClusterHub : Hub
         _executor = executor;
         _events = events;
         _remoteInstances = remoteInstances;
-        _terminalHub = terminalHub;
         _terminalHubV2 = terminalHubV2;
     }
 
@@ -129,8 +126,6 @@ public sealed class ClusterHub : Hub
 
         _remoteInstances.Upsert(instanceId, nodeId);
 
-        await _terminalHub.Clients.Group(TerminalHub.BuildInstanceGroup(instanceId))
-            .SendAsync("TerminalEvent", envelope.Payload);
         await _terminalHubV2.Clients.Group(TerminalHubV2.BuildInstanceGroup(instanceId))
             .SendAsync("TerminalEvent", ConvertPayloadForV2(envelope.Payload));
 
@@ -141,18 +136,6 @@ public sealed class ClusterHub : Hub
 
         if (hasGap)
         {
-            await _terminalHub.Clients.Group(TerminalHub.BuildInstanceGroup(instanceId))
-                .SendAsync("TerminalEvent", new
-                {
-                    v = 1,
-                    type = "term.route",
-                    instance_id = instanceId,
-                    node_id = nodeId,
-                    node_name = boundNode.NodeName,
-                    action = "resync_requested",
-                    reason = "seq_gap",
-                    ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-                });
             await _terminalHubV2.Clients.Group(TerminalHubV2.BuildInstanceGroup(instanceId))
                 .SendAsync("TerminalEvent", new
                 {
@@ -265,6 +248,19 @@ public sealed class ClusterHub : Hub
                 ts = ReadLong(payload, "ts"),
                 replay = false,
                 data = ReadString(payload, "data") ?? string.Empty
+            };
+        }
+
+        if (string.Equals(type, "term.sync.complete", StringComparison.Ordinal))
+        {
+            return new
+            {
+                v = 2,
+                type = "term.v2.sync.complete",
+                instance_id = ReadString(payload, "instance_id"),
+                req_id = ReadString(payload, "req_id"),
+                to_seq = ReadLong(payload, "to_seq"),
+                ts = ReadLong(payload, "ts")
             };
         }
 

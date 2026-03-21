@@ -11,13 +11,15 @@ public sealed class ClusterCommandExecutor
 
     private readonly GatewayOptions _options;
     private readonly InstanceManager _instances;
+    private readonly TerminalOracleManager _oracle;
     private readonly FileApiService _files;
     private readonly ProcessApiService _processes;
 
-    public ClusterCommandExecutor(GatewayOptions options, InstanceManager instances, FileApiService files, ProcessApiService processes)
+    public ClusterCommandExecutor(GatewayOptions options, InstanceManager instances, TerminalOracleManager oracle, FileApiService files, ProcessApiService processes)
     {
         _options = options;
         _instances = instances;
+        _oracle = oracle;
         _files = files;
         _processes = processes;
     }
@@ -53,12 +55,22 @@ public sealed class ClusterCommandExecutor
                     var instanceId = ReadString(command.Payload, "instance_id") ?? ReadString(command.Payload, "instanceId");
                     var cols = ReadInt(command.Payload, "cols");
                     var rows = ReadInt(command.Payload, "rows");
-                    if (string.IsNullOrWhiteSpace(instanceId) || _instances.Resize(instanceId, cols, rows) is null)
+                    if (string.IsNullOrWhiteSpace(instanceId))
                     {
                         return Fail(command, "instance not found");
                     }
 
-                    return Ok(command, new { ok = true });
+                    var snapshot = _instances.Resize(instanceId, cols, rows);
+                    if (snapshot is null)
+                    {
+                        return Fail(command, "instance not found");
+                    }
+
+                    return Ok(command, new
+                    {
+                        ok = true,
+                        snapshot
+                    });
                 }
                 case "instance.sync":
                 {
@@ -103,7 +115,10 @@ public sealed class ClusterCommandExecutor
                         return Ok(command, chunk);
                     }
 
-                    var snapshot = _instances.Snapshot(instanceId, advanceSeq: true);
+                    var protocol = (ReadString(command.Payload, "protocol") ?? string.Empty).Trim().ToLowerInvariant();
+                    object? snapshot = string.Equals(protocol, "v2", StringComparison.Ordinal)
+                        ? _oracle.BuildSnapshot(instanceId)
+                        : _instances.Snapshot(instanceId, advanceSeq: true);
                     if (snapshot is null)
                     {
                         return Fail(command, "instance not found");

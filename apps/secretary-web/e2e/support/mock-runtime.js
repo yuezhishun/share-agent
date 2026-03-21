@@ -234,8 +234,7 @@ export function installMockRuntime(page) {
           inputBuffer: '',
           rawChunks: [{ seq: 1, data: 'mock ready\r\n' }]
         };
-        const hubPath = pathname.startsWith('/api/v2/') ? '/hubs/terminal-v2' : '/hubs/terminal';
-        return json({ instance_id: id, node_id: 'master-mock', hub_url: `${globalThis.location.origin}${hubPath}` });
+        return json({ instance_id: id, node_id: 'master-mock', hub_url: `${globalThis.location.origin}/hubs/terminal-v2` });
       }
 
       const nodeInstanceMatch = normalizedPathname.match(/^\/api\/nodes\/([^/]+)\/instances$/);
@@ -571,8 +570,8 @@ export function installMockRuntime(page) {
         return null;
       }
       return {
-        v: 1,
-        type: 'term.raw',
+          v: 2,
+          type: 'term.v2.raw',
         instance_id: instanceId,
         replay: false,
         seq,
@@ -692,11 +691,10 @@ export function installMockRuntime(page) {
 
       emitSeqGap() {
         this.emit('TerminalEvent', {
-          v: 1,
-          type: 'term.route',
+          v: 2,
+          type: 'term.v2.sync.required',
           instance_id: this.instanceId,
           reason: 'seq_gap',
-          action: 'resync_requested',
           node_id: 'master-mock',
           node_name: 'Master Mock'
         });
@@ -729,23 +727,19 @@ export function installMockRuntime(page) {
           if (String(payload.type || 'raw').toLowerCase() === 'raw') {
             const reqId = String(payload.reqId || `raw-sync-${Date.now()}`);
             const replay = toRawReplay(id, reqId, payload.sinceSeq);
-            if (this.isV2) {
-              this.emit('TerminalEvent', {
-                ...replay,
-                v: 2,
-                type: 'term.v2.raw'
-              });
-            } else {
-              this.emit('TerminalEvent', replay);
-              this.emit('TerminalEvent', {
-                v: 1,
-                type: 'term.sync.complete',
-                instance_id: id,
-                req_id: reqId,
-                to_seq: replay.to_seq,
-                ts: Date.now()
-              });
-            }
+            this.emit('TerminalEvent', {
+              ...replay,
+              v: 2,
+              type: 'term.v2.raw'
+            });
+            this.emit('TerminalEvent', {
+              v: 2,
+              type: 'term.v2.sync.complete',
+              instance_id: id,
+              req_id: reqId,
+              to_seq: replay.to_seq,
+              ts: Date.now()
+            });
             return;
           }
           this.emit('TerminalEvent', this.isV2 ? toSnapshotV2(id) : toSnapshot(id));

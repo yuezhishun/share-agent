@@ -167,6 +167,10 @@ public sealed class TerminalHubV2 : Hub
             }
 
             await Clients.Caller.SendAsync("TerminalEvent", BuildResizeAck(instanceId, nodeId, reqId, true, cols, rows, 0, null));
+            if (TryReadRemoteSnapshot(result.Payload, out var remoteSnapshot))
+            {
+                await Clients.Group(BuildInstanceGroup(instanceId)).SendAsync("TerminalEvent", ConvertSnapshot(remoteSnapshot));
+            }
             return;
         }
 
@@ -195,12 +199,35 @@ public sealed class TerminalHubV2 : Hub
         var syncType = (request.Type ?? "screen").Trim().ToLowerInvariant();
         if (syncType == "raw")
         {
-            var replay = _manager.RawReplayEvent(instanceId, request.SinceSeq is null ? null : Math.Max(0, (int)request.SinceSeq.Value), request.ReqId);
+            var reqId = string.IsNullOrWhiteSpace(request.ReqId) ? $"raw-sync-v2-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}" : request.ReqId;
+            request.ReqId = reqId;
+            var replay = _manager.RawReplayEvent(instanceId, request.SinceSeq is null ? null : Math.Max(0, (int)request.SinceSeq.Value), reqId);
             if (replay is not null)
             {
                 await Clients.Caller.SendAsync("TerminalEvent", ConvertRawReplay(replay));
+                await Clients.Caller.SendAsync("TerminalEvent", BuildRawSyncComplete(instanceId, reqId, ReadLong(JsonSerializer.SerializeToElement(replay), "to_seq")));
                 return;
             }
+
+            if (!TryResolveRemoteNode(instanceId, out var rawNodeId))
+            {
+                throw new HubException("instance not found");
+            }
+
+            if (IsLocalNode(rawNodeId))
+            {
+                throw new HubException("instance not found");
+            }
+
+            var remoteRaw = await RequestRemoteSyncAsync(rawNodeId, instanceId, request, Context.ConnectionAborted);
+            if (!IsRawEvent(remoteRaw))
+            {
+                throw new HubException("remote raw sync failed");
+            }
+
+            await Clients.Caller.SendAsync("TerminalEvent", ConvertRawReplay(remoteRaw));
+            await Clients.Caller.SendAsync("TerminalEvent", BuildRawSyncComplete(instanceId, reqId, ReadLong(remoteRaw, "to_seq") ?? ReadLong(remoteRaw, "seq")));
+            return;
         }
 
         var snapshot = _oracle.BuildSnapshot(instanceId);
@@ -330,6 +357,82 @@ public sealed class TerminalHubV2 : Hub
             reset = element.TryGetProperty("reset", out var reset) && reset.ValueKind == JsonValueKind.True,
             truncated = element.TryGetProperty("truncated", out var truncated) && truncated.ValueKind == JsonValueKind.True,
             data = element.TryGetProperty("data", out var data) ? data.GetString() ?? string.Empty : string.Empty
+        };
+    }
+
+    private static object BuildRawSyncComplete(string instanceId, string reqId, long? toSeq)
+    {
+        return new
+        {
+            v = 2,
+            type = "term.v2.sync.complete",
+            instance_id = instanceId,
+            req_id = reqId,
+            to_seq = toSeq ?? 0,
+            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
+    }
+
+    private static bool IsRawEvent(JsonElement payload)
+    {
+        return payload.ValueKind == JsonValueKind.Object
+            && string.Equals(ReadString(payload, "type"), "term.raw", StringComparison.Ordinal);
+    }
+
+    private static bool TryReadRemoteSnapshot(JsonElement payload, out JsonElement snapshot)
+    {
+        if (payload.ValueKind == JsonValueKind.Object
+            && payload.TryGetProperty("snapshot", out snapshot)
+            && snapshot.ValueKind == JsonValueKind.Object
+            && snapshot.TryGetProperty("type", out var typeValue)
+            && typeValue.ValueKind == JsonValueKind.String
+            && string.Equals(typeValue.GetString(), "term.snapshot", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        snapshot = default;
+        return false;
+    }
+
+    private static object ConvertSnapshot(JsonElement payload)
+    {
+        return new
+        {
+            v = 2,
+            type = "term.v2.snapshot",
+            instance_id = payload.TryGetProperty("instance_id", out var instanceId) ? instanceId.GetString() : string.Empty,
+            node_id = payload.TryGetProperty("node_id", out var nodeId) ? nodeId.GetString() : string.Empty,
+            node_name = payload.TryGetProperty("node_name", out var nodeName) ? nodeName.GetString() : string.Empty,
+            seq = payload.TryGetProperty("seq", out var seq) && seq.TryGetInt64(out var seqNumber) ? seqNumber : 0,
+            ts = payload.TryGetProperty("ts", out var ts) && ts.TryGetInt64(out var tsNumber) ? tsNumber : 0,
+            size = payload.TryGetProperty("size", out var size) ? size : default,
+            cursor = payload.TryGetProperty("cursor", out var cursor) ? cursor : default,
+            render_epoch = payload.TryGetProperty("render_epoch", out var renderEpoch) && renderEpoch.TryGetInt64(out var renderEpochNumber) ? renderEpochNumber : 0,
+            instance_epoch = payload.TryGetProperty("instance_epoch", out var instanceEpoch) && instanceEpoch.TryGetInt64(out var instanceEpochNumber) ? instanceEpochNumber : 0,
+            rows = payload.TryGetProperty("rows", out var rows) ? rows : default
+        };
+    }
+
+    private static string? ReadString(JsonElement payload, string propertyName)
+    {
+        return payload.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+    }
+
+    private static long? ReadLong(JsonElement payload, string propertyName)
+    {
+        if (!payload.TryGetProperty(propertyName, out var value))
+        {
+            return null;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.Number => value.GetInt64(),
+            JsonValueKind.String when long.TryParse(value.GetString(), out var number) => number,
+            _ => null
         };
     }
 }

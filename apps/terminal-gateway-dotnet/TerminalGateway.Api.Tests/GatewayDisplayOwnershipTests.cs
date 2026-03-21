@@ -47,13 +47,12 @@ public class GatewayDisplayOwnershipTests
         _ = await WaitForMessageAsync(observerMessages, observerGate, msg => GetType(msg) == "term.snapshot", TimeSpan.FromSeconds(8));
 
         await observerHub.InvokeAsync("RequestResize", new { instanceId, cols = 100, rows = 30, reqId = "observer-reject" });
-        var rejected = await WaitForMessageAsync(observerMessages, observerGate, msg => GetType(msg) == "term.viewport.rejected", TimeSpan.FromSeconds(8));
         var ack = await WaitForMessageAsync(observerMessages, observerGate, msg => GetType(msg) == "term.resize.ack" && msg.GetProperty("req_id").GetString() == "observer-reject", TimeSpan.FromSeconds(8));
 
         Assert.False(ack.GetProperty("accepted").GetBoolean());
-        Assert.Equal("not_owner", rejected.GetProperty("reason").GetString());
-        Assert.Equal(initialSnapshot.GetProperty("size").GetProperty("cols").GetInt32(), rejected.GetProperty("size").GetProperty("cols").GetInt32());
-        Assert.Equal(initialSnapshot.GetProperty("size").GetProperty("rows").GetInt32(), rejected.GetProperty("size").GetProperty("rows").GetInt32());
+        Assert.Equal("not_owner", ack.GetProperty("reason").GetString());
+        Assert.Equal(initialSnapshot.GetProperty("size").GetProperty("cols").GetInt32(), ack.GetProperty("size").GetProperty("cols").GetInt32());
+        Assert.Equal(initialSnapshot.GetProperty("size").GetProperty("rows").GetInt32(), ack.GetProperty("size").GetProperty("rows").GetInt32());
     }
 
     [Fact]
@@ -96,7 +95,7 @@ public class GatewayDisplayOwnershipTests
     }
 
     [Fact]
-    public async Task LeaveAll_ShouldReassignDisplayOwner_OnV1Hub()
+    public async Task LeaveAll_ShouldReassignDisplayOwner_OnLegacyHub()
     {
         await LeaveAll_ShouldReassignDisplayOwnerAsync("/hubs/terminal");
     }
@@ -123,7 +122,7 @@ public class GatewayDisplayOwnershipTests
 
     private static HubConnection BuildHubConnection(HttpClient client)
     {
-        return BuildHubConnection(client, "/hubs/terminal");
+        return BuildHubConnection(client, "/hubs/terminal-v2");
     }
 
     private static HubConnection BuildHubConnection(HttpClient client, string hubPath)
@@ -176,9 +175,19 @@ public class GatewayDisplayOwnershipTests
 
     private static string? GetType(JsonElement msg)
     {
-        return msg.TryGetProperty("type", out var value) && value.ValueKind == JsonValueKind.String
+        var type = msg.TryGetProperty("type", out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
+        return type switch
+        {
+            "term.v2.snapshot" => "term.snapshot",
+            "term.v2.raw" => "term.raw",
+            "term.v2.resize.ack" => "term.resize.ack",
+            "term.v2.sync.complete" => "term.sync.complete",
+            "term.v2.sync.required" => "term.sync.required",
+            "term.v2.owner.changed" => "term.owner.changed",
+            _ => type
+        };
     }
 
     private static async Task<JsonElement> WaitForMessageAsync(List<JsonElement> messages, object gate, Func<JsonElement, bool> predicate, TimeSpan timeout)

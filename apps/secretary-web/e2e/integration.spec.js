@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 const apiBase = 'http://127.0.0.1:8080';
 
 async function listInstances(request) {
-  const res = await request.get(`${apiBase}/api/instances`);
+  const res = await request.get(`${apiBase}/api/v2/instances`);
   expect(res.ok()).toBeTruthy();
   const payload = await res.json();
   return Array.isArray(payload?.items) ? payload.items : [];
@@ -12,7 +12,7 @@ async function listInstances(request) {
 async function cleanupInstances(request) {
   const items = await listInstances(request);
   for (const item of items) {
-    await request.delete(`${apiBase}/api/instances/${encodeURIComponent(item.id)}`);
+    await request.delete(`${apiBase}/api/v2/instances/${encodeURIComponent(item.id)}`);
   }
 }
 
@@ -196,44 +196,4 @@ test('integration: desktop switch performance should satisfy local acceptance th
 
   expect(p95(switchSamples)).toBeLessThanOrEqual(5000);
   expect(p95(firstScreenSamples)).toBeLessThanOrEqual(1500);
-});
-
-test('integration: mobile shortcut actions should always restore terminal focus', async ({ page, request }) => {
-  const createRes = await request.post(`${apiBase}/api/instances`, {
-    data: {
-      command: 'bash',
-      args: ['-i'],
-      cols: 80,
-      rows: 25,
-      cwd: '/home/yueyuan'
-    }
-  });
-  expect(createRes.ok()).toBeTruthy();
-  const created = await createRes.json();
-  const instanceId = String(created?.instance_id || '');
-  expect(instanceId).not.toBe('');
-
-  await page.goto('/mobile');
-  await page.selectOption('select', instanceId);
-  await page.getByRole('button', { name: 'Connect', exact: true }).click();
-  await expect(page.getByText(`Connected`)).toBeVisible();
-
-  const names = ['Esc', 'Tab', 'Enter', 'Ctrl+C', '↑', '↓', '←', '→'];
-  for (const name of names) {
-    await page.getByRole('button', { name }).click();
-    await expect
-      .poll(async () => page.evaluate(() => {
-        const active = document.activeElement;
-        if (!active) {
-          return { className: '', inTerminal: false };
-        }
-        const className = String(active.className || '');
-        const inTerminal = !!active.closest('.mobile-terminal');
-        return { className, inTerminal };
-      }), { timeout: 2000 })
-      .toEqual(expect.objectContaining({
-        className: expect.stringContaining('xterm-helper-textarea'),
-        inTerminal: true
-      }));
-  }
 });

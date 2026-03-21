@@ -2,6 +2,8 @@ import { defineStore } from 'pinia';
 import * as signalR from '@microsoft/signalr';
 
 const INSTANCE_ALIAS_STORAGE_KEY = 'webcli-instance-aliases-v1';
+const RAW_SYNC_TIMEOUT_MS = 1500;
+const SCREEN_SYNC_TIMEOUT_MS = 1500;
 
 function readInstanceAliases() {
   if (typeof window === 'undefined') {
@@ -74,6 +76,24 @@ function createHubConnectionBuilder() {
   return new signalR.HubConnectionBuilder();
 }
 
+function parseSeq(value, fallback = 0) {
+  const seq = Number(value);
+  if (!Number.isFinite(seq)) {
+    return Math.max(0, Number(fallback) || 0);
+  }
+  return Math.max(0, Math.floor(seq));
+}
+
+function cloneMessage(message) {
+  try {
+    if (typeof structuredClone === 'function') {
+      return structuredClone(message);
+    }
+  } catch {
+  }
+  return JSON.parse(JSON.stringify(message));
+}
+
 async function parseErrorMessage(response, fallback) {
   const text = await response.text();
   if (!text) {
@@ -101,6 +121,8 @@ export const useWebCliTerminalStoreV2 = defineStore('webcliTerminalV2', {
     joinedInstanceIds: [],
     resizeTimer: null,
     pendingResize: null,
+    streamStates: {},
+    resizeAckByInstance: {},
     uiSession: {
       activeRightTab: 'files'
     }
@@ -173,6 +195,319 @@ export const useWebCliTerminalStoreV2 = defineStore('webcliTerminalV2', {
       }
     },
 
+    ensureStreamState(instanceId) {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return null;
+      }
+      if (!this.streamStates[id]) {
+        this.streamStates[id] = {
+          lastSeq: 0,
+          syncInFlight: false,
+          activeReqId: '',
+          pendingRaw: [],
+          syncTimeout: null,
+          screenSyncInFlight: false,
+          screenSyncReqId: '',
+          screenSyncTimeout: null
+        };
+      }
+      return this.streamStates[id];
+    },
+
+    syncStreamSeq(instanceId, seq) {
+      const stream = this.ensureStreamState(instanceId);
+      const next = parseSeq(seq, 0);
+      if (!stream || next <= 0) {
+        return;
+      }
+      if (next > stream.lastSeq) {
+        stream.lastSeq = next;
+      }
+    },
+
+    clearScreenSync(instanceId) {
+      const stream = this.ensureStreamState(instanceId);
+      if (!stream) {
+        return;
+      }
+      stream.screenSyncInFlight = false;
+      stream.screenSyncReqId = '';
+      if (stream.screenSyncTimeout) {
+        clearTimeout(stream.screenSyncTimeout);
+        stream.screenSyncTimeout = null;
+      }
+    },
+
+    markSnapshotReady(instanceId, message) {
+      this.syncStreamSeq(instanceId, parseSeq(message?.seq, parseSeq(message?.base_seq, 0)));
+      this.clearScreenSync(instanceId);
+    },
+
+    queuePendingRaw(stream, message) {
+      const seq = parseSeq(message?.seq, 0);
+      if (seq <= 0 || stream.pendingRaw.some((item) => parseSeq(item?.seq, 0) === seq)) {
+        return;
+      }
+      stream.pendingRaw = [...stream.pendingRaw, cloneMessage(message)];
+    },
+
+    flushPendingRaw(instanceId) {
+      const stream = this.ensureStreamState(instanceId);
+      if (!stream || stream.pendingRaw.length === 0) {
+        return [];
+      }
+
+      const sorted = [...stream.pendingRaw].sort((left, right) => parseSeq(left?.seq, 0) - parseSeq(right?.seq, 0));
+      const emitted = [];
+      const remaining = [];
+      for (const item of sorted) {
+        const seq = parseSeq(item?.seq, 0);
+        if (seq <= 0) {
+          emitted.push(item);
+          continue;
+        }
+        if (seq <= stream.lastSeq) {
+          continue;
+        }
+        if (seq === stream.lastSeq + 1) {
+          stream.lastSeq = seq;
+          emitted.push(item);
+          continue;
+        }
+        remaining.push(item);
+      }
+
+      stream.pendingRaw = remaining;
+      return emitted;
+    },
+
+    async requestRawSync(instanceId, reason = 'manual', options = {}) {
+      const id = String(instanceId || '').trim();
+      if (!id || !this.connection || !this.wsConnected) {
+        return;
+      }
+
+      const stream = this.ensureStreamState(id);
+      if (!stream || stream.syncInFlight) {
+        return;
+      }
+
+      stream.syncInFlight = true;
+      stream.activeReqId = `raw-sync-v2-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+      if (stream.syncTimeout) {
+        clearTimeout(stream.syncTimeout);
+      }
+      const activeReqId = stream.activeReqId;
+      stream.syncTimeout = setTimeout(() => {
+        const current = this.streamStates[id];
+        if (!current || !current.syncInFlight || current.activeReqId !== activeReqId) {
+          return;
+        }
+        current.syncInFlight = false;
+        current.activeReqId = '';
+        current.syncTimeout = null;
+        this.requestScreenSync(id, `${reason}_timeout`).catch(() => {});
+      }, RAW_SYNC_TIMEOUT_MS);
+
+      const requestedSinceSeq = Number(options?.sinceSeq);
+      const sinceSeq = Number.isFinite(requestedSinceSeq)
+        ? Math.max(0, Math.floor(requestedSinceSeq))
+        : Math.max(0, Number(stream.lastSeq) || 0);
+
+      await this.connection.invoke('RequestSync', {
+        instanceId: id,
+        type: 'raw',
+        reqId: stream.activeReqId,
+        sinceSeq
+      });
+    },
+
+    async requestScreenSync(instanceId, reason = 'manual') {
+      const id = String(instanceId || '').trim();
+      if (!id || !this.connection || !this.wsConnected) {
+        return;
+      }
+
+      const stream = this.ensureStreamState(id);
+      if (stream?.screenSyncInFlight) {
+        return;
+      }
+
+      if (stream) {
+        stream.screenSyncInFlight = true;
+        stream.screenSyncReqId = `screen-sync-v2-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+        if (stream.screenSyncTimeout) {
+          clearTimeout(stream.screenSyncTimeout);
+        }
+        const activeReqId = stream.screenSyncReqId;
+        stream.screenSyncTimeout = setTimeout(() => {
+          const current = this.streamStates[id];
+          if (!current || !current.screenSyncInFlight || current.screenSyncReqId !== activeReqId) {
+            return;
+          }
+          current.screenSyncInFlight = false;
+          current.screenSyncReqId = '';
+          current.screenSyncTimeout = null;
+          this.setStatus(`Resync timeout: ${reason}`);
+        }, SCREEN_SYNC_TIMEOUT_MS);
+      }
+
+      await this.connection.invoke('RequestSync', {
+        instanceId: id,
+        type: 'screen',
+        reqId: stream?.screenSyncReqId || `screen-sync-v2-${Date.now()}`
+      });
+    },
+
+    async fallbackToScreenSync(instanceId, reason) {
+      try {
+        await this.requestScreenSync(instanceId, reason);
+      } catch {
+        this.setStatus(`Auto resync failed: ${String(instanceId || '')}`);
+      }
+    },
+
+    handleIncomingRaw(message) {
+      const id = String(message?.instance_id || '').trim();
+      const stream = this.ensureStreamState(id);
+      if (!stream) {
+        return [message];
+      }
+
+      const isReplay = message?.replay === true;
+      const seq = parseSeq(message?.seq, 0);
+      if (isReplay) {
+        const toSeq = parseSeq(message?.to_seq, seq);
+        if (toSeq > stream.lastSeq) {
+          stream.lastSeq = toSeq;
+        }
+        return [message];
+      }
+
+      if (seq <= 0) {
+        return [message];
+      }
+
+      if (stream.syncInFlight) {
+        this.queuePendingRaw(stream, message);
+        return [];
+      }
+
+      if (seq <= stream.lastSeq) {
+        return [];
+      }
+
+      if (seq > stream.lastSeq + 1) {
+        this.queuePendingRaw(stream, message);
+        this.requestRawSync(id, 'seq_gap').catch(() => {
+          this.fallbackToScreenSync(id, 'seq_gap').catch(() => {});
+        });
+        return [];
+      }
+
+      stream.lastSeq = seq;
+      return [message];
+    },
+
+    handleIncomingSyncComplete(message) {
+      const id = String(message?.instance_id || '').trim();
+      const stream = this.ensureStreamState(id);
+      if (!stream) {
+        return [];
+      }
+
+      const reqId = String(message?.req_id || '').trim();
+      if (stream.activeReqId && reqId && reqId !== stream.activeReqId) {
+        return [];
+      }
+
+      const toSeq = parseSeq(message?.to_seq, stream.lastSeq);
+      if (toSeq > stream.lastSeq) {
+        stream.lastSeq = toSeq;
+      }
+
+      stream.syncInFlight = false;
+      stream.activeReqId = '';
+      if (stream.syncTimeout) {
+        clearTimeout(stream.syncTimeout);
+        stream.syncTimeout = null;
+      }
+
+      const drained = this.flushPendingRaw(id);
+      if (stream.pendingRaw.length > 0) {
+        this.requestRawSync(id, 'post_sync_gap').catch(() => {
+          this.fallbackToScreenSync(id, 'post_sync_gap').catch(() => {});
+        });
+      }
+      return drained;
+    },
+
+    processIncomingMessage(message) {
+      if (!message || typeof message !== 'object') {
+        return [];
+      }
+
+      const instanceId = String(message?.instance_id || '').trim();
+      if (message.type === 'term.v2.snapshot') {
+        this.markSnapshotReady(instanceId, message);
+        return [message];
+      }
+
+      if (message.type === 'term.v2.raw') {
+        return this.handleIncomingRaw(message);
+      }
+
+      if (message.type === 'term.v2.sync.complete') {
+        return this.handleIncomingSyncComplete(message);
+      }
+
+      if (message.type === 'term.v2.sync.required') {
+        const stream = this.ensureStreamState(instanceId);
+        const hasSeq = parseSeq(stream?.lastSeq, 0) > 0;
+        const request = hasSeq
+          ? this.requestRawSync(instanceId, String(message.reason || 'screen_untrusted'))
+          : this.requestScreenSync(instanceId, String(message.reason || 'screen_untrusted'));
+        request.catch(() => {
+          this.fallbackToScreenSync(instanceId, String(message.reason || 'screen_untrusted')).catch(() => {});
+        });
+        return [message];
+      }
+
+      if (message.type === 'term.v2.resize.ack' && message.accepted === true) {
+        this.resizeAckByInstance[instanceId] = Date.now();
+        this.requestScreenSync(instanceId, 'resize').catch(() => {
+          this.setStatus(`Auto resync failed: ${instanceId}`);
+        });
+        return [message];
+      }
+
+      return [message];
+    },
+
+    updateStatusFromMessage(message) {
+      const messageInstanceId = String(message?.instance_id || '').trim();
+      const isSelected = !messageInstanceId || messageInstanceId === String(this.selectedInstanceId || '').trim();
+      if (!isSelected) {
+        return;
+      }
+      if (message?.type === 'term.v2.sync.required') {
+        this.setStatus(`Resync required: ${String(message?.reason || 'screen_untrusted')}`);
+        return;
+      }
+      if (message?.type === 'term.v2.resize.ack' && message.accepted === true) {
+        this.setStatus('Resizing...');
+        return;
+      }
+      if (message?.type === 'term.v2.snapshot') {
+        this.setStatus('Connected');
+        return;
+      }
+      if (message?.type === 'term.exit') {
+        this.setStatus('Instance exited');
+      }
+    },
+
     async fetchInstances() {
       const response = await fetch(buildApiPath('/api/v2/instances'));
       if (!response.ok) {
@@ -182,6 +517,20 @@ export const useWebCliTerminalStoreV2 = defineStore('webcliTerminalV2', {
       this.instances = Array.isArray(body?.items) ? body.items : [];
       if (this.selectedInstanceId && !this.instances.some((item) => item.id === this.selectedInstanceId)) {
         this.selectedInstanceId = '';
+      }
+      const activeIds = new Set(this.instances.map((item) => String(item?.id || '').trim()).filter(Boolean));
+      for (const id of Object.keys(this.streamStates)) {
+        if (!activeIds.has(id)) {
+          const stream = this.streamStates[id];
+          if (stream?.syncTimeout) {
+            clearTimeout(stream.syncTimeout);
+          }
+          if (stream?.screenSyncTimeout) {
+            clearTimeout(stream.screenSyncTimeout);
+          }
+          delete this.streamStates[id];
+          delete this.resizeAckByInstance[id];
+        }
       }
       return this.instances;
     },
@@ -257,22 +606,14 @@ export const useWebCliTerminalStoreV2 = defineStore('webcliTerminalV2', {
       this.connection = connection;
 
       connection.on('TerminalEvent', (message) => {
-        const messageInstanceId = String(message?.instance_id || '').trim();
-        const isSelected = !messageInstanceId || messageInstanceId === String(this.selectedInstanceId || '').trim();
-        if (message?.type === 'term.v2.sync.required' && isSelected) {
-          this.setStatus(`Resync required: ${String(message?.reason || 'screen_untrusted')}`);
-        }
-        if (message?.type === 'term.v2.resize.ack' && isSelected && message.accepted === true) {
-          this.setStatus('Resizing...');
-        }
-        if (message?.type === 'term.v2.snapshot' && isSelected) {
-          this.setStatus('Connected');
-        }
-        if (message?.type === 'term.exit' && isSelected) {
-          this.setStatus('Instance exited');
-        }
-        if (isSelected) {
-          this.emitMessage(message);
+        const processed = this.processIncomingMessage(message);
+        for (const item of processed) {
+          this.updateStatusFromMessage(item);
+          const messageInstanceId = String(item?.instance_id || '').trim();
+          const isSelected = !messageInstanceId || messageInstanceId === String(this.selectedInstanceId || '').trim();
+          if (isSelected) {
+            this.emitMessage(item);
+          }
         }
       });
 
@@ -299,6 +640,16 @@ export const useWebCliTerminalStoreV2 = defineStore('webcliTerminalV2', {
         this.isReconnecting = false;
         this.connection = null;
         this.joinedInstanceIds = [];
+        for (const id of Object.keys(this.streamStates)) {
+          const stream = this.streamStates[id];
+          if (stream?.syncTimeout) {
+            clearTimeout(stream.syncTimeout);
+          }
+          if (stream?.screenSyncTimeout) {
+            clearTimeout(stream.screenSyncTimeout);
+          }
+        }
+        this.streamStates = {};
         this.setStatus('disconnected');
       });
 
@@ -319,18 +670,6 @@ export const useWebCliTerminalStoreV2 = defineStore('webcliTerminalV2', {
       await this.syncJoinedInstances({ include: [id] });
       await this.requestScreenSync(id);
       this.setStatus('Connected');
-    },
-
-    async requestScreenSync(instanceId) {
-      const id = String(instanceId || '').trim();
-      if (!id || !this.connection || !this.wsConnected) {
-        return;
-      }
-
-      await this.connection.invoke('RequestSync', {
-        instanceId: id,
-        type: 'screen'
-      });
     },
 
     async sendInput(data) {
@@ -417,7 +756,7 @@ export const useWebCliTerminalStoreV2 = defineStore('webcliTerminalV2', {
       const target = this.instances.find((item) => String(item?.id || '') === id) || this.selectedInstance;
       const nodeId = String(target?.node_id || '').trim();
       const endpoint = nodeId
-        ? buildApiPath(`/api/nodes/${encodeURIComponent(nodeId)}/instances/${encodeURIComponent(id)}`)
+        ? buildApiPath(`/api/v2/nodes/${encodeURIComponent(nodeId)}/instances/${encodeURIComponent(id)}`)
         : buildApiPath(`/api/v2/instances/${encodeURIComponent(id)}`);
       const response = await fetch(endpoint, {
         method: 'DELETE'
@@ -441,8 +780,19 @@ export const useWebCliTerminalStoreV2 = defineStore('webcliTerminalV2', {
       if (this.connection) {
         this.connection.stop().catch(() => {});
       }
+      for (const id of Object.keys(this.streamStates)) {
+        const stream = this.streamStates[id];
+        if (stream?.syncTimeout) {
+          clearTimeout(stream.syncTimeout);
+        }
+        if (stream?.screenSyncTimeout) {
+          clearTimeout(stream.screenSyncTimeout);
+        }
+      }
       this.connection = null;
       this.joinedInstanceIds = [];
+      this.streamStates = {};
+      this.resizeAckByInstance = {};
       this.wsConnected = false;
       this.isReconnecting = false;
       this.setStatus('disconnected');

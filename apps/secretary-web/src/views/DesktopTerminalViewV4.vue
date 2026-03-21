@@ -653,7 +653,7 @@ function isCopyKeyboardEvent(event) {
 async function fitTerminal() {
   await nextTick();
   if (!isTerminalViewportRenderable(activeCenterTab.value, terminalRef.value)) {
-    return;
+    return null;
   }
 
   fitAddon?.fit();
@@ -661,7 +661,22 @@ async function fitTerminal() {
   const currentRows = Math.max(1, Number(term?.rows) || 0);
   if (currentCols > 0 && currentRows > 0) {
     updateStoredTerminalGeometry(currentCols, currentRows);
+    return { cols: currentCols, rows: currentRows };
   }
+
+  return null;
+}
+
+async function resolveCreateGeometry() {
+  const measured = await fitTerminal();
+  if (measured?.cols > 0 && measured?.rows > 0) {
+    return measured;
+  }
+
+  return {
+    cols: Math.max(1, Number(cols.value) || 120),
+    rows: Math.max(1, Number(rows.value) || 34)
+  };
 }
 
 function handleTerminalResize({ cols: c, rows: r }) {
@@ -788,9 +803,6 @@ async function connect(instanceId) {
     return;
   }
   try {
-    if (!terminalGeometryInitialized && activeCenterTab.value === 'terminal') {
-      await fitTerminal();
-    }
     const nextCols = Math.max(1, Number(cols.value) || 120);
     const nextRows = Math.max(1, Number(rows.value) || 34);
     if (nextCols <= 0 || nextRows <= 0) {
@@ -857,6 +869,7 @@ async function syncNodeTerminalSelection() {
 
 async function createInstance() {
   try {
+    const geometry = await resolveCreateGeometry();
     const selectedRecipe = defaultCreateRecipe.value;
     const parsedArgs = selectedRecipe
       ? (Array.isArray(selectedRecipe.args) ? selectedRecipe.args.map((x) => String(x)) : [])
@@ -883,8 +896,8 @@ async function createInstance() {
       command: commandText,
       args: parsedArgs,
       env: parsedEnv,
-      cols: Number(cols.value) || 120,
-      rows: Number(rows.value) || 34,
+      cols: geometry.cols,
+      rows: geometry.rows,
       cwd: resolvedCwd || undefined
     }, nodeId);
 
@@ -1012,6 +1025,7 @@ async function onUploadFilesChange(event) {
 
 async function runRecipe(item) {
   try {
+    const geometry = await resolveCreateGeometry();
     const args = Array.isArray(item?.args) ? item.args.map((x) => String(x)) : [];
     const env = item?.env && typeof item.env === 'object' && !Array.isArray(item.env) ? item.env : {};
     const recipeCommand = String(item?.command || '').trim() || 'bash';
@@ -1023,8 +1037,8 @@ async function runRecipe(item) {
       command: recipeCommand,
       args,
       env,
-      cols: Number(cols.value) || 120,
-      rows: Number(rows.value) || 34,
+      cols: geometry.cols,
+      rows: geometry.rows,
       cwd: recipeCwd || undefined
     }, nodeId);
 
@@ -1296,7 +1310,7 @@ onMounted(async () => {
   terminalRef.value?.addEventListener('contextmenu', onTerminalContextMenu);
   document.addEventListener('visibilitychange', onDocumentVisibilityChange);
 
-  await fitTerminal();
+  applyLocalTerminalGeometry(Math.max(1, Number(cols.value) || 120), Math.max(1, Number(rows.value) || 34));
   await Promise.all([
     refreshTerminals()
   ]);

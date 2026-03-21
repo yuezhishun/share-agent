@@ -15,6 +15,7 @@ public sealed class ClusterHub : Hub
     private readonly ClusterEventDeduplicator _events;
     private readonly RemoteInstanceRegistry _remoteInstances;
     private readonly IHubContext<TerminalHub> _terminalHub;
+    private readonly IHubContext<TerminalHubV2> _terminalHubV2;
 
     public ClusterHub(
         GatewayOptions options,
@@ -23,7 +24,8 @@ public sealed class ClusterHub : Hub
         ClusterCommandExecutor executor,
         ClusterEventDeduplicator events,
         RemoteInstanceRegistry remoteInstances,
-        IHubContext<TerminalHub> terminalHub)
+        IHubContext<TerminalHub> terminalHub,
+        IHubContext<TerminalHubV2> terminalHubV2)
     {
         _options = options;
         _nodeRegistry = nodeRegistry;
@@ -32,6 +34,7 @@ public sealed class ClusterHub : Hub
         _events = events;
         _remoteInstances = remoteInstances;
         _terminalHub = terminalHub;
+        _terminalHubV2 = terminalHubV2;
     }
 
     public Task RegisterNode(ClusterRegisterNodeRequest request)
@@ -128,6 +131,8 @@ public sealed class ClusterHub : Hub
 
         await _terminalHub.Clients.Group(TerminalHub.BuildInstanceGroup(instanceId))
             .SendAsync("TerminalEvent", envelope.Payload);
+        await _terminalHubV2.Clients.Group(TerminalHubV2.BuildInstanceGroup(instanceId))
+            .SendAsync("TerminalEvent", ConvertPayloadForV2(envelope.Payload));
 
         if (string.Equals(envelope.Type, "term.exit", StringComparison.Ordinal))
         {
@@ -145,6 +150,17 @@ public sealed class ClusterHub : Hub
                     node_id = nodeId,
                     node_name = boundNode.NodeName,
                     action = "resync_requested",
+                    reason = "seq_gap",
+                    ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                });
+            await _terminalHubV2.Clients.Group(TerminalHubV2.BuildInstanceGroup(instanceId))
+                .SendAsync("TerminalEvent", new
+                {
+                    v = 2,
+                    type = "term.v2.sync.required",
+                    instance_id = instanceId,
+                    node_id = nodeId,
+                    node_name = boundNode.NodeName,
                     reason = "seq_gap",
                     ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
                 });
@@ -188,6 +204,11 @@ public sealed class ClusterHub : Hub
             var instanceId = instanceIdProp.GetString();
             if (!string.IsNullOrWhiteSpace(instanceId))
             {
+                if (result.Payload.TryGetProperty("summary", out var summaryElement))
+                {
+                    _remoteInstances.Upsert(ReadInstanceSummary(summaryElement, instanceId, _options.NodeId));
+                    return;
+                }
                 _remoteInstances.Upsert(instanceId, _options.NodeId);
             }
             return;
@@ -204,5 +225,138 @@ public sealed class ClusterHub : Hub
                 _remoteInstances.Remove(instanceId);
             }
         }
+    }
+
+    private static object ConvertPayloadForV2(JsonElement payload)
+    {
+        var type = payload.TryGetProperty("type", out var typeValue) && typeValue.ValueKind == JsonValueKind.String
+            ? typeValue.GetString()
+            : string.Empty;
+
+        if (string.Equals(type, "term.snapshot", StringComparison.Ordinal))
+        {
+            return new
+            {
+                v = 2,
+                type = "term.v2.snapshot",
+                instance_id = ReadString(payload, "instance_id"),
+                node_id = ReadString(payload, "node_id"),
+                node_name = ReadString(payload, "node_name"),
+                seq = ReadLong(payload, "seq"),
+                ts = ReadLong(payload, "ts"),
+                size = ReadElement(payload, "size"),
+                cursor = ReadElement(payload, "cursor"),
+                render_epoch = ReadLong(payload, "render_epoch"),
+                instance_epoch = ReadLong(payload, "instance_epoch"),
+                rows = ReadElement(payload, "rows")
+            };
+        }
+
+        if (string.Equals(type, "term.raw", StringComparison.Ordinal))
+        {
+            return new
+            {
+                v = 2,
+                type = "term.v2.raw",
+                instance_id = ReadString(payload, "instance_id"),
+                node_id = ReadString(payload, "node_id"),
+                node_name = ReadString(payload, "node_name"),
+                seq = ReadLong(payload, "seq"),
+                ts = ReadLong(payload, "ts"),
+                replay = false,
+                data = ReadString(payload, "data") ?? string.Empty
+            };
+        }
+
+        if (string.Equals(type, "term.exit", StringComparison.Ordinal))
+        {
+            return new
+            {
+                v = 2,
+                type = "term.exit",
+                instance_id = ReadString(payload, "instance_id"),
+                node_id = ReadString(payload, "node_id"),
+                node_name = ReadString(payload, "node_name"),
+                exit_code = ReadNullableLong(payload, "exit_code"),
+                ts = ReadLong(payload, "ts")
+            };
+        }
+
+        if (string.Equals(type, "term.owner.changed", StringComparison.Ordinal))
+        {
+            return new
+            {
+                v = 2,
+                type = "term.v2.owner.changed",
+                instance_id = ReadString(payload, "instance_id"),
+                node_id = ReadString(payload, "node_id"),
+                node_name = ReadString(payload, "node_name"),
+                owner_connection_id = ReadString(payload, "owner_connection_id"),
+                render_epoch = ReadLong(payload, "render_epoch"),
+                instance_epoch = ReadLong(payload, "instance_epoch"),
+                ts = ReadLong(payload, "ts")
+            };
+        }
+
+        return payload;
+    }
+
+    private static string? ReadString(JsonElement payload, string propertyName)
+    {
+        return payload.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+    }
+
+    private static long ReadLong(JsonElement payload, string propertyName)
+    {
+        return payload.TryGetProperty(propertyName, out var value) && value.TryGetInt64(out var number)
+            ? number
+            : 0;
+    }
+
+    private static long? ReadNullableLong(JsonElement payload, string propertyName)
+    {
+        return payload.TryGetProperty(propertyName, out var value) && value.TryGetInt64(out var number)
+            ? number
+            : null;
+    }
+
+    private static JsonElement ReadElement(JsonElement payload, string propertyName)
+    {
+        return payload.TryGetProperty(propertyName, out var value) ? value : default;
+    }
+
+    private static InstanceSummary ReadInstanceSummary(JsonElement summary, string fallbackInstanceId, string fallbackNodeId)
+    {
+        return new InstanceSummary
+        {
+            Id = ReadString(summary, "id") ?? fallbackInstanceId,
+            Command = ReadString(summary, "command") ?? "remote-shell",
+            Cwd = ReadString(summary, "cwd") ?? string.Empty,
+            Cols = ReadInt(summary, "cols"),
+            Rows = ReadInt(summary, "rows"),
+            CreatedAt = ReadString(summary, "created_at") ?? DateTimeOffset.UtcNow.ToString("O"),
+            Status = ReadString(summary, "status") ?? "running",
+            Clients = ReadInt(summary, "clients"),
+            NodeId = ReadString(summary, "node_id") ?? fallbackNodeId,
+            NodeName = ReadString(summary, "node_name") ?? fallbackNodeId,
+            NodeRole = ReadString(summary, "node_role") ?? "slave",
+            NodeOnline = ReadBool(summary, "node_online", true)
+        };
+    }
+
+    private static int ReadInt(JsonElement payload, string propertyName)
+    {
+        return payload.TryGetProperty(propertyName, out var value) && value.TryGetInt32(out var number)
+            ? number
+            : 0;
+    }
+
+    private static bool ReadBool(JsonElement payload, string propertyName, bool fallback)
+    {
+        return payload.TryGetProperty(propertyName, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? value.GetBoolean()
+            : fallback;
     }
 }

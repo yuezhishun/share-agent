@@ -42,7 +42,7 @@ var app = builder.Build();
 app.MapApiRoutes();
 app.MapApiRoutesV2();
 app.MapProcessEndpoints();
-app.MapHub<TerminalHub>("/hubs/terminal");
+app.MapHub<TerminalHubV2>("/hubs/terminal");
 app.MapHub<TerminalHubV2>("/hubs/terminal-v2");
 app.MapHub<ClusterHub>("/hubs/cluster");
 

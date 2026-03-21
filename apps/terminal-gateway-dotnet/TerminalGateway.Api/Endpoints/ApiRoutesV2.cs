@@ -19,7 +19,16 @@ public static class ApiRoutesV2
                 protocol = "v2"
             }));
 
-        app.MapGet("/api/v2/instances", (InstanceManager manager) => Results.Ok(new { items = manager.List(), protocol = "v2" }));
+        app.MapGet("/api/v2/instances", (InstanceManager manager, RemoteInstanceRegistry remoteInstances) =>
+        {
+            var items = manager.List()
+                .Concat(remoteInstances.List())
+                .GroupBy(item => item.Id, StringComparer.Ordinal)
+                .Select(group => group.First())
+                .OrderByDescending(item => item.CreatedAt, StringComparer.Ordinal)
+                .ToList();
+            return Results.Ok(new { items, protocol = "v2" });
+        });
         app.MapGet("/api/v2/nodes", (InstanceManager manager, NodeRegistry nodes) => Results.Ok(new { items = nodes.ListNodes(manager.List().Count), protocol = "v2" }));
 
         app.MapPost("/api/v2/instances", async (HttpRequest request, CreateInstanceRequest body, InstanceManager manager, GatewayOptions options, CancellationToken ct) =>
@@ -80,7 +89,7 @@ public static class ApiRoutesV2
 
                 var protocol = string.Equals(request.Scheme, "https", StringComparison.OrdinalIgnoreCase) ? "https" : "http";
                 var hubUrl = $"{protocol}://{request.Host}/hubs/terminal-v2";
-                remoteInstances.Upsert(instanceId, nodeId);
+                remoteInstances.Upsert(ReadRemoteSummary(commandResult.Payload, instanceId, nodeId));
                 return Results.Ok(new { instance_id = instanceId, hub_url = hubUrl, node_id = nodeId, protocol = "v2" });
             }
             catch (Exception ex)
@@ -100,5 +109,69 @@ public static class ApiRoutesV2
     private static bool IsLocalNode(string nodeId, GatewayOptions options)
     {
         return string.Equals((nodeId ?? string.Empty).Trim(), options.NodeId, StringComparison.Ordinal);
+    }
+
+    private static InstanceSummary ReadRemoteSummary(JsonElement payload, string instanceId, string nodeId)
+    {
+        if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("summary", out var summaryElement))
+        {
+            return ReadInstanceSummary(summaryElement, instanceId, nodeId);
+        }
+
+        return new InstanceSummary
+        {
+            Id = instanceId,
+            Command = "remote-shell",
+            Cwd = string.Empty,
+            Cols = 0,
+            Rows = 0,
+            CreatedAt = DateTimeOffset.UtcNow.ToString("O"),
+            Status = "running",
+            Clients = 0,
+            NodeId = nodeId,
+            NodeName = nodeId,
+            NodeRole = "slave",
+            NodeOnline = true
+        };
+    }
+
+    private static InstanceSummary ReadInstanceSummary(JsonElement summary, string fallbackInstanceId, string fallbackNodeId)
+    {
+        return new InstanceSummary
+        {
+            Id = ReadString(summary, "id") ?? fallbackInstanceId,
+            Command = ReadString(summary, "command") ?? "remote-shell",
+            Cwd = ReadString(summary, "cwd") ?? string.Empty,
+            Cols = ReadInt(summary, "cols"),
+            Rows = ReadInt(summary, "rows"),
+            CreatedAt = ReadString(summary, "created_at") ?? DateTimeOffset.UtcNow.ToString("O"),
+            Status = ReadString(summary, "status") ?? "running",
+            Clients = ReadInt(summary, "clients"),
+            NodeId = ReadString(summary, "node_id") ?? fallbackNodeId,
+            NodeName = ReadString(summary, "node_name") ?? fallbackNodeId,
+            NodeRole = ReadString(summary, "node_role") ?? "slave",
+            NodeOnline = ReadBool(summary, "node_online", true)
+        };
+    }
+
+    private static string? ReadString(JsonElement element, string propertyName)
+    {
+        return element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+    }
+
+    private static int ReadInt(JsonElement element, string propertyName)
+    {
+        return element.TryGetProperty(propertyName, out var value) && value.TryGetInt32(out var number)
+            ? number
+            : 0;
+    }
+
+    private static bool ReadBool(JsonElement element, string propertyName, bool fallback)
+    {
+        return element.TryGetProperty(propertyName, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? value.GetBoolean()
+            : fallback;
     }
 }

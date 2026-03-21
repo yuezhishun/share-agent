@@ -32,7 +32,11 @@ public sealed class ClusterCommandExecutor
                 {
                     var request = command.Payload.Deserialize<CreateInstanceRequest>(CaseInsensitiveJson) ?? new CreateInstanceRequest();
                     var created = await _instances.CreateAsync(request, _options.FilesBasePath, cancellationToken);
-                    return Ok(command, new { instance_id = created.Id });
+                    return Ok(command, new
+                    {
+                        instance_id = created.Id,
+                        summary = created
+                    });
                 }
                 case "instance.input":
                 {

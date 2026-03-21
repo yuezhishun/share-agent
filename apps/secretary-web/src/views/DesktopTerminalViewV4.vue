@@ -59,7 +59,7 @@
                 class="tab-btn file-tab"
                 :class="{ active: activeCenterTab === tab.id }"
                 @click="switchCenterTab(tab.id)"
-                :title="tab.path"
+                :title="formatFileTabTooltip(tab)"
               >
                 <i class="fa-regular fa-file" />
                 <span class="tab-text">{{ tab.name }}</span>
@@ -163,6 +163,7 @@ import { useWebCliTerminalStoreV2 } from '../stores/webcli-terminal-v2.js';
 import { useWebCliFilesStore } from '../stores/webcli-files.js';
 import { useWebCliRecipesStore } from '../stores/webcli-recipes.js';
 import { createTerminalProtocolRendererV2 } from '../composables/useTerminalProtocolV2.js';
+import { useDesktopTerminalFileTabs } from '../composables/useDesktopTerminalFileTabs.js';
 import FileEditorPanel from '../components/FileEditorPanel.vue';
 import RightWorkspaceSidebarV4 from '../components/RightWorkspaceSidebarV4.vue';
 import TerminalSidebarV4 from '../components/TerminalSidebarV4.vue';
@@ -171,6 +172,28 @@ import {
   normalizeTerminalGeometry
 } from './desktop-terminal-resize.js';
 import { formatCommandLine, parseCommandLine } from '../utils/command-line.js';
+import {
+  BUILT_IN_SHORTCUT_ITEMS,
+  COMBO_KEY_INTERVAL_MS,
+  compareShortcutGroup,
+  compressPath,
+  CUSTOM_SHORTCUT_STORAGE_KEY,
+  DEFAULT_CWD_PATH,
+  DEFAULT_RECIPE_STORAGE_KEY,
+  formatFileEntryTooltip,
+  formatFileTabTooltip,
+  formatInstanceSummary,
+  formatInstanceTooltip,
+  formatNodeOption,
+  formatRecipeSummary,
+  formatSize,
+  normalizeShortcutGroup,
+  parseJsonOrDefault,
+  parseRecipeEnv,
+  QUICK_COMMAND_INTERVAL_MS,
+  toShortcutPayload,
+  buildRecipeEditor as buildRecipeEditorState
+} from '../utils/desktop-terminal-v4.js';
 
 const terminalStore = useWebCliTerminalStoreV2();
 const filesStore = useWebCliFilesStore();
@@ -188,7 +211,6 @@ const cols = ref(120);
 const rows = ref(34);
 
 const activeCenterTab = ref('terminal');
-const fileTabs = ref([]);
 const editingRecipeId = ref('');
 const showRecipeEditor = ref(false);
 const recipeEditor = ref(buildRecipeEditor());
@@ -221,9 +243,6 @@ let renderer = null;
 let suppressRemoteResize = false;
 let lastMeasuredGeometry = null;
 let terminalGeometryInitialized = false;
-const defaultCwdPath = '/home/yueyuan';
-const fileChunkBytes = 64 * 1024;
-const fileChunkMaxLines = 800;
 
 const recipeItems = computed(() => [...recipesStore.items].sort((a, b) => {
   const groupCompare = String(a.group || 'general').localeCompare(String(b.group || 'general'), 'zh-Hans-CN');
@@ -259,13 +278,6 @@ const visibleTerminalInstances = computed(() => {
   return terminalStore.instances.filter((item) => String(item?.node_id || '').trim() === targetId);
 });
 
-const activeFileTab = computed(() => {
-  if (activeCenterTab.value === 'terminal') {
-    return null;
-  }
-  return fileTabs.value.find((tab) => tab.id === activeCenterTab.value) || null;
-});
-
 const activeRightTab = computed(() => {
   const tab = String(terminalStore.uiSession.activeRightTab || 'files').trim();
   return ['files', 'shortcuts', 'recipes'].includes(tab) ? tab : 'files';
@@ -291,41 +303,6 @@ const rightTabIconClass = computed(() => {
 
 const currentPathDisplay = computed(() => compressPath(filesStore.currentPath));
 
-const defaultRecipeStorageKey = 'webcli-default-create-recipe-v1';
-const customShortcutStorageKey = 'webcli-shortcuts-v1';
-const codexQuickCommand = 'codex --dangerously-bypass-approvals-and-sandbox';
-const comboKeyIntervalMs = 120;
-const quickCommandIntervalMs = 300;
-const builtInShortcutItems = [
-  { id: 'esc', label: 'esc', group: '控制键', value: '\u001b' },
-  { id: 'tab', label: 'tab', group: '控制键', value: '\t' },
-  { id: 'enter', label: 'enter', group: '控制键', value: '\r' },
-  { id: 'altEnter', label: 'alt+enter', group: '控制键', value: '\u001b\r' },
-  { id: 'backspace', label: 'backspace', group: '控制键', value: '\u007f' },
-  { id: 'delete', label: 'delete', group: '控制键', value: '\u001b[3~' },
-  { id: 'ctrlC', label: 'ctrl+c', group: '控制键', value: '\u0003' },
-  { id: 'altTab', label: 'alt+tab', group: '控制键', value: '\u001b[Z' },
-  { id: 'codex', label: 'codex', group: '常用命令', sequence: [codexQuickCommand, '\r'], intervalMs: quickCommandIntervalMs },
-  { id: 'home', label: 'home', group: '导航键', value: '\u001b[H' },
-  { id: 'end', label: 'end', group: '导航键', value: '\u001b[F' },
-  { id: 'arrowLeft', label: '←', group: '导航键', value: '\u001b[D' },
-  { id: 'arrowUp', label: '↑', group: '导航键', value: '\u001b[A' },
-  { id: 'arrowDown', label: '↓', group: '导航键', value: '\u001b[B' },
-  { id: 'arrowRight', label: '→', group: '导航键', value: '\u001b[C' },
-  { id: 'pgUp', label: 'pgUp', group: '导航键', value: '\u001b[5~' },
-  { id: 'pgDn', label: 'pgDn', group: '导航键', value: '\u001b[6~' },
-  { id: 'at', label: '@', group: '常用命令', value: '@' },
-  { id: 'bang', label: '!', group: '常用命令', value: '!' },
-  { id: 'slash', label: '/', group: '常用命令', value: '/' },
-  { id: 'ls', label: 'ls', group: '常用命令', sequence: ['ls', '\r'], intervalMs: quickCommandIntervalMs },
-  { id: 'pwd', label: 'pwd', group: '常用命令', sequence: ['pwd', '\r'], intervalMs: quickCommandIntervalMs },
-  { id: 'resume', label: '/resume', group: '常用命令', sequence: ['/resume', '\r'], intervalMs: quickCommandIntervalMs },
-  { id: 'new', label: '/new', group: '常用命令', sequence: ['/new', '\r'], intervalMs: quickCommandIntervalMs },
-  { id: 'status', label: '/status', group: '常用命令', sequence: ['/status', '\r'], intervalMs: quickCommandIntervalMs }
-];
-
-const shortcutGroupOrder = ['控制键', '导航键', '常用命令', 'custom', '自定义'];
-
 const defaultCreateRecipe = computed(() => {
   const targetId = String(defaultCreateRecipeId.value || '').trim();
   if (!targetId) {
@@ -342,7 +319,7 @@ const createTerminalTitle = computed(() => {
   return `新建终端（默认配方：${recipe.name || recipe.command}）`;
 });
 
-const shortcutItems = computed(() => [...builtInShortcutItems, ...customShortcutItems.value]);
+const shortcutItems = computed(() => [...BUILT_IN_SHORTCUT_ITEMS, ...customShortcutItems.value]);
 
 const shortcutGroups = computed(() => {
   const groups = new Map();
@@ -367,17 +344,7 @@ function getInstanceAlias(instanceId) {
 }
 
 function buildRecipeEditor(seed = null) {
-  const source = seed || {};
-  return {
-    name: String(source.name || ''),
-    cwd: normalizeSelectableCwd(source.cwd),
-    commandLine: formatCommandLine(
-      String(source.command || 'bash') || 'bash',
-      Array.isArray(source.args) ? source.args : ['-i']
-    ),
-    envInput: JSON.stringify(source.env && typeof source.env === 'object' && !Array.isArray(source.env) ? source.env : {}, null, 2),
-    group: String(source.group || 'general')
-  };
+  return buildRecipeEditorState(seed, normalizeSelectableCwd, formatCommandLine);
 }
 
 function resolveHttpBase() {
@@ -418,32 +385,17 @@ async function parseErrorMessage(response, fallback) {
   }
 }
 
-function parseJsonOrDefault(input, fallback) {
-  const text = String(input || '').trim();
-  if (!text) {
-    return fallback;
-  }
-  return JSON.parse(text);
-}
-
-function parseRecipeEnv(input) {
-  const raw = String(input || '').trim();
-  if (!raw) {
-    return {};
-  }
-  const parsed = JSON.parse(raw);
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('环境变量必须是 JSON 对象');
-  }
-  return parsed;
-}
-
 function normalizeSelectableCwd(value) {
+  const fallbackCwd = resolveDefaultSelectableCwd();
   const text = String(value || '').trim();
   if (!text) {
-    return defaultCwdPath;
+    return fallbackCwd;
   }
-  return recipeFolderOptions.value.some((item) => item.path === text) ? text : defaultCwdPath;
+  return recipeFolderOptions.value.some((item) => item.path === text) ? text : fallbackCwd;
+}
+
+function resolveDefaultSelectableCwd() {
+  return String(filesStore.basePath || filesStore.currentPath || DEFAULT_CWD_PATH).trim() || DEFAULT_CWD_PATH;
 }
 
 async function loadRecipeFolders(nodeId = createNodeId.value) {
@@ -452,7 +404,7 @@ async function loadRecipeFolders(nodeId = createNodeId.value) {
   recipeFoldersError.value = '';
   try {
     const response = await fetch(buildNodeFileApiPath(targetNodeId, '/list', {
-      path: defaultCwdPath,
+      path: '',
       show_hidden: filesStore.showHidden ? '1' : '0'
     }));
     if (!response.ok) {
@@ -460,95 +412,33 @@ async function loadRecipeFolders(nodeId = createNodeId.value) {
     }
 
     const payload = await response.json();
+    const nodeBasePath = String(payload?.base || payload?.path || resolveDefaultSelectableCwd()).trim() || DEFAULT_CWD_PATH;
     const items = Array.isArray(payload?.items) ? payload.items : [];
-    recipeFolderOptions.value = items
-      .filter((item) => item?.kind === 'dir')
-      .map((item) => ({
-        path: String(item.path || '').trim(),
-        label: String(item.name || item.path || '').trim() || String(item.path || '').trim()
-      }))
-      .filter((item) => item.path);
-
-    if (!recipeFolderOptions.value.some((item) => item.path === defaultCwdPath)) {
-      recipeFolderOptions.value.unshift({
-        path: defaultCwdPath,
-        label: defaultCwdPath.split('/').filter(Boolean).pop() || defaultCwdPath
-      });
-    }
+    recipeFolderOptions.value = [
+      {
+        path: nodeBasePath,
+        label: nodeBasePath.split('/').filter(Boolean).pop() || nodeBasePath
+      },
+      ...items
+        .filter((item) => item?.kind === 'dir')
+        .map((item) => ({
+          path: String(item.path || '').trim(),
+          label: String(item.name || item.path || '').trim() || String(item.path || '').trim()
+        }))
+        .filter((item) => item.path)
+    ].filter((item, index, array) => array.findIndex((candidate) => candidate.path === item.path) === index);
     recipeEditor.value.cwd = normalizeSelectableCwd(recipeEditor.value.cwd);
   } catch (error) {
     recipeFoldersError.value = String(error?.message || error || 'load recipe folders failed');
+    const fallbackCwd = resolveDefaultSelectableCwd();
     recipeFolderOptions.value = [{
-      path: defaultCwdPath,
-      label: defaultCwdPath.split('/').filter(Boolean).pop() || defaultCwdPath
+      path: fallbackCwd,
+      label: fallbackCwd.split('/').filter(Boolean).pop() || fallbackCwd
     }];
-    recipeEditor.value.cwd = defaultCwdPath;
+    recipeEditor.value.cwd = fallbackCwd;
   } finally {
     recipeFoldersLoading.value = false;
   }
-}
-
-function compressPath(path) {
-  const raw = String(path || '').trim();
-  if (!raw) {
-    return '/';
-  }
-
-  const normalized = raw.replace(/\/+/g, '/');
-  const segments = normalized.split('/').filter(Boolean);
-  if (segments.length <= 3) {
-    return normalized;
-  }
-
-  return `.../${segments.slice(-3).join('/')}`;
-}
-
-function normalizeShortcutGroup(value) {
-  const text = String(value || '').trim();
-  return text || 'custom';
-}
-
-function compareShortcutGroup(a, b) {
-  const left = normalizeShortcutGroup(a);
-  const right = normalizeShortcutGroup(b);
-  const leftIndex = shortcutGroupOrder.indexOf(left);
-  const rightIndex = shortcutGroupOrder.indexOf(right);
-  if (leftIndex >= 0 || rightIndex >= 0) {
-    if (leftIndex < 0) {
-      return 1;
-    }
-    if (rightIndex < 0) {
-      return -1;
-    }
-    if (leftIndex !== rightIndex) {
-      return leftIndex - rightIndex;
-    }
-  }
-  return left.localeCompare(right, 'zh-Hans-CN');
-}
-
-function toShortcutPayload(item) {
-  const id = String(item?.id || '').trim();
-  const label = String(item?.label || '').trim();
-  const group = normalizeShortcutGroup(item?.group);
-  const sequence = Array.isArray(item?.sequence)
-    ? item.sequence.map((x) => String(x ?? '')).filter((x) => x.length > 0)
-    : [];
-  const value = String(item?.value || '').trim();
-  const intervalMs = Number(item?.intervalMs);
-
-  if (!id || !label) {
-    return null;
-  }
-
-  return {
-    id,
-    label,
-    group,
-    sequence,
-    value,
-    intervalMs: Number.isFinite(intervalMs) ? Math.max(0, Math.floor(intervalMs)) : quickCommandIntervalMs
-  };
 }
 
 function getActiveNodeId() {
@@ -557,7 +447,7 @@ function getActiveNodeId() {
 
 function hydrateCustomShortcuts() {
   try {
-    const raw = localStorage.getItem(customShortcutStorageKey);
+    const raw = localStorage.getItem(CUSTOM_SHORTCUT_STORAGE_KEY);
     if (!raw) {
       customShortcutItems.value = [];
       return;
@@ -577,14 +467,14 @@ function persistCustomShortcuts() {
     .map((item) => toShortcutPayload(item))
     .filter(Boolean);
   try {
-    localStorage.setItem(customShortcutStorageKey, JSON.stringify({ items: payload }));
+    localStorage.setItem(CUSTOM_SHORTCUT_STORAGE_KEY, JSON.stringify({ items: payload }));
   } catch {
   }
 }
 
 function hydrateDefaultCreateRecipe() {
   try {
-    const value = localStorage.getItem(defaultRecipeStorageKey);
+    const value = localStorage.getItem(DEFAULT_RECIPE_STORAGE_KEY);
     defaultCreateRecipeId.value = String(value || '').trim();
   } catch {
     defaultCreateRecipeId.value = '';
@@ -595,10 +485,10 @@ function persistDefaultCreateRecipe() {
   const id = String(defaultCreateRecipeId.value || '').trim();
   try {
     if (!id) {
-      localStorage.removeItem(defaultRecipeStorageKey);
+      localStorage.removeItem(DEFAULT_RECIPE_STORAGE_KEY);
       return;
     }
-    localStorage.setItem(defaultRecipeStorageKey, id);
+    localStorage.setItem(DEFAULT_RECIPE_STORAGE_KEY, id);
   } catch {
   }
 }
@@ -640,7 +530,7 @@ function addShortcutCommand() {
     label,
     group,
     sequence: pressEnter ? [commandText, '\r'] : [commandText],
-    intervalMs: quickCommandIntervalMs
+    intervalMs: QUICK_COMMAND_INTERVAL_MS
   });
   persistCustomShortcuts();
 
@@ -813,15 +703,26 @@ function switchRightTab(tabId) {
   terminalStore.setUiSession({ activeRightTab: target });
 }
 
-function formatNodeOption(node) {
-  if (!node) {
-    return '未知节点';
-  }
-  const name = String(node.node_name || node.node_id || 'node').trim();
-  const role = String(node.node_role || '').trim();
-  const status = node.node_online === false ? 'offline' : 'online';
-  return role ? `${name} · ${role} · ${status}` : `${name} · ${status}`;
-}
+const {
+  fileTabs,
+  activeFileTab,
+  openFileEntry,
+  closeFileTab,
+  updateActiveFileContent,
+  saveActiveFileTab,
+  reloadFileTab,
+  loadMoreFileTab,
+  previewFileTabTail,
+  loadFileTabFromStart
+} = useDesktopTerminalFileTabs({
+  buildNodeFileApiPath,
+  parseErrorMessage,
+  filesStore,
+  getActiveNodeId,
+  switchCenterTab,
+  activeCenterTab,
+  setStatus: (message) => terminalStore.setStatus(message)
+});
 
 async function onTargetNodeChange(nodeId) {
   createNodeId.value = String(nodeId || '').trim();
@@ -839,23 +740,6 @@ function formatInstanceDisplayName(instance) {
     return instanceAlias;
   }
   return formatInstanceSummary(instance);
-}
-
-function formatInstanceSummary(instance) {
-  const instanceCwd = String(instance?.cwd || '').trim() || '~';
-  const instanceCommand = String(instance?.command || '').trim() || 'bash';
-  return `${instanceCommand} · ${compressPath(instanceCwd)}`;
-}
-
-function formatInstanceTooltip(instance) {
-  const instanceAlias = terminalStore.getInstanceAlias(instance?.id);
-  const instanceCwd = String(instance?.cwd || '').trim() || '~';
-  const instanceCommand = String(instance?.command || '').trim() || 'bash';
-  const summary = `${instanceCommand}\n${instanceCwd}`;
-  if (!instanceAlias) {
-    return summary;
-  }
-  return `${instanceAlias}\n${summary}\n${String(instance?.id || '').trim()}`;
 }
 
 function setRenameInstanceInputRef(element) {
@@ -888,58 +772,14 @@ function saveRenameInstance(instanceId) {
   cancelRenameInstance();
 }
 
-function formatRecipeSummary(item) {
-  const recipeCwd = String(item?.cwd || '').trim() || '~';
-  const recipeCommand = String(item?.command || '').trim() || 'bash';
-  const recipeArgs = Array.isArray(item?.args) && item.args.length > 0 ? ` ${item.args.join(' ')}` : '';
-  return `${recipeCwd} | ${recipeCommand}${recipeArgs}`;
-}
-
-function formatSize(size) {
-  const value = Number(size || 0);
-  if (!Number.isFinite(value) || value <= 0) {
-    return '0 B';
-  }
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KB`;
-  }
-  if (value < 1024 * 1024 * 1024) {
-    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-  }
-  return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-}
-
-function formatFileModifiedTime(value) {
-  if (!value) {
-    return '未知';
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return String(value);
-  }
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit'
-  }).format(date);
-}
-
-function formatFileEntryTooltip(item) {
-  const name = String(item?.name || item?.path || '').trim() || '未命名';
-  const modified = formatFileModifiedTime(item?.mtime);
-  return `${name}\n最后修改：${modified}`;
-}
-
 async function loadFilesForSelected() {
   const nodeId = getActiveNodeId();
-  const path = terminalStore.selectedInstance?.cwd || filesStore.currentPath || filesStore.basePath;
+  const path = terminalStore.selectedInstance?.cwd || filesStore.currentPath || filesStore.basePath || '';
   await filesStore.loadList(path, nodeId);
+}
+
+async function loadNodeFilesRoot(nodeId = getActiveNodeId()) {
+  await filesStore.loadList('', nodeId);
 }
 
 async function connect(instanceId) {
@@ -985,7 +825,7 @@ async function refreshTerminals() {
     if (terminalStore.instances.length === 0) {
       terminalStore.disconnect();
       terminalStore.selectedInstanceId = '';
-      await filesStore.loadList(defaultCwdPath, getActiveNodeId());
+      await loadNodeFilesRoot(getActiveNodeId());
       return;
     }
 
@@ -1005,7 +845,7 @@ async function syncNodeTerminalSelection() {
     terminalStore.disconnect();
     terminalStore.selectedInstanceId = '';
     term?.reset?.();
-    await filesStore.loadList(defaultCwdPath, targetId);
+    await loadNodeFilesRoot(targetId);
     terminalStore.setStatus(targetId ? '当前节点暂无终端会话' : '暂无终端会话');
     return;
   }
@@ -1033,7 +873,7 @@ async function createInstance() {
     const commandText = selectedRecipe
       ? (String(selectedRecipe.command || '').trim() || 'bash')
       : (String(command.value || 'bash').trim() || 'bash');
-    const fallbackCwd = terminalStore.selectedInstance?.cwd || filesStore.currentPath || filesStore.basePath || defaultCwdPath;
+    const fallbackCwd = terminalStore.selectedInstance?.cwd || filesStore.currentPath || filesStore.basePath || resolveDefaultSelectableCwd();
     const resolvedCwd = selectedRecipe
       ? normalizeSelectableCwd(selectedRecipe.cwd || fallbackCwd)
       : normalizeSelectableCwd(cwd.value || fallbackCwd);
@@ -1081,7 +921,7 @@ async function closeTerminal(instanceId) {
       await syncNodeTerminalSelection();
     } else {
       terminalStore.selectedInstanceId = '';
-      await filesStore.loadList(defaultCwdPath, getActiveNodeId());
+      await loadNodeFilesRoot(getActiveNodeId());
       terminalStore.setStatus(`Terminated ${id}`);
     }
   } catch (error) {
@@ -1155,299 +995,6 @@ async function downloadFileEntry(item) {
   }
 }
 
-async function openFileDocument(path, nodeId = getActiveNodeId(), options = {}) {
-  const response = await fetch(buildNodeFileApiPath(nodeId, '/read', {
-    path: String(path || ''),
-    mode: String(options.mode || 'edit'),
-    max_lines: Number(options.maxLines) || fileChunkMaxLines,
-    chunk_bytes: Number(options.chunkBytes) || fileChunkBytes,
-    line_offset: Math.max(0, Number(options.lineOffset) || 0),
-    direction: options.direction ? String(options.direction) : undefined
-  }));
-  if (!response.ok) {
-    throw new Error(await parseErrorMessage(response, `read failed: ${response.status}`));
-  }
-  return response.json();
-}
-
-function buildEmptyFileTab(tabId, normalizedNodeId, normalizedPath, displayName) {
-  return {
-    id: tabId,
-    nodeId: normalizedNodeId,
-    path: normalizedPath,
-    name: displayName || normalizedPath.split('/').pop() || normalizedPath,
-    editorKind: resolveEditorKind(normalizedPath),
-    loading: true,
-    error: '',
-    content: '',
-    lastSavedContent: '',
-    dirty: false,
-    truncated: false,
-    truncateReason: '',
-    readOnly: false,
-    largeFile: false,
-    hasMoreBefore: false,
-    hasMoreAfter: false,
-    cursorStart: 0,
-    cursorEnd: 0,
-    loadedBytes: 0,
-    loadedLines: 0,
-    mode: 'edit'
-  };
-}
-
-function mapFileReadPayload(payload, existingContent = '') {
-  const nextContent = String(payload?.content || '');
-  const readOnly = payload?.read_only === true;
-  const mode = String(payload?.mode || 'edit');
-  const appendContent = readOnly && mode === 'progressive' && Number(payload?.cursor_start || 0) > 0 && existingContent;
-  return {
-    content: appendContent ? `${existingContent}\n${nextContent}` : nextContent,
-    lastSavedContent: appendContent ? `${existingContent}\n${nextContent}` : nextContent,
-    dirty: false,
-    error: '',
-    truncated: payload?.truncated === true,
-    truncateReason: String(payload?.truncate_reason || ''),
-    readOnly,
-    largeFile: payload?.large_file === true,
-    hasMoreBefore: payload?.has_more_before === true,
-    hasMoreAfter: payload?.has_more_after === true,
-    cursorStart: Math.max(0, Number(payload?.cursor_start) || 0),
-    cursorEnd: Math.max(0, Number(payload?.cursor_end) || 0),
-    loadedBytes: Math.max(0, Number(payload?.loaded_bytes) || 0),
-    loadedLines: Math.max(0, Number(payload?.loaded_lines || payload?.lines_shown) || 0),
-    mode
-  };
-}
-
-function findFileTabIndex(tabId) {
-  return fileTabs.value.findIndex((item) => item.id === tabId);
-}
-
-function patchFileTab(tabId, patch) {
-  const index = findFileTabIndex(tabId);
-  if (index < 0) {
-    return null;
-  }
-  const current = fileTabs.value[index];
-  const next = {
-    ...current,
-    ...patch
-  };
-  fileTabs.value.splice(index, 1, next);
-  return next;
-}
-
-async function openFileTab(path, displayName = '', nodeId = getActiveNodeId()) {
-  const normalizedPath = String(path || '').trim();
-  const normalizedNodeId = String(nodeId || '').trim();
-  if (!normalizedPath) {
-    return;
-  }
-
-  const tabId = `file:${normalizedNodeId}:${normalizedPath}`;
-  const existing = fileTabs.value.find((x) => x.id === tabId);
-  if (existing) {
-    switchCenterTab(tabId);
-    return;
-  }
-
-  const tab = buildEmptyFileTab(tabId, normalizedNodeId, normalizedPath, displayName);
-  fileTabs.value = [...fileTabs.value, tab];
-  switchCenterTab(tabId);
-
-  try {
-    const payload = await openFileDocument(normalizedPath, normalizedNodeId);
-    patchFileTab(tabId, mapFileReadPayload(payload));
-  } catch (error) {
-    patchFileTab(tabId, {
-      error: String(error?.message || error || 'open file failed')
-    });
-  } finally {
-    patchFileTab(tabId, {
-      loading: false
-    });
-  }
-}
-
-async function openFileEntry(item) {
-  if (!item?.path) {
-    return;
-  }
-
-  if (item.kind === 'dir') {
-    await filesStore.loadList(item.path, getActiveNodeId());
-    return;
-  }
-
-  await openFileTab(item.path, item.name, getActiveNodeId());
-}
-
-function closeFileTab(tabId) {
-  const id = String(tabId || '').trim();
-  if (!id) {
-    return;
-  }
-  const current = fileTabs.value.find((item) => item.id === id);
-  if (current?.dirty && !window.confirm('当前文件有未保存修改，确认关闭并丢弃修改？')) {
-    return;
-  }
-  const next = fileTabs.value.filter((x) => x.id !== id);
-  fileTabs.value = next;
-  if (activeCenterTab.value === id) {
-    switchCenterTab('terminal');
-  }
-}
-
-function updateActiveFileContent(value) {
-  const tab = activeFileTab.value;
-  if (!tab || tab.readOnly) {
-    return;
-  }
-  patchFileTab(tab.id, {
-    content: String(value ?? ''),
-    dirty: String(value ?? '') !== tab.lastSavedContent
-  });
-}
-
-async function saveActiveFileTab() {
-  const tab = activeFileTab.value;
-  if (!tab || tab.loading) {
-    return;
-  }
-  if (tab.readOnly) {
-    terminalStore.setStatus('大文件只读预览模式不支持保存');
-    return;
-  }
-
-  patchFileTab(tab.id, { error: '' });
-  try {
-    await filesStore.saveFile(tab.path, tab.content, tab.nodeId);
-    patchFileTab(tab.id, {
-      lastSavedContent: tab.content,
-      dirty: false
-    });
-    terminalStore.setStatus(`Saved: ${tab.path}`);
-  } catch (error) {
-    patchFileTab(tab.id, {
-      error: String(error?.message || error || 'save failed')
-    });
-  }
-}
-
-function resolveEditorKind(path) {
-  const lower = String(path || '').trim().toLowerCase();
-  return lower.endsWith('.md') || lower.endsWith('.markdown') ? 'markdown-ir' : 'code';
-}
-
-async function reloadFileTab(tab) {
-  if (!tab || tab.loading) {
-    return;
-  }
-  if (tab.readOnly) {
-    patchFileTab(tab.id, {
-      loading: true,
-      error: ''
-    });
-    try {
-      const payload = await openFileDocument(tab.path, tab.nodeId);
-      patchFileTab(tab.id, mapFileReadPayload(payload));
-    } catch (error) {
-      patchFileTab(tab.id, {
-        error: String(error?.message || error || 'reload failed')
-      });
-    } finally {
-      patchFileTab(tab.id, {
-        loading: false
-      });
-    }
-    return;
-  }
-  if (tab.dirty && !window.confirm('当前文件有未保存修改，确认重载并丢弃修改？')) {
-    return;
-  }
-
-  patchFileTab(tab.id, {
-    loading: true,
-    error: ''
-  });
-  try {
-    const payload = await openFileDocument(tab.path, tab.nodeId);
-    patchFileTab(tab.id, mapFileReadPayload(payload));
-  } catch (error) {
-    patchFileTab(tab.id, {
-      error: String(error?.message || error || 'reload failed')
-    });
-  } finally {
-    patchFileTab(tab.id, {
-      loading: false
-    });
-  }
-}
-
-async function loadMoreFileTab(tab) {
-  if (!tab || tab.loading || tab.hasMoreAfter !== true) {
-    return;
-  }
-
-  patchFileTab(tab.id, { loading: true, error: '' });
-  try {
-    const payload = await openFileDocument(tab.path, tab.nodeId, {
-      mode: 'progressive',
-      lineOffset: tab.cursorEnd,
-      direction: 'forward'
-    });
-    patchFileTab(tab.id, mapFileReadPayload(payload, tab.content));
-  } catch (error) {
-    patchFileTab(tab.id, {
-      error: String(error?.message || error || 'load more failed')
-    });
-  } finally {
-    patchFileTab(tab.id, { loading: false });
-  }
-}
-
-async function previewFileTabTail(tab) {
-  if (!tab || tab.loading) {
-    return;
-  }
-
-  patchFileTab(tab.id, { loading: true, error: '' });
-  try {
-    const payload = await openFileDocument(tab.path, tab.nodeId, {
-      mode: 'progressive',
-      direction: 'tail'
-    });
-    patchFileTab(tab.id, mapFileReadPayload(payload));
-  } catch (error) {
-    patchFileTab(tab.id, {
-      error: String(error?.message || error || 'tail preview failed')
-    });
-  } finally {
-    patchFileTab(tab.id, { loading: false });
-  }
-}
-
-async function loadFileTabFromStart(tab) {
-  if (!tab || tab.loading) {
-    return;
-  }
-
-  patchFileTab(tab.id, { loading: true, error: '' });
-  try {
-    const payload = await openFileDocument(tab.path, tab.nodeId, {
-      mode: 'edit'
-    });
-    patchFileTab(tab.id, mapFileReadPayload(payload));
-  } catch (error) {
-    patchFileTab(tab.id, {
-      error: String(error?.message || error || 'load from start failed')
-    });
-  } finally {
-    patchFileTab(tab.id, { loading: false });
-  }
-}
-
 function pickUploadFiles() {
   uploadFilesInputRef.value?.click();
 }
@@ -1468,7 +1015,7 @@ async function runRecipe(item) {
     const args = Array.isArray(item?.args) ? item.args.map((x) => String(x)) : [];
     const env = item?.env && typeof item.env === 'object' && !Array.isArray(item.env) ? item.env : {};
     const recipeCommand = String(item?.command || '').trim() || 'bash';
-    const fallbackCwd = terminalStore.selectedInstance?.cwd || filesStore.currentPath || filesStore.basePath || defaultCwdPath;
+    const fallbackCwd = terminalStore.selectedInstance?.cwd || filesStore.currentPath || filesStore.basePath || resolveDefaultSelectableCwd();
     const recipeCwd = normalizeSelectableCwd(item?.cwd || fallbackCwd);
     const nodeId = getActiveNodeId();
 
@@ -1497,7 +1044,7 @@ function addNewRecipe() {
   editingRecipeId.value = '';
   const parsedArgs = parseJsonOrDefault(argsInput.value, ['-i']);
   recipeEditor.value = buildRecipeEditor({
-    cwd: normalizeSelectableCwd(cwd.value || defaultCwdPath),
+    cwd: normalizeSelectableCwd(cwd.value || resolveDefaultSelectableCwd()),
     command: command.value,
     args: Array.isArray(parsedArgs) ? parsedArgs.map((item) => String(item)) : ['-i'],
     env: parseJsonOrDefault(envInput.value, {}),
@@ -1575,7 +1122,7 @@ function saveCurrentAsRecipe() {
     showRecipeEditor.value = true;
     recipeEditor.value = buildRecipeEditor({
       name: '',
-      cwd: normalizeSelectableCwd(cwd.value || terminalStore.selectedInstance?.cwd || filesStore.currentPath || filesStore.basePath || defaultCwdPath),
+      cwd: normalizeSelectableCwd(cwd.value || terminalStore.selectedInstance?.cwd || filesStore.currentPath || filesStore.basePath || resolveDefaultSelectableCwd()),
       command: String(command.value || 'bash').trim() || 'bash',
       args: Array.isArray(args) ? args.map((item) => String(item)) : ['-i'],
       env,
@@ -1693,7 +1240,7 @@ async function sendShortcut(item) {
   const configuredInterval = Number(item?.intervalMs);
   const intervalMs = Number.isFinite(configuredInterval)
     ? Math.max(0, Math.floor(configuredInterval))
-    : (payloads.length > 1 ? comboKeyIntervalMs : 0);
+    : (payloads.length > 1 ? COMBO_KEY_INTERVAL_MS : 0);
 
   try {
     for (let index = 0; index < payloads.length; index += 1) {
@@ -1934,7 +1481,7 @@ button.primary:hover {
   align-items: center;
   gap: 6px;
   min-width: 0;
-  max-width: 320px;
+  max-width: 420px;
 }
 
 .tab-btn.active {
@@ -1944,6 +1491,8 @@ button.primary:hover {
 }
 
 .file-tab .tab-text {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1952,6 +1501,7 @@ button.primary:hover {
 .file-tab .close-icon {
   font-size: 0.7rem;
   opacity: 0.7;
+  flex: 0 0 auto;
 }
 
 .file-tab .close-icon:hover {

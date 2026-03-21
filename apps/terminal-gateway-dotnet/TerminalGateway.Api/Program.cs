@@ -19,7 +19,8 @@ builder.Services.AddSingleton<InstanceManager>(sp => new InstanceManager(
     options.NodeId,
     options.NodeName,
     options.GatewayRole,
-    options.PathPrefixes));
+    options.PathPrefixes,
+    options.GitBashPath));
 builder.Services.AddSingleton<TerminalConnectionRegistry>();
 builder.Services.AddSingleton<TerminalConnectionRegistryV2>();
 builder.Services.AddSignalR();

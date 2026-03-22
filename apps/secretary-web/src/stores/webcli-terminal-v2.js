@@ -545,12 +545,34 @@ export const useWebCliTerminalStoreV2 = defineStore('webcliTerminalV2', {
       return this.nodes;
     },
 
-    getDefaultNodeId() {
-      const master = this.nodes.find((item) => String(item?.node_role || '').toLowerCase() === 'master');
-      if (master?.node_id) {
-        return String(master.node_id);
+    resolvePreferredNodeId(candidate = '') {
+      const normalizedCandidate = String(candidate || '').trim();
+      if (normalizedCandidate && this.nodes.some((item) => String(item?.node_id || '').trim() === normalizedCandidate)) {
+        return normalizedCandidate;
       }
+
+      const onlineCurrent = this.nodes.find((item) => item?.is_current === true && item?.node_online !== false);
+      if (onlineCurrent?.node_id) {
+        return String(onlineCurrent.node_id);
+      }
+
+      const onlineMaster = this.nodes.find((item) =>
+        String(item?.node_role || '').toLowerCase() === 'master' && item?.node_online !== false
+      );
+      if (onlineMaster?.node_id) {
+        return String(onlineMaster.node_id);
+      }
+
+      const currentNode = this.nodes.find((item) => item?.is_current === true);
+      if (currentNode?.node_id) {
+        return String(currentNode.node_id);
+      }
+
       return String(this.nodes[0]?.node_id || '');
+    },
+
+    getDefaultNodeId(candidate = '') {
+      return this.resolvePreferredNodeId(candidate);
     },
 
     async joinInstance(instanceId) {

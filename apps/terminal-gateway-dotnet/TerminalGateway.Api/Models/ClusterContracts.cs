@@ -62,6 +62,13 @@ public sealed class ClusterTerminalEventEnvelope
     public JsonElement Payload { get; set; }
 }
 
+public sealed class ClusterInstanceSubscriptionRequest
+{
+    public string? Token { get; set; }
+    public string? SourceNodeId { get; set; }
+    public string? InstanceId { get; set; }
+}
+
 public sealed class NodeInstanceInputRequest
 {
     public string? Data { get; set; }
@@ -79,6 +86,7 @@ public sealed class NodeSummary
     public required string NodeName { get; init; }
     public required string NodeRole { get; init; }
     public string? NodeLabel { get; init; }
+    public bool IsCurrent { get; init; }
     public required bool NodeOnline { get; init; }
     public required int InstanceCount { get; init; }
     public required string LastSeenAt { get; init; }

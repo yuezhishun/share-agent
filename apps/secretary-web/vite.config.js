@@ -1,7 +1,18 @@
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 
+function normalizeBase(input) {
+  const raw = String(input || '/').trim();
+  if (!raw || raw === '/') {
+    return '/';
+  }
+
+  const withLeadingSlash = raw.startsWith('/') ? raw : `/${raw}`;
+  return withLeadingSlash.endsWith('/') ? withLeadingSlash : `${withLeadingSlash}/`;
+}
+
 export default defineConfig({
+  base: normalizeBase(process.env.VITE_APP_BASE_PATH),
   plugins: [vue()],
   build: {
     rollupOptions: {

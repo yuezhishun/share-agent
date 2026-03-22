@@ -15,6 +15,7 @@ public sealed class ClusterHub : Hub
     private readonly ClusterEventDeduplicator _events;
     private readonly RemoteInstanceRegistry _remoteInstances;
     private readonly IHubContext<TerminalHubV2> _terminalHubV2;
+    private readonly ClusterTerminalSubscriptionService _subscriptions;
 
     public ClusterHub(
         GatewayOptions options,
@@ -23,7 +24,8 @@ public sealed class ClusterHub : Hub
         ClusterCommandExecutor executor,
         ClusterEventDeduplicator events,
         RemoteInstanceRegistry remoteInstances,
-        IHubContext<TerminalHubV2> terminalHubV2)
+        IHubContext<TerminalHubV2> terminalHubV2,
+        ClusterTerminalSubscriptionService subscriptions)
     {
         _options = options;
         _nodeRegistry = nodeRegistry;
@@ -32,6 +34,7 @@ public sealed class ClusterHub : Hub
         _events = events;
         _remoteInstances = remoteInstances;
         _terminalHubV2 = terminalHubV2;
+        _subscriptions = subscriptions;
     }
 
     public Task RegisterNode(ClusterRegisterNodeRequest request)
@@ -52,6 +55,10 @@ public sealed class ClusterHub : Hub
 
     public override Task OnDisconnectedAsync(Exception? exception)
     {
+        if (_nodeRegistry.TryGetNodeByConnectionId(Context.ConnectionId, out var node))
+        {
+            _subscriptions.RemoveNodeSubscriptions(node.NodeId);
+        }
         _nodeRegistry.MarkDisconnected(Context.ConnectionId);
         return base.OnDisconnectedAsync(exception);
     }
@@ -80,11 +87,7 @@ public sealed class ClusterHub : Hub
             throw new HubException("source node mismatch");
         }
 
-        var targetNodeId = (request.TargetNodeId ?? string.Empty).Trim();
-        if (!string.Equals(targetNodeId, _options.NodeId, StringComparison.Ordinal))
-        {
-            throw new HubException("reverse command target must be the current master node");
-        }
+        var targetNodeId = NormalizeTargetNodeId(request.TargetNodeId);
 
         var command = new ClusterCommandEnvelope
         {
@@ -96,7 +99,9 @@ public sealed class ClusterHub : Hub
             Payload = request.Payload
         };
 
-        var result = await _executor.ExecuteAsync(command, Context.ConnectionAborted);
+        var result = string.Equals(targetNodeId, _options.NodeId, StringComparison.Ordinal)
+            ? await _executor.ExecuteAsync(command, Context.ConnectionAborted)
+            : await _broker.SendAsync(sourceNodeId, targetNodeId, command.Type, command.Payload, Context.ConnectionAborted);
         TrackInstanceOwnership(command, result);
         return result;
     }
@@ -128,6 +133,7 @@ public sealed class ClusterHub : Hub
 
         await _terminalHubV2.Clients.Group(TerminalHubV2.BuildInstanceGroup(instanceId))
             .SendAsync("TerminalEvent", ConvertPayloadForV2(envelope.Payload));
+        await _subscriptions.ForwardClusterEventAsync(instanceId, nodeId, envelope.Payload);
 
         if (string.Equals(envelope.Type, "term.exit", StringComparison.Ordinal))
         {
@@ -148,6 +154,28 @@ public sealed class ClusterHub : Hub
                     ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
                 });
         }
+    }
+
+    public Task SubscribeInstanceEvents(ClusterInstanceSubscriptionRequest request)
+    {
+        EnsureMasterMode();
+        EnsureToken(request.Token);
+
+        var sourceNodeId = RequireBoundSourceNode(request.SourceNodeId);
+        var instanceId = NormalizeRequiredValue(request.InstanceId, "instance_id");
+        _subscriptions.Subscribe(sourceNodeId, instanceId);
+        return Task.CompletedTask;
+    }
+
+    public Task UnsubscribeInstanceEvents(ClusterInstanceSubscriptionRequest request)
+    {
+        EnsureMasterMode();
+        EnsureToken(request.Token);
+
+        var sourceNodeId = RequireBoundSourceNode(request.SourceNodeId);
+        var instanceId = NormalizeRequiredValue(request.InstanceId, "instance_id");
+        _subscriptions.Unsubscribe(sourceNodeId, instanceId);
+        return Task.CompletedTask;
     }
 
     private void EnsureMasterMode()
@@ -174,11 +202,6 @@ public sealed class ClusterHub : Hub
     private void TrackInstanceOwnership(ClusterCommandEnvelope command, ClusterCommandResult result)
     {
         var targetNodeId = (command.TargetNodeId ?? command.NodeId ?? string.Empty).Trim();
-        if (!string.Equals(targetNodeId, _options.NodeId, StringComparison.Ordinal))
-        {
-            return;
-        }
-
         if (string.Equals(command.Type, "instance.create", StringComparison.Ordinal)
             && result.Ok
             && result.Payload.ValueKind == JsonValueKind.Object
@@ -189,10 +212,10 @@ public sealed class ClusterHub : Hub
             {
                 if (result.Payload.TryGetProperty("summary", out var summaryElement))
                 {
-                    _remoteInstances.Upsert(ReadInstanceSummary(summaryElement, instanceId, _options.NodeId));
+                    _remoteInstances.Upsert(ReadInstanceSummary(summaryElement, instanceId, targetNodeId.Length == 0 ? _options.NodeId : targetNodeId));
                     return;
                 }
-                _remoteInstances.Upsert(instanceId, _options.NodeId);
+                _remoteInstances.Upsert(instanceId, targetNodeId.Length == 0 ? _options.NodeId : targetNodeId);
             }
             return;
         }
@@ -208,6 +231,35 @@ public sealed class ClusterHub : Hub
                 _remoteInstances.Remove(instanceId);
             }
         }
+    }
+
+    private string NormalizeTargetNodeId(string? targetNodeId)
+    {
+        var normalized = (targetNodeId ?? string.Empty).Trim();
+        return normalized.Length == 0 ? _options.NodeId : normalized;
+    }
+
+    private string RequireBoundSourceNode(string? sourceNodeId)
+    {
+        var normalized = NormalizeRequiredValue(sourceNodeId, "source_node_id");
+        if (!_nodeRegistry.TryGetNodeByConnectionId(Context.ConnectionId, out var boundNode)
+            || !string.Equals(boundNode.NodeId, normalized, StringComparison.Ordinal))
+        {
+            throw new HubException("source node mismatch");
+        }
+
+        return normalized;
+    }
+
+    private static string NormalizeRequiredValue(string? value, string name)
+    {
+        var normalized = (value ?? string.Empty).Trim();
+        if (normalized.Length == 0)
+        {
+            throw new HubException($"{name} is required");
+        }
+
+        return normalized;
     }
 
     private static object ConvertPayloadForV2(JsonElement payload)

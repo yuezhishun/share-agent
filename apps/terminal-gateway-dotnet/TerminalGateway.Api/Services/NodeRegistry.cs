@@ -89,6 +89,7 @@ public sealed class NodeRegistry
                 NodeName = _options.NodeName,
                 NodeRole = _options.GatewayRole,
                 NodeLabel = _options.NodeLabel,
+                IsCurrent = true,
                 NodeOnline = true,
                 InstanceCount = localInstanceCount,
                 LastSeenAt = now.ToString("O")
@@ -104,6 +105,7 @@ public sealed class NodeRegistry
                 NodeName = state.NodeName,
                 NodeRole = state.NodeRole,
                 NodeLabel = state.NodeLabel,
+                IsCurrent = false,
                 NodeOnline = online,
                 InstanceCount = state.InstanceCount,
                 LastSeenAt = state.LastSeenAt.ToString("O")
@@ -152,6 +154,7 @@ public sealed class NodeRegistry
                 NodeName = state.NodeName,
                 NodeRole = state.NodeRole,
                 NodeLabel = state.NodeLabel,
+                IsCurrent = false,
                 NodeOnline = online,
                 InstanceCount = state.InstanceCount,
                 LastSeenAt = state.LastSeenAt.ToString("O")

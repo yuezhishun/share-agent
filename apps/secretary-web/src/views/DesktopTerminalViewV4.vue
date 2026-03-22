@@ -22,6 +22,7 @@
         :get-instance-alias="getInstanceAlias"
         :set-rename-instance-input-ref="setRenameInstanceInputRef"
         @target-node-change="onTargetNodeChange"
+        @refresh-nodes="refreshTerminals"
         @toggle-terminal-size-editor="toggleTerminalSizeEditor"
         @update:terminal-size-draft-cols="terminalSizeDraftCols = $event"
         @update:terminal-size-draft-rows="terminalSizeDraftRows = $event"
@@ -442,7 +443,7 @@ async function loadRecipeFolders(nodeId = createNodeId.value) {
 }
 
 function getActiveNodeId() {
-  return String(createNodeId.value || terminalStore.selectedInstance?.node_id || terminalStore.getDefaultNodeId() || '').trim();
+  return String(createNodeId.value || terminalStore.selectedInstance?.node_id || terminalStore.getDefaultNodeId(createNodeId.value) || '').trim();
 }
 
 function hydrateCustomShortcuts() {
@@ -656,9 +657,9 @@ async function fitTerminal() {
     return null;
   }
 
-  fitAddon?.fit();
-  const currentCols = Math.max(1, Number(term?.cols) || 0);
-  const currentRows = Math.max(1, Number(term?.rows) || 0);
+  const proposed = fitAddon?.proposeDimensions?.();
+  const currentCols = Math.max(1, Number(proposed?.cols) || 0);
+  const currentRows = Math.max(1, Number(proposed?.rows) || 0);
   if (currentCols > 0 && currentRows > 0) {
     updateStoredTerminalGeometry(currentCols, currentRows);
     return { cols: currentCols, rows: currentRows };
@@ -825,13 +826,13 @@ async function connect(instanceId) {
 async function refreshTerminals() {
   try {
     await Promise.all([
-      terminalStore.fetchInstances(),
-      terminalStore.fetchNodes()
+      terminalStore.fetchNodes(),
+      terminalStore.fetchInstances()
     ]);
 
-    if (!createNodeId.value || !terminalStore.nodes.some((item) => String(item?.node_id || '').trim() === String(createNodeId.value || '').trim())) {
-      createNodeId.value = String(terminalStore.selectedInstance?.node_id || terminalStore.getDefaultNodeId() || '');
-    }
+    createNodeId.value = String(
+      terminalStore.resolvePreferredNodeId(createNodeId.value || terminalStore.selectedInstance?.node_id || '')
+    );
     await loadRecipeFolders(createNodeId.value);
 
     if (terminalStore.instances.length === 0) {
@@ -869,6 +870,11 @@ async function syncNodeTerminalSelection() {
 
 async function createInstance() {
   try {
+    if (selectedNode.value?.node_online === false) {
+      terminalStore.setStatus(`节点 ${selectedNode.value.node_name || selectedNode.value.node_id} 当前离线，无法新建终端`);
+      return;
+    }
+
     const geometry = await resolveCreateGeometry();
     const selectedRecipe = defaultCreateRecipe.value;
     const parsedArgs = selectedRecipe
@@ -1315,7 +1321,7 @@ onMounted(async () => {
     refreshTerminals()
   ]);
   if (!createNodeId.value) {
-    createNodeId.value = String(terminalStore.selectedInstance?.node_id || terminalStore.getDefaultNodeId() || '');
+    createNodeId.value = String(terminalStore.resolvePreferredNodeId(terminalStore.selectedInstance?.node_id || ''));
   }
   await loadRecipeFolders(createNodeId.value);
   focusTerminal();

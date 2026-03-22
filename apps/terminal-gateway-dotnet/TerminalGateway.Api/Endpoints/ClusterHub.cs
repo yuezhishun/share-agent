@@ -178,6 +178,35 @@ public sealed class ClusterHub : Hub
         return Task.CompletedTask;
     }
 
+    public Task SyncNodeInstances(ClusterNodeInstancesSyncRequest request)
+    {
+        EnsureMasterMode();
+        EnsureToken(request.Token);
+
+        var sourceNodeId = RequireBoundSourceNode(request.SourceNodeId);
+        var items = (request.Items ?? Array.Empty<InstanceSummary>())
+            .Where(item => item is not null && !string.IsNullOrWhiteSpace(item.Id))
+            .Select(item => new InstanceSummary
+            {
+                Id = item.Id,
+                Command = item.Command,
+                Cwd = item.Cwd,
+                Cols = item.Cols,
+                Rows = item.Rows,
+                CreatedAt = item.CreatedAt,
+                Status = item.Status,
+                Clients = item.Clients,
+                NodeId = sourceNodeId,
+                NodeName = string.IsNullOrWhiteSpace(item.NodeName) ? sourceNodeId : item.NodeName,
+                NodeRole = string.IsNullOrWhiteSpace(item.NodeRole) ? "slave" : item.NodeRole,
+                NodeOnline = item.NodeOnline
+            })
+            .ToList();
+
+        _remoteInstances.SyncNode(sourceNodeId, items);
+        return Task.CompletedTask;
+    }
+
     private void EnsureMasterMode()
     {
         if (!string.Equals(_options.GatewayRole, "master", StringComparison.Ordinal))

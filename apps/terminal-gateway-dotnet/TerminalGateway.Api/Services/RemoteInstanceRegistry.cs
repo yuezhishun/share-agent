@@ -41,6 +41,63 @@ public sealed class RemoteInstanceRegistry
         _summaries[normalized.Id] = new CachedRemoteInstance(normalized, _timeProvider.GetUtcNow());
     }
 
+    public void UpsertRange(IEnumerable<InstanceSummary> summaries)
+    {
+        if (summaries is null)
+        {
+            return;
+        }
+
+        foreach (var summary in summaries)
+        {
+            Upsert(summary);
+        }
+    }
+
+    public void SyncNode(string nodeId, IEnumerable<InstanceSummary> summaries)
+    {
+        var normalizedNode = (nodeId ?? string.Empty).Trim();
+        if (normalizedNode.Length == 0)
+        {
+            return;
+        }
+
+        var next = (summaries ?? Array.Empty<InstanceSummary>())
+            .Where(summary => summary is not null && !string.IsNullOrWhiteSpace(summary.Id))
+            .Select(summary =>
+            {
+                return new InstanceSummary
+                {
+                    Id = summary.Id,
+                    Command = summary.Command,
+                    Cwd = summary.Cwd,
+                    Cols = summary.Cols,
+                    Rows = summary.Rows,
+                    CreatedAt = summary.CreatedAt,
+                    Status = summary.Status,
+                    Clients = summary.Clients,
+                    NodeId = normalizedNode,
+                    NodeName = string.IsNullOrWhiteSpace(summary.NodeName) ? normalizedNode : summary.NodeName,
+                    NodeRole = string.IsNullOrWhiteSpace(summary.NodeRole) ? "slave" : summary.NodeRole,
+                    NodeOnline = summary.NodeOnline
+                };
+            })
+            .ToList();
+
+        var nextIds = new HashSet<string>(next.Select(item => item.Id), StringComparer.Ordinal);
+        var staleIds = _summaries
+            .Where(pair => string.Equals(pair.Value.Summary.NodeId, normalizedNode, StringComparison.Ordinal) && !nextIds.Contains(pair.Key))
+            .Select(pair => pair.Key)
+            .ToList();
+
+        foreach (var staleId in staleIds)
+        {
+            Remove(staleId);
+        }
+
+        UpsertRange(next);
+    }
+
     public bool TryGetNode(string instanceId, out string nodeId)
     {
         return _instanceToNode.TryGetValue((instanceId ?? string.Empty).Trim(), out nodeId!);

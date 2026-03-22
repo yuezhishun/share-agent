@@ -69,6 +69,13 @@ public sealed class ClusterInstanceSubscriptionRequest
     public string? InstanceId { get; set; }
 }
 
+public sealed class ClusterNodeInstancesSyncRequest
+{
+    public string? Token { get; set; }
+    public string? SourceNodeId { get; set; }
+    public IReadOnlyList<InstanceSummary>? Items { get; set; }
+}
+
 public sealed class NodeInstanceInputRequest
 {
     public string? Data { get; set; }

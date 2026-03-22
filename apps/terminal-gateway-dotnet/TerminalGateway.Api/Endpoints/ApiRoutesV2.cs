@@ -28,6 +28,8 @@ public static class ApiRoutesV2
                 var masterView = await bridge.GetMasterInstancesAsync(ct);
                 if (masterView.Ok)
                 {
+                    remoteInstances.UpsertRange(masterView.Items.Where(item =>
+                        !string.Equals((item.NodeId ?? string.Empty).Trim(), options.NodeId, StringComparison.Ordinal)));
                     return Results.Ok(new
                     {
                         items = MergeSlaveVisibleInstances(localItems, masterView.Items),
@@ -71,11 +73,15 @@ public static class ApiRoutesV2
             return Results.Ok(new { items = localItems, protocol = "v2" });
         });
 
-        app.MapPost("/api/v2/instances", async (HttpRequest request, CreateInstanceRequest body, InstanceManager manager, GatewayOptions options, CancellationToken ct) =>
+        app.MapPost("/api/v2/instances", async (HttpRequest request, CreateInstanceRequest body, InstanceManager manager, GatewayOptions options, SlaveClusterBridgeService bridge, CancellationToken ct) =>
         {
             try
             {
                 var instance = await manager.CreateAsync(body, options.FilesBasePath, ct);
+                if (IsSlaveMode(options))
+                {
+                    await bridge.TrySyncLocalInstancesAsync(ct);
+                }
                 var protocol = string.Equals(request.Scheme, "https", StringComparison.OrdinalIgnoreCase) ? "https" : "http";
                 var hubUrl = $"{protocol}://{request.Host}/hubs/terminal-v2";
                 return Results.Ok(new { instance_id = instance.Id, hub_url = hubUrl, protocol = "v2" });
@@ -141,9 +147,14 @@ public static class ApiRoutesV2
             }
         });
 
-        app.MapDelete("/api/v2/instances/{id}", (string id, InstanceManager manager) =>
+        app.MapDelete("/api/v2/instances/{id}", async (string id, InstanceManager manager, GatewayOptions options, SlaveClusterBridgeService bridge, CancellationToken ct) =>
         {
-            return manager.Terminate(id) ? Results.Ok(new { ok = true, protocol = "v2" }) : Results.NotFound(new { error = "instance not found" });
+            var terminated = manager.Terminate(id);
+            if (terminated && IsSlaveMode(options))
+            {
+                await bridge.TrySyncLocalInstancesAsync(ct);
+            }
+            return terminated ? Results.Ok(new { ok = true, protocol = "v2" }) : Results.NotFound(new { error = "instance not found" });
         });
 
         app.MapDelete("/api/v2/nodes/{nodeId}/instances/{instanceId}", async (string nodeId, string instanceId, InstanceManager manager, GatewayOptions options, ClusterCommandBroker broker, RemoteInstanceRegistry remoteInstances, SlaveClusterBridgeService bridge, CancellationToken ct) =>

@@ -1536,6 +1536,149 @@ public class GatewayApiTests
     }
 
     [Fact]
+    public async Task ClusterHub_SyncNodeInstances_Should_Make_Slave_Instance_Visible_In_Master_V2_List()
+    {
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-sync-v2-token",
+            ["GATEWAY_ROLE"] = "master",
+            ["NODE_ID"] = "master-sync-v2",
+            ["NODE_NAME"] = "Master Sync V2"
+        });
+        using var client = app.CreateClient();
+
+        await using var slaveHub = BuildClusterHubConnection(client);
+        await slaveHub.StartAsync();
+        await slaveHub.InvokeAsync("RegisterNode", new
+        {
+            token = "cluster-sync-v2-token",
+            nodeId = "slave-sync-v2",
+            nodeName = "Slave Sync V2",
+            instanceCount = 0
+        });
+
+        await slaveHub.InvokeAsync("SyncNodeInstances", new
+        {
+            token = "cluster-sync-v2-token",
+            sourceNodeId = "slave-sync-v2",
+            items = new[]
+            {
+                new
+                {
+                    id = "slave-sync-inst-1",
+                    command = "bash",
+                    cwd = "/tmp/slave-sync",
+                    cols = 80,
+                    rows = 24,
+                    createdAt = DateTimeOffset.UtcNow.ToString("O"),
+                    status = "running",
+                    clients = 0,
+                    nodeId = "ignored-by-master",
+                    nodeName = "Slave Sync V2",
+                    nodeRole = "slave",
+                    nodeOnline = true
+                }
+            }
+        });
+
+        var instancesResponse = await client.GetAsync("/api/v2/instances");
+        Assert.Equal(HttpStatusCode.OK, instancesResponse.StatusCode);
+        var instancesPayload = JsonDocument.Parse(await instancesResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Contains(instancesPayload.GetProperty("items").EnumerateArray(), item =>
+            item.GetProperty("id").GetString() == "slave-sync-inst-1"
+            && item.GetProperty("node_id").GetString() == "slave-sync-v2");
+
+        await slaveHub.InvokeAsync("SyncNodeInstances", new
+        {
+            token = "cluster-sync-v2-token",
+            sourceNodeId = "slave-sync-v2",
+            items = Array.Empty<object>()
+        });
+
+        var afterResponse = await client.GetAsync("/api/v2/instances");
+        Assert.Equal(HttpStatusCode.OK, afterResponse.StatusCode);
+        var afterPayload = JsonDocument.Parse(await afterResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.DoesNotContain(afterPayload.GetProperty("items").EnumerateArray(),
+            item => item.GetProperty("id").GetString() == "slave-sync-inst-1");
+    }
+
+    [Fact]
+    public async Task Slave_V2_Instances_Fetch_Should_Cache_Master_Instance_For_Join()
+    {
+        var masterPort = GetFreeTcpPort();
+        var slavePort = GetFreeTcpPort();
+        await using var masterApp = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-v2-join-cache-token",
+            ["GATEWAY_ROLE"] = "master",
+            ["NODE_ID"] = "master-v2-join-cache",
+            ["NODE_NAME"] = "Master V2 Join Cache",
+            ["PORT"] = masterPort.ToString()
+        });
+        using var masterClient = masterApp.CreateClient();
+
+        await using var slaveApp = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-v2-join-cache-token",
+            ["GATEWAY_ROLE"] = "slave",
+            ["NODE_ID"] = "slave-v2-join-cache",
+            ["NODE_NAME"] = "Slave V2 Join Cache",
+            ["MASTER_URL"] = masterClient.BaseAddress!.ToString(),
+            ["PORT"] = slavePort.ToString()
+        });
+        using var slaveClient = slaveApp.CreateClient();
+
+        await WaitUntilAsync(async () =>
+        {
+            var payload = JsonDocument.Parse(await slaveClient.GetStringAsync("/api/v2/nodes")).RootElement;
+            return payload.GetProperty("items").EnumerateArray().Any(item => item.GetProperty("node_id").GetString() == "master-v2-join-cache");
+        }, TimeSpan.FromSeconds(10));
+
+        var createResponse = await masterClient.PostAsJsonAsync("/api/v2/instances", new
+        {
+            command = "bash",
+            args = new[] { "-i" },
+            cols = 80,
+            rows = 24,
+            cwd = "/home/yueyuan"
+        });
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+        var createPayload = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
+        var instanceId = createPayload.GetProperty("instance_id").GetString()!;
+
+        var instancesResponse = await slaveClient.GetAsync("/api/v2/instances");
+        Assert.Equal(HttpStatusCode.OK, instancesResponse.StatusCode);
+        var instancesPayload = JsonDocument.Parse(await instancesResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Contains(instancesPayload.GetProperty("items").EnumerateArray(),
+            item => item.GetProperty("id").GetString() == instanceId && item.GetProperty("node_id").GetString() == "master-v2-join-cache");
+
+        using (var scope = slaveApp.Services.CreateScope())
+        {
+            var registry = scope.ServiceProvider.GetRequiredService<RemoteInstanceRegistry>();
+            Assert.True(registry.TryGetNode(instanceId, out var resolvedNodeId));
+            Assert.Equal("master-v2-join-cache", resolvedNodeId);
+        }
+
+        await using var terminalHub = BuildHubConnection(slaveClient);
+        var gate = new object();
+        var messages = new List<JsonElement>();
+        terminalHub.On<JsonElement>("TerminalEvent", message =>
+        {
+            lock (gate)
+            {
+                messages.Add(message);
+            }
+        });
+
+        await terminalHub.StartAsync();
+        await terminalHub.InvokeAsync("JoinInstance", new { instanceId });
+
+        var snapshot = await WaitForMessageAsync(messages, gate, msg =>
+            (GetType(msg) == "term.v2.snapshot" || GetType(msg) == "term.snapshot") && GetString(msg, "instance_id") == instanceId, TimeSpan.FromSeconds(8));
+        Assert.Equal("master-v2-join-cache", snapshot.GetProperty("node_id").GetString());
+    }
+
+    [Fact]
     public async Task Slave_Node_Should_Request_Master_Run_And_Manage_Processes_Through_ClusterHub()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"tg-cluster-proc-master-{Guid.NewGuid():N}");

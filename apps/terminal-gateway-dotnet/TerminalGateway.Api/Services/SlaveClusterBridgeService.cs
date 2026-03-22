@@ -75,6 +75,7 @@ public sealed class SlaveClusterBridgeService : BackgroundService
                     NodeRole = "slave",
                     InstanceCount = _instances.List().Count
                 }, stoppingToken);
+                await SyncLocalInstancesAsync(connection, stoppingToken);
                 await ResubscribeRemoteInstancesAsync(connection, stoppingToken);
 
                 rawHandler = (instanceId, payload) => _ = PublishRuntimeEventAsync(connection, payload, stoppingToken);
@@ -91,6 +92,7 @@ public sealed class SlaveClusterBridgeService : BackgroundService
                         NodeId = _options.NodeId,
                         InstanceCount = _instances.List().Count
                     }, stoppingToken);
+                    await SyncLocalInstancesAsync(connection, stoppingToken);
 
                     await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
                 }
@@ -292,6 +294,28 @@ public sealed class SlaveClusterBridgeService : BackgroundService
         }
     }
 
+    public async Task TrySyncLocalInstancesAsync(CancellationToken cancellationToken)
+    {
+        if (!IsEnabled)
+        {
+            return;
+        }
+
+        var connection = _connection;
+        if (connection is null || connection.State != HubConnectionState.Connected)
+        {
+            return;
+        }
+
+        try
+        {
+            await SyncLocalInstancesAsync(connection, cancellationToken);
+        }
+        catch
+        {
+        }
+    }
+
     private async Task PublishRuntimeEventAsync(HubConnection connection, object payload, CancellationToken cancellationToken)
     {
         if (connection.State != HubConnectionState.Connected)
@@ -445,6 +469,21 @@ public sealed class SlaveClusterBridgeService : BackgroundService
                 InstanceId = instanceId
             }, cancellationToken);
         }
+    }
+
+    private async Task SyncLocalInstancesAsync(HubConnection connection, CancellationToken cancellationToken)
+    {
+        if (connection.State != HubConnectionState.Connected)
+        {
+            return;
+        }
+
+        await connection.InvokeAsync("SyncNodeInstances", new ClusterNodeInstancesSyncRequest
+        {
+            Token = _options.ClusterToken,
+            SourceNodeId = _options.NodeId,
+            Items = _instances.List()
+        }, cancellationToken);
     }
 
     private async Task PublishForwardedEventAsync(ClusterTerminalEventEnvelope envelope)

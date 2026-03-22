@@ -3,9 +3,12 @@
     <div class="sidebar-section node-target">
       <div class="section-header">
         <span><i class="fa-solid fa-network-wired" /> 目标节点</span>
-        <span class="node-state" :class="{ offline: isSelectedNodeOnline === false }">
-          {{ isSelectedNodeOnline ? 'online' : 'offline' }}
-        </span>
+        <div class="section-header-actions">
+          <span class="node-state" :class="{ offline: isSelectedNodeOnline === false }">
+            {{ isSelectedNodeOnline ? 'online' : 'offline' }}
+          </span>
+          <span id="refreshNodeIcon" class="add-icon" title="刷新节点状态" @click="emit('refresh-nodes')"><i class="fa-solid fa-rotate" /></span>
+        </div>
       </div>
       <div class="node-target-body">
         <select class="node-select" :value="createNodeId" @change="emit('target-node-change', $event.target.value)">
@@ -103,6 +106,7 @@ defineProps({
 
 const emit = defineEmits([
   'target-node-change',
+  'refresh-nodes',
   'create-instance',
   'refresh-terminals',
   'connect',

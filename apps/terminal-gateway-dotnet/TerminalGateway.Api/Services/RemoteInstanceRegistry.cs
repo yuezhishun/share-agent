@@ -1,12 +1,21 @@
 using System.Collections.Concurrent;
+using TerminalGateway.Api.Infrastructure;
 using TerminalGateway.Api.Models;
 
 namespace TerminalGateway.Api.Services;
 
 public sealed class RemoteInstanceRegistry
 {
+    private readonly TimeProvider _timeProvider;
+    private readonly TimeSpan _cacheTtl;
     private readonly ConcurrentDictionary<string, string> _instanceToNode = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, InstanceSummary> _summaries = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, CachedRemoteInstance> _summaries = new(StringComparer.Ordinal);
+
+    public RemoteInstanceRegistry(GatewayOptions options, TimeProvider timeProvider)
+    {
+        _timeProvider = timeProvider;
+        _cacheTtl = TimeSpan.FromSeconds(Math.Max(1, options.RemoteInstanceCacheTtlSeconds));
+    }
 
     public void Upsert(string instanceId, string nodeId)
     {
@@ -29,7 +38,64 @@ public sealed class RemoteInstanceRegistry
 
         var normalized = Clone(summary);
         _instanceToNode[normalized.Id] = normalized.NodeId;
-        _summaries[normalized.Id] = normalized;
+        _summaries[normalized.Id] = new CachedRemoteInstance(normalized, _timeProvider.GetUtcNow());
+    }
+
+    public void UpsertRange(IEnumerable<InstanceSummary> summaries)
+    {
+        if (summaries is null)
+        {
+            return;
+        }
+
+        foreach (var summary in summaries)
+        {
+            Upsert(summary);
+        }
+    }
+
+    public void SyncNode(string nodeId, IEnumerable<InstanceSummary> summaries)
+    {
+        var normalizedNode = (nodeId ?? string.Empty).Trim();
+        if (normalizedNode.Length == 0)
+        {
+            return;
+        }
+
+        var next = (summaries ?? Array.Empty<InstanceSummary>())
+            .Where(summary => summary is not null && !string.IsNullOrWhiteSpace(summary.Id))
+            .Select(summary =>
+            {
+                return new InstanceSummary
+                {
+                    Id = summary.Id,
+                    Command = summary.Command,
+                    Cwd = summary.Cwd,
+                    Cols = summary.Cols,
+                    Rows = summary.Rows,
+                    CreatedAt = summary.CreatedAt,
+                    Status = summary.Status,
+                    Clients = summary.Clients,
+                    NodeId = normalizedNode,
+                    NodeName = string.IsNullOrWhiteSpace(summary.NodeName) ? normalizedNode : summary.NodeName,
+                    NodeRole = string.IsNullOrWhiteSpace(summary.NodeRole) ? "slave" : summary.NodeRole,
+                    NodeOnline = summary.NodeOnline
+                };
+            })
+            .ToList();
+
+        var nextIds = new HashSet<string>(next.Select(item => item.Id), StringComparer.Ordinal);
+        var staleIds = _summaries
+            .Where(pair => string.Equals(pair.Value.Summary.NodeId, normalizedNode, StringComparison.Ordinal) && !nextIds.Contains(pair.Key))
+            .Select(pair => pair.Key)
+            .ToList();
+
+        foreach (var staleId in staleIds)
+        {
+            Remove(staleId);
+        }
+
+        UpsertRange(next);
     }
 
     public bool TryGetNode(string instanceId, out string nodeId)
@@ -39,8 +105,10 @@ public sealed class RemoteInstanceRegistry
 
     public IReadOnlyList<InstanceSummary> List()
     {
-        return _summaries.Values
-            .Select(Clone)
+        var cutoff = _timeProvider.GetUtcNow() - _cacheTtl;
+        return _summaries
+            .Where(pair => pair.Value.UpdatedAt >= cutoff)
+            .Select(pair => Clone(pair.Value.Summary))
             .OrderByDescending(x => x.CreatedAt, StringComparer.Ordinal)
             .ToList();
     }
@@ -70,4 +138,6 @@ public sealed class RemoteInstanceRegistry
             NodeOnline = summary.NodeOnline
         };
     }
+
+    private sealed record CachedRemoteInstance(InstanceSummary Summary, DateTimeOffset UpdatedAt);
 }

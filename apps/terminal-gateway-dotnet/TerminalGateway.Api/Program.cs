@@ -26,14 +26,17 @@ builder.Services.AddSignalR();
 builder.Services.AddSingleton<TerminalOracleManager>();
 builder.Services.AddSingleton<TerminalEventRelayV2>();
 builder.Services.AddSingleton<NodeRegistry>();
+builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<RemoteInstanceRegistry>();
 builder.Services.AddSingleton<ClusterCommandBroker>();
 builder.Services.AddSingleton<ClusterCommandExecutor>();
 builder.Services.AddSingleton<ClusterEventDeduplicator>();
+builder.Services.AddSingleton<ClusterTerminalSubscriptionService>();
 builder.Services.AddSingleton<FileApiService>();
 builder.Services.AddSingleton<ProjectApiService>();
 builder.Services.AddSingleton<ProcessApiService>();
-builder.Services.AddHostedService<SlaveClusterBridgeService>();
+builder.Services.AddSingleton<SlaveClusterBridgeService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<SlaveClusterBridgeService>());
 
 var app = builder.Build();
 

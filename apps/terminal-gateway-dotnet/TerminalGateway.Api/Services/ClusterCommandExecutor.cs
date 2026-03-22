@@ -14,14 +14,18 @@ public sealed class ClusterCommandExecutor
     private readonly TerminalOracleManager _oracle;
     private readonly FileApiService _files;
     private readonly ProcessApiService _processes;
+    private readonly NodeRegistry _nodes;
+    private readonly RemoteInstanceRegistry _remoteInstances;
 
-    public ClusterCommandExecutor(GatewayOptions options, InstanceManager instances, TerminalOracleManager oracle, FileApiService files, ProcessApiService processes)
+    public ClusterCommandExecutor(GatewayOptions options, InstanceManager instances, TerminalOracleManager oracle, FileApiService files, ProcessApiService processes, NodeRegistry nodes, RemoteInstanceRegistry remoteInstances)
     {
         _options = options;
         _instances = instances;
         _oracle = oracle;
         _files = files;
         _processes = processes;
+        _nodes = nodes;
+        _remoteInstances = remoteInstances;
     }
 
     public async Task<ClusterCommandResult> ExecuteAsync(ClusterCommandEnvelope command, CancellationToken cancellationToken)
@@ -135,6 +139,27 @@ public sealed class ClusterCommandExecutor
                     }
 
                     return Ok(command, new { ok = true });
+                }
+                case "cluster.nodes":
+                {
+                    var items = FilterSlaveVisibility(
+                        _nodes.ListNodes(_instances.List().Count),
+                        NormalizeSourceNodeId(command),
+                        ReadBool(command.Payload, "include_other_slaves"));
+                    return Ok(command, new { items });
+                }
+                case "cluster.instances":
+                {
+                    var items = _instances.List()
+                        .Concat(_remoteInstances.List())
+                        .GroupBy(item => item.Id, StringComparer.Ordinal)
+                        .Select(group => group.First())
+                        .OrderByDescending(item => item.CreatedAt, StringComparer.Ordinal)
+                        .ToList();
+                    return Ok(command, new
+                    {
+                        items = FilterSlaveVisibility(items, NormalizeSourceNodeId(command), ReadBool(command.Payload, "include_other_slaves"))
+                    });
                 }
                 case "files.upload":
                 {
@@ -417,5 +442,23 @@ public sealed class ClusterCommandExecutor
 
         value = default;
         return false;
+    }
+
+    private static IReadOnlyList<T> FilterSlaveVisibility<T>(IReadOnlyList<T> items, string sourceNodeId, bool includeOtherSlaves)
+    {
+        if (includeOtherSlaves || string.IsNullOrWhiteSpace(sourceNodeId))
+        {
+            return items;
+        }
+
+        return items.Where(item => item switch
+            {
+                NodeSummary node => !string.Equals(node.NodeRole, "slave", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(node.NodeId, sourceNodeId, StringComparison.Ordinal),
+                InstanceSummary instance => !string.Equals(instance.NodeRole, "slave", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(instance.NodeId, sourceNodeId, StringComparison.Ordinal),
+                _ => true
+            })
+            .ToList();
     }
 }

@@ -14,6 +14,7 @@ public sealed class TerminalHubV2 : Hub
     private readonly RemoteInstanceRegistry _remoteInstances;
     private readonly GatewayOptions _options;
     private readonly TerminalOracleManager _oracle;
+    private readonly SlaveClusterBridgeService _slaveBridge;
 
     public TerminalHubV2(
         InstanceManager manager,
@@ -21,7 +22,8 @@ public sealed class TerminalHubV2 : Hub
         ClusterCommandBroker broker,
         RemoteInstanceRegistry remoteInstances,
         GatewayOptions options,
-        TerminalOracleManager oracle)
+        TerminalOracleManager oracle,
+        SlaveClusterBridgeService slaveBridge)
     {
         _manager = manager;
         _registry = registry;
@@ -29,6 +31,7 @@ public sealed class TerminalHubV2 : Hub
         _remoteInstances = remoteInstances;
         _options = options;
         _oracle = oracle;
+        _slaveBridge = slaveBridge;
     }
 
     public static string BuildInstanceGroup(string instanceId) => $"instance-v2:{instanceId}";
@@ -43,10 +46,12 @@ public sealed class TerminalHubV2 : Hub
 
         var connectionId = Context.ConnectionId;
         var joined = _registry.GetInstances(connectionId);
+        var newlyJoined = false;
         if (!joined.Contains(instanceId, StringComparer.Ordinal))
         {
             await Groups.AddToGroupAsync(connectionId, BuildInstanceGroup(instanceId));
             _registry.Bind(connectionId, instanceId);
+            newlyJoined = true;
             if (string.IsNullOrWhiteSpace(_manager.GetDisplayOwner(instanceId)))
             {
                 _manager.SetDisplayOwner(instanceId, connectionId);
@@ -70,10 +75,35 @@ public sealed class TerminalHubV2 : Hub
             throw new HubException("instance not found");
         }
 
-        var remoteSnapshot = await RequestRemoteSyncAsync(nodeId, instanceId, new TerminalSyncRequest { Type = "screen" }, Context.ConnectionAborted);
-        if (remoteSnapshot.ValueKind == JsonValueKind.Object)
+        var acquiredRemoteSubscription = false;
+        try
         {
-            await Clients.Caller.SendAsync("TerminalEvent", remoteSnapshot);
+            if (newlyJoined && IsSlaveBridgeRoute(nodeId))
+            {
+                await _slaveBridge.AcquireRemoteInstanceSubscriptionAsync(instanceId, Context.ConnectionAborted);
+                acquiredRemoteSubscription = true;
+            }
+
+            var remoteSnapshot = await RequestRemoteSyncAsync(nodeId, instanceId, new TerminalSyncRequest { Type = "screen" }, Context.ConnectionAborted);
+            if (remoteSnapshot.ValueKind == JsonValueKind.Object)
+            {
+                await Clients.Caller.SendAsync("TerminalEvent", remoteSnapshot);
+            }
+        }
+        catch
+        {
+            if (acquiredRemoteSubscription)
+            {
+                await _slaveBridge.ReleaseRemoteInstanceSubscriptionAsync(instanceId, CancellationToken.None);
+            }
+
+            if (newlyJoined && _registry.Unbind(connectionId, instanceId))
+            {
+                await Groups.RemoveFromGroupAsync(connectionId, BuildInstanceGroup(instanceId));
+                await ReassignDisplayOwnerAsync(instanceId);
+            }
+
+            throw;
         }
     }
 
@@ -94,6 +124,7 @@ public sealed class TerminalHubV2 : Hub
 
         if (_registry.Unbind(connectionId, instanceId))
         {
+            await ReleaseRemoteSubscriptionAsync(instanceId);
             await Groups.RemoveFromGroupAsync(connectionId, BuildInstanceGroup(instanceId));
             await ReassignDisplayOwnerAsync(instanceId);
         }
@@ -119,7 +150,7 @@ public sealed class TerminalHubV2 : Hub
                 throw new HubException("instance not found");
             }
 
-            var result = await _broker.SendAsync(nodeId, "instance.input", new
+            var result = await SendRemoteCommandAsync(nodeId, "instance.input", new
             {
                 instance_id = instanceId,
                 data = request.Data ?? string.Empty
@@ -155,7 +186,7 @@ public sealed class TerminalHubV2 : Hub
                 throw new HubException("instance not found");
             }
 
-            var result = await _broker.SendAsync(nodeId, "instance.resize", new
+            var result = await SendRemoteCommandAsync(nodeId, "instance.resize", new
             {
                 instance_id = instanceId,
                 cols,
@@ -260,6 +291,7 @@ public sealed class TerminalHubV2 : Hub
         var bound = _registry.UnbindAll(Context.ConnectionId);
         foreach (var instanceId in bound)
         {
+            await ReleaseRemoteSubscriptionAsync(instanceId);
             await Groups.RemoveFromGroupAsync(Context.ConnectionId, BuildInstanceGroup(instanceId));
             await ReassignDisplayOwnerAsync(instanceId);
         }
@@ -303,7 +335,7 @@ public sealed class TerminalHubV2 : Hub
             ? (long?)null
             : Math.Max(0, request.SinceSeq.Value);
 
-        var result = await _broker.SendAsync(nodeId, "instance.sync", new
+        var result = await SendRemoteCommandAsync(nodeId, "instance.sync", new
         {
             instance_id = instanceId,
             type = syncType,
@@ -317,6 +349,35 @@ public sealed class TerminalHubV2 : Hub
         }
 
         return result.Payload;
+    }
+
+    private Task<ClusterCommandResult> SendRemoteCommandAsync(string nodeId, string type, object payload, CancellationToken cancellationToken)
+    {
+        return IsSlaveBridgeRoute(nodeId)
+            ? _slaveBridge.RequestCommandAsync(nodeId, type, payload, cancellationToken)
+            : _broker.SendAsync(nodeId, type, payload, cancellationToken);
+    }
+
+    private bool IsSlaveBridgeRoute(string nodeId)
+    {
+        return string.Equals(_options.GatewayRole, "slave", StringComparison.Ordinal)
+            && !string.IsNullOrWhiteSpace(_options.MasterUrl)
+            && !IsLocalNode(nodeId);
+    }
+
+    private async Task ReleaseRemoteSubscriptionAsync(string instanceId)
+    {
+        if (!TryResolveRemoteNode(instanceId, out var nodeId))
+        {
+            return;
+        }
+
+        if (!IsSlaveBridgeRoute(nodeId))
+        {
+            return;
+        }
+
+        await _slaveBridge.ReleaseRemoteInstanceSubscriptionAsync(instanceId, CancellationToken.None);
     }
 
     private static object BuildResizeAck(string instanceId, string nodeId, string reqId, bool accepted, int cols, int rows, long renderEpoch, string? reason)

@@ -2,12 +2,14 @@ using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.SignalR.Client;
+using Microsoft.Extensions.DependencyInjection;
 using TerminalGateway.Api.Infrastructure;
 using TerminalGateway.Api.Models;
 using TerminalGateway.Api.Services;
@@ -1072,6 +1074,468 @@ public class GatewayApiTests
     }
 
     [Fact]
+    public async Task Slave_V2_Nodes_Should_Return_Master_Aggregated_View()
+    {
+        var masterPort = GetFreeTcpPort();
+        var slavePort = GetFreeTcpPort();
+        await using var masterApp = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-v2-nodes-token",
+            ["GATEWAY_ROLE"] = "master",
+            ["NODE_ID"] = "master-v2-nodes",
+            ["NODE_NAME"] = "Master V2 Nodes",
+            ["PORT"] = masterPort.ToString()
+        });
+        using var masterClient = masterApp.CreateClient();
+
+        await using var slaveApp = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-v2-nodes-token",
+            ["GATEWAY_ROLE"] = "slave",
+            ["NODE_ID"] = "slave-v2-nodes",
+            ["NODE_NAME"] = "Slave V2 Nodes",
+            ["MASTER_URL"] = masterClient.BaseAddress!.ToString(),
+            ["PORT"] = slavePort.ToString()
+        });
+        using var slaveClient = slaveApp.CreateClient();
+
+        await WaitUntilAsync(async () =>
+        {
+            var payload = JsonDocument.Parse(await masterClient.GetStringAsync("/api/v2/nodes")).RootElement;
+            return payload.GetProperty("items").EnumerateArray().Any(item => item.GetProperty("node_id").GetString() == "slave-v2-nodes");
+        }, TimeSpan.FromSeconds(10));
+
+        var response = await slaveClient.GetAsync("/api/v2/nodes");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        var items = payload.GetProperty("items").EnumerateArray().ToList();
+
+        Assert.Contains(items, item => item.GetProperty("node_id").GetString() == "master-v2-nodes");
+        var currentSlave = items.Single(item => item.GetProperty("node_id").GetString() == "slave-v2-nodes");
+        Assert.True(currentSlave.GetProperty("is_current").GetBoolean());
+        Assert.Contains(items, item =>
+            item.GetProperty("node_id").GetString() == "master-v2-nodes"
+            && item.GetProperty("is_current").GetBoolean() == false);
+        Assert.False(payload.TryGetProperty("degraded", out _));
+    }
+
+    [Fact]
+    public async Task Slave_V2_Instances_Should_Return_Master_Aggregated_View()
+    {
+        var masterPort = GetFreeTcpPort();
+        var slavePort = GetFreeTcpPort();
+        await using var masterApp = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-v2-instances-token",
+            ["GATEWAY_ROLE"] = "master",
+            ["NODE_ID"] = "master-v2-instances",
+            ["NODE_NAME"] = "Master V2 Instances",
+            ["PORT"] = masterPort.ToString()
+        });
+        using var masterClient = masterApp.CreateClient();
+
+        var createResponse = await masterClient.PostAsJsonAsync("/api/v2/instances", new
+        {
+            command = "bash",
+            args = new[] { "-i" },
+            cols = 80,
+            rows = 25,
+            cwd = "/home/yueyuan"
+        });
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+        var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
+        var instanceId = created.GetProperty("instance_id").GetString()!;
+
+        await using var slaveApp = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-v2-instances-token",
+            ["GATEWAY_ROLE"] = "slave",
+            ["NODE_ID"] = "slave-v2-instances",
+            ["NODE_NAME"] = "Slave V2 Instances",
+            ["MASTER_URL"] = masterClient.BaseAddress!.ToString(),
+            ["PORT"] = slavePort.ToString()
+        });
+        using var slaveClient = slaveApp.CreateClient();
+
+        await WaitUntilAsync(async () =>
+        {
+            var nodesPayload = JsonDocument.Parse(await masterClient.GetStringAsync("/api/v2/nodes")).RootElement;
+            return nodesPayload.GetProperty("items").EnumerateArray().Any(item => item.GetProperty("node_id").GetString() == "slave-v2-instances");
+        }, TimeSpan.FromSeconds(10));
+
+        var response = await slaveClient.GetAsync("/api/v2/instances");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        var items = payload.GetProperty("items").EnumerateArray().ToList();
+
+        Assert.Contains(items, item =>
+            item.GetProperty("id").GetString() == instanceId &&
+            item.GetProperty("node_id").GetString() == "master-v2-instances");
+        Assert.False(payload.TryGetProperty("degraded", out _));
+    }
+
+    [Fact]
+    public async Task Slave_V2_Instances_Should_Include_Local_Slave_Instance_Immediately()
+    {
+        var masterPort = GetFreeTcpPort();
+        var slavePort = GetFreeTcpPort();
+        await using var masterApp = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-v2-local-instance-token",
+            ["GATEWAY_ROLE"] = "master",
+            ["NODE_ID"] = "master-v2-local-instance",
+            ["NODE_NAME"] = "Master V2 Local Instance",
+            ["PORT"] = masterPort.ToString()
+        });
+        using var masterClient = masterApp.CreateClient();
+
+        await using var slaveApp = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-v2-local-instance-token",
+            ["GATEWAY_ROLE"] = "slave",
+            ["NODE_ID"] = "slave-v2-local-instance",
+            ["NODE_NAME"] = "Slave V2 Local Instance",
+            ["MASTER_URL"] = masterClient.BaseAddress!.ToString(),
+            ["PORT"] = slavePort.ToString()
+        });
+        using var slaveClient = slaveApp.CreateClient();
+
+        await WaitUntilAsync(async () =>
+        {
+            var payload = JsonDocument.Parse(await masterClient.GetStringAsync("/api/v2/nodes")).RootElement;
+            return payload.GetProperty("items").EnumerateArray().Any(item => item.GetProperty("node_id").GetString() == "slave-v2-local-instance");
+        }, TimeSpan.FromSeconds(10));
+
+        var createResponse = await slaveClient.PostAsJsonAsync("/api/v2/nodes/slave-v2-local-instance/instances", new
+        {
+            command = "bash",
+            args = new[] { "-i" },
+            cols = 80,
+            rows = 25,
+            cwd = "/home/yueyuan"
+        });
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+        var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
+        var instanceId = created.GetProperty("instance_id").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(instanceId));
+
+        var response = await slaveClient.GetAsync("/api/v2/instances");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        Assert.Contains(payload.GetProperty("items").EnumerateArray(), item =>
+            item.GetProperty("id").GetString() == instanceId &&
+            item.GetProperty("node_id").GetString() == "slave-v2-local-instance");
+    }
+
+    [Fact]
+    public async Task Slave_V2_Instances_Should_Use_Fresh_Cache_Only_When_Master_Is_Unavailable()
+    {
+        var slavePort = GetFreeTcpPort();
+        await using var slaveApp = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-v2-cache-fallback-token",
+            ["GATEWAY_ROLE"] = "slave",
+            ["NODE_ID"] = "slave-v2-cache-fallback",
+            ["NODE_NAME"] = "Slave V2 Cache Fallback",
+            ["MASTER_URL"] = "http://127.0.0.1:9",
+            ["REMOTE_INSTANCE_CACHE_TTL_SECONDS"] = "5",
+            ["PORT"] = slavePort.ToString()
+        });
+        using var slaveClient = slaveApp.CreateClient();
+
+        var registry = slaveApp.Services.GetRequiredService<RemoteInstanceRegistry>();
+        registry.Upsert(new InstanceSummary
+        {
+            Id = "cached-master-instance",
+            Command = "bash",
+            Cwd = "/home/yueyuan",
+            Cols = 80,
+            Rows = 25,
+            CreatedAt = DateTimeOffset.UtcNow.ToString("O"),
+            Status = "running",
+            Clients = 0,
+            NodeId = "master-v2-cache-fallback",
+            NodeName = "Master Cache Fallback",
+            NodeRole = "master",
+            NodeOnline = false
+        });
+
+        var createResponse = await slaveClient.PostAsJsonAsync("/api/v2/nodes/slave-v2-cache-fallback/instances", new
+        {
+            command = "bash",
+            args = new[] { "-i" },
+            cols = 80,
+            rows = 25,
+            cwd = "/home/yueyuan"
+        });
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+        var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
+        var localInstanceId = created.GetProperty("instance_id").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(localInstanceId));
+
+        var response = await slaveClient.GetAsync("/api/v2/instances");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        var items = payload.GetProperty("items").EnumerateArray().ToList();
+
+        Assert.True(payload.GetProperty("degraded").GetBoolean());
+        Assert.Contains(items, item =>
+            item.GetProperty("id").GetString() == localInstanceId &&
+            item.GetProperty("node_id").GetString() == "slave-v2-cache-fallback");
+        Assert.Contains(items, item =>
+            item.GetProperty("id").GetString() == "cached-master-instance" &&
+            item.GetProperty("node_id").GetString() == "master-v2-cache-fallback");
+    }
+
+    [Fact]
+    public async Task Slave_V2_Instances_Should_Exclude_Expired_Cache_When_Master_Is_Unavailable()
+    {
+        var slavePort = GetFreeTcpPort();
+        await using var slaveApp = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-v2-cache-expiry-token",
+            ["GATEWAY_ROLE"] = "slave",
+            ["NODE_ID"] = "slave-v2-cache-expiry",
+            ["NODE_NAME"] = "Slave V2 Cache Expiry",
+            ["MASTER_URL"] = "http://127.0.0.1:9",
+            ["REMOTE_INSTANCE_CACHE_TTL_SECONDS"] = "1",
+            ["PORT"] = slavePort.ToString()
+        });
+        using var slaveClient = slaveApp.CreateClient();
+
+        var registry = slaveApp.Services.GetRequiredService<RemoteInstanceRegistry>();
+        registry.Upsert(new InstanceSummary
+        {
+            Id = "expired-master-instance",
+            Command = "bash",
+            Cwd = "/home/yueyuan",
+            Cols = 80,
+            Rows = 25,
+            CreatedAt = DateTimeOffset.UtcNow.ToString("O"),
+            Status = "running",
+            Clients = 0,
+            NodeId = "master-v2-cache-expiry",
+            NodeName = "Master Cache Expiry",
+            NodeRole = "master",
+            NodeOnline = false
+        });
+
+        await Task.Delay(TimeSpan.FromMilliseconds(1200));
+
+        var response = await slaveClient.GetAsync("/api/v2/instances");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        var items = payload.GetProperty("items").EnumerateArray().ToList();
+
+        Assert.True(payload.GetProperty("degraded").GetBoolean());
+        Assert.DoesNotContain(items, item => item.GetProperty("id").GetString() == "expired-master-instance");
+    }
+
+    [Fact]
+    public async Task Slave_V2_API_And_TerminalHub_Should_Route_Master_Instance_Through_Bridge()
+    {
+        var masterPort = GetFreeTcpPort();
+        var slavePort = GetFreeTcpPort();
+        await using var masterApp = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-v2-bridge-token",
+            ["GATEWAY_ROLE"] = "master",
+            ["NODE_ID"] = "master-v2-bridge",
+            ["NODE_NAME"] = "Master V2 Bridge",
+            ["PORT"] = masterPort.ToString()
+        });
+        using var masterClient = masterApp.CreateClient();
+
+        await using var slaveApp = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-v2-bridge-token",
+            ["GATEWAY_ROLE"] = "slave",
+            ["NODE_ID"] = "slave-v2-bridge",
+            ["NODE_NAME"] = "Slave V2 Bridge",
+            ["MASTER_URL"] = masterClient.BaseAddress!.ToString(),
+            ["PORT"] = slavePort.ToString()
+        });
+        using var slaveClient = slaveApp.CreateClient();
+
+        await WaitUntilAsync(async () =>
+        {
+            var payload = JsonDocument.Parse(await masterClient.GetStringAsync("/api/v2/nodes")).RootElement;
+            return payload.GetProperty("items").EnumerateArray().Any(item => item.GetProperty("node_id").GetString() == "slave-v2-bridge");
+        }, TimeSpan.FromSeconds(10));
+
+        var createResponse = await slaveClient.PostAsJsonAsync("/api/v2/nodes/master-v2-bridge/instances", new
+        {
+            command = "bash",
+            args = new[] { "-i" },
+            cols = 80,
+            rows = 25,
+            cwd = "/home/yueyuan"
+        });
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+        var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
+        var instanceId = created.GetProperty("instance_id").GetString()!;
+        Assert.Equal("master-v2-bridge", created.GetProperty("node_id").GetString());
+
+        await using var terminalHub = BuildHubConnection(slaveClient);
+        List<JsonElement> messages = [];
+        var gate = new object();
+        terminalHub.On<JsonElement>("TerminalEvent", msg =>
+        {
+            lock (gate)
+            {
+                messages.Add(msg.Clone());
+            }
+        });
+
+        await terminalHub.StartAsync();
+        await terminalHub.InvokeAsync("JoinInstance", new { instanceId });
+        var snapshot = await WaitForMessageAsync(messages, gate, msg => GetType(msg) == "term.snapshot", TimeSpan.FromSeconds(8));
+        Assert.Equal("master-v2-bridge", snapshot.GetProperty("node_id").GetString());
+
+        await terminalHub.InvokeAsync("RequestResize", new { instanceId, cols = 101, rows = 33, reqId = "slave-v2-bridge-resize" });
+        var resizeAck = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.resize.ack" && GetString(msg, "req_id") == "slave-v2-bridge-resize",
+            TimeSpan.FromSeconds(8));
+        Assert.Equal("master-v2-bridge", resizeAck.GetProperty("node_id").GetString());
+
+        await terminalHub.InvokeAsync("SendInput", new { instanceId, data = "echo slave-v2-live\r" });
+        var liveRaw = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.raw" && JsonSerializer.Serialize(msg).Contains("slave-v2-live", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(8));
+        Assert.Equal("master-v2-bridge", liveRaw.GetProperty("node_id").GetString());
+
+        await terminalHub.InvokeAsync("RequestSync", new { instanceId, type = "screen" });
+        var syncedSnapshot = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.snapshot" && msg.GetProperty("node_id").GetString() == "master-v2-bridge",
+            TimeSpan.FromSeconds(8));
+        Assert.Equal("Master V2 Bridge", syncedSnapshot.GetProperty("node_name").GetString());
+
+        var deleteResponse = await slaveClient.DeleteAsync($"/api/v2/nodes/master-v2-bridge/instances/{instanceId}");
+        Assert.Equal(HttpStatusCode.OK, deleteResponse.StatusCode);
+
+        HubException? syncException = null;
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                await terminalHub.InvokeAsync("RequestSync", new { instanceId, type = "screen" });
+            }
+            catch (HubException ex)
+            {
+                syncException = ex;
+                break;
+            }
+
+            await Task.Delay(100);
+        }
+
+        Assert.NotNull(syncException);
+        Assert.Contains("instance not found", syncException!.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Slave_V2_Aggregation_Should_Filter_Other_Slaves_When_Config_Disabled()
+    {
+        var masterPort = GetFreeTcpPort();
+        var slavePort = GetFreeTcpPort();
+        await using var masterApp = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-v2-filter-token",
+            ["GATEWAY_ROLE"] = "master",
+            ["NODE_ID"] = "master-v2-filter",
+            ["NODE_NAME"] = "Master V2 Filter",
+            ["PORT"] = masterPort.ToString()
+        });
+        using var masterClient = masterApp.CreateClient();
+
+        await using var slaveApp = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["CLUSTER_TOKEN"] = "cluster-v2-filter-token",
+            ["GATEWAY_ROLE"] = "slave",
+            ["NODE_ID"] = "slave-v2-filter",
+            ["NODE_NAME"] = "Slave V2 Filter",
+            ["MASTER_URL"] = masterClient.BaseAddress!.ToString(),
+            ["SLAVE_VIEW_OTHER_SLAVES"] = "false",
+            ["PORT"] = slavePort.ToString()
+        });
+        using var slaveClient = slaveApp.CreateClient();
+
+        await using var otherSlaveHub = BuildClusterHubConnection(masterClient);
+        otherSlaveHub.On<ClusterCommandEnvelope>("ClusterCommand", async command =>
+        {
+            if (!string.Equals(command.Type, "instance.create", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            await otherSlaveHub.InvokeAsync("SubmitCommandResult", new
+            {
+                commandId = command.CommandId,
+                nodeId = command.NodeId,
+                ok = true,
+                payload = new
+                {
+                    instance_id = "other-slave-inst-1",
+                    summary = new
+                    {
+                        id = "other-slave-inst-1",
+                        command = "bash",
+                        cwd = "/tmp/other-slave",
+                        cols = 80,
+                        rows = 25,
+                        created_at = DateTimeOffset.UtcNow.ToString("O"),
+                        status = "running",
+                        clients = 0,
+                        node_id = "other-slave-v2-filter",
+                        node_name = "Other Slave V2 Filter",
+                        node_role = "slave",
+                        node_online = true
+                    }
+                }
+            });
+        });
+        await otherSlaveHub.StartAsync();
+        await otherSlaveHub.InvokeAsync("RegisterNode", new
+        {
+            token = "cluster-v2-filter-token",
+            nodeId = "other-slave-v2-filter",
+            nodeName = "Other Slave V2 Filter",
+            instanceCount = 0
+        });
+
+        await WaitUntilAsync(async () =>
+        {
+            var payload = JsonDocument.Parse(await masterClient.GetStringAsync("/api/v2/nodes")).RootElement;
+            return payload.GetProperty("items").EnumerateArray().Any(item => item.GetProperty("node_id").GetString() == "slave-v2-filter");
+        }, TimeSpan.FromSeconds(10));
+
+        var createRemoteResponse = await masterClient.PostAsJsonAsync("/api/v2/nodes/other-slave-v2-filter/instances", new
+        {
+            command = "bash",
+            args = new[] { "-i" },
+            cols = 80,
+            rows = 25,
+            cwd = "/home/yueyuan"
+        });
+        Assert.Equal(HttpStatusCode.OK, createRemoteResponse.StatusCode);
+
+        var nodesResponse = await slaveClient.GetAsync("/api/v2/nodes");
+        Assert.Equal(HttpStatusCode.OK, nodesResponse.StatusCode);
+        var nodesPayload = JsonDocument.Parse(await nodesResponse.Content.ReadAsStringAsync()).RootElement;
+        var nodeIds = nodesPayload.GetProperty("items").EnumerateArray().Select(item => item.GetProperty("node_id").GetString()).ToList();
+        Assert.Contains("master-v2-filter", nodeIds);
+        Assert.Contains("slave-v2-filter", nodeIds);
+        Assert.DoesNotContain("other-slave-v2-filter", nodeIds);
+
+        var instancesResponse = await slaveClient.GetAsync("/api/v2/instances");
+        Assert.Equal(HttpStatusCode.OK, instancesResponse.StatusCode);
+        var instancesPayload = JsonDocument.Parse(await instancesResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.DoesNotContain(instancesPayload.GetProperty("items").EnumerateArray(),
+            item => item.GetProperty("node_id").GetString() == "other-slave-v2-filter");
+    }
+
+    [Fact]
     public async Task Slave_Node_Should_Request_Master_Run_And_Manage_Processes_Through_ClusterHub()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"tg-cluster-proc-master-{Guid.NewGuid():N}");
@@ -1887,6 +2351,36 @@ public class GatewayApiTests
                 return $"{type}(replay={replay},req={reqId})";
             }));
             throw new TimeoutException($"timed out waiting signalr frame; received: [{summary}]");
+        }
+    }
+
+    private static async Task WaitUntilAsync(Func<Task<bool>> predicate, TimeSpan timeout)
+    {
+        var started = DateTime.UtcNow;
+        while (DateTime.UtcNow - started < timeout)
+        {
+            if (await predicate())
+            {
+                return;
+            }
+
+            await Task.Delay(100);
+        }
+
+        throw new TimeoutException("condition was not satisfied within the timeout");
+    }
+
+    private static int GetFreeTcpPort()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
         }
     }
 

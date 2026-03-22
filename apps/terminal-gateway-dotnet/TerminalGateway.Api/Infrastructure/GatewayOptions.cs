@@ -7,6 +7,7 @@ public sealed class GatewayOptions
 
     public string GatewayRole { get; init; } = "master";
     public string? MasterUrl { get; init; }
+    public bool SlaveViewOtherSlaves { get; init; } = true;
     public string NodeId { get; init; } = "master-local";
     public string NodeName { get; init; } = "master-local";
     public string? NodeLabel { get; init; }
@@ -28,6 +29,7 @@ public sealed class GatewayOptions
     public string SettingsStoreFile { get; init; } = "/tmp/pty-agent-terminal-settings.json";
     public int MaxOutputBufferBytes { get; init; } = 8 * 1024 * 1024;
     public int ProcessManagerMaxConcurrency { get; init; } = 4;
+    public int RemoteInstanceCacheTtlSeconds { get; init; } = 30;
     public string GitBashPath { get; init; } = string.Empty;
     public string CodexConfigPath { get; init; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "config.toml");
     public string ClaudeConfigPath { get; init; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "config.json");
@@ -47,6 +49,7 @@ public sealed class GatewayOptions
         {
             GatewayRole = role,
             MasterUrl = Read(config, "MASTER_URL", "Gateway:MasterUrl"),
+            SlaveViewOtherSlaves = ParseBool(config, true, "SLAVE_VIEW_OTHER_SLAVES", "Gateway:SlaveViewOtherSlaves"),
             NodeId = nodeId,
             NodeName = nodeName,
             NodeLabel = Read(config, "NODE_LABEL", "Gateway:NodeLabel"),
@@ -68,6 +71,7 @@ public sealed class GatewayOptions
             SettingsStoreFile = Read(config, "TERMINAL_SETTINGS_STORE_FILE", "Gateway:SettingsStoreFile") ?? "/tmp/pty-agent-terminal-settings.json",
             MaxOutputBufferBytes = ParseInt(config, 8 * 1024 * 1024, "TERMINAL_MAX_OUTPUT_BUFFER_BYTES", "Gateway:MaxOutputBufferBytes"),
             ProcessManagerMaxConcurrency = ParseInt(config, 4, "TERMINAL_PROCESS_MANAGER_MAX_CONCURRENCY", "Gateway:ProcessManagerMaxConcurrency"),
+            RemoteInstanceCacheTtlSeconds = ParseInt(config, 30, "REMOTE_INSTANCE_CACHE_TTL_SECONDS", "Gateway:RemoteInstanceCacheTtlSeconds"),
             GitBashPath = Read(config, "TERMINAL_GIT_BASH_PATH", "Gateway:GitBashPath") ?? string.Empty,
             CodexConfigPath = Read(config, "TERMINAL_CODEX_CONFIG_PATH", "Gateway:CodexConfigPath") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "config.toml"),
             ClaudeConfigPath = Read(config, "TERMINAL_CLAUDE_CONFIG_PATH", "Gateway:ClaudeConfigPath") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "config.json"),
@@ -96,6 +100,22 @@ public sealed class GatewayOptions
     {
         var raw = Read(config, keys);
         return int.TryParse(raw, out var value) && value > 0 ? value : fallback;
+    }
+
+    private static bool ParseBool(IConfiguration config, bool fallback, params string[] keys)
+    {
+        var raw = Read(config, keys);
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return fallback;
+        }
+
+        return raw.Trim().ToLowerInvariant() switch
+        {
+            "1" or "true" or "yes" or "on" => true,
+            "0" or "false" or "no" or "off" => false,
+            _ => fallback
+        };
     }
 
     private static string NormalizeRole(string? raw)

@@ -1,12 +1,21 @@
 using System.Collections.Concurrent;
+using TerminalGateway.Api.Infrastructure;
 using TerminalGateway.Api.Models;
 
 namespace TerminalGateway.Api.Services;
 
 public sealed class RemoteInstanceRegistry
 {
+    private readonly TimeProvider _timeProvider;
+    private readonly TimeSpan _cacheTtl;
     private readonly ConcurrentDictionary<string, string> _instanceToNode = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, InstanceSummary> _summaries = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, CachedRemoteInstance> _summaries = new(StringComparer.Ordinal);
+
+    public RemoteInstanceRegistry(GatewayOptions options, TimeProvider timeProvider)
+    {
+        _timeProvider = timeProvider;
+        _cacheTtl = TimeSpan.FromSeconds(Math.Max(1, options.RemoteInstanceCacheTtlSeconds));
+    }
 
     public void Upsert(string instanceId, string nodeId)
     {
@@ -29,7 +38,7 @@ public sealed class RemoteInstanceRegistry
 
         var normalized = Clone(summary);
         _instanceToNode[normalized.Id] = normalized.NodeId;
-        _summaries[normalized.Id] = normalized;
+        _summaries[normalized.Id] = new CachedRemoteInstance(normalized, _timeProvider.GetUtcNow());
     }
 
     public bool TryGetNode(string instanceId, out string nodeId)
@@ -39,8 +48,10 @@ public sealed class RemoteInstanceRegistry
 
     public IReadOnlyList<InstanceSummary> List()
     {
-        return _summaries.Values
-            .Select(Clone)
+        var cutoff = _timeProvider.GetUtcNow() - _cacheTtl;
+        return _summaries
+            .Where(pair => pair.Value.UpdatedAt >= cutoff)
+            .Select(pair => Clone(pair.Value.Summary))
             .OrderByDescending(x => x.CreatedAt, StringComparer.Ordinal)
             .ToList();
     }
@@ -70,4 +81,6 @@ public sealed class RemoteInstanceRegistry
             NodeOnline = summary.NodeOnline
         };
     }
+
+    private sealed record CachedRemoteInstance(InstanceSummary Summary, DateTimeOffset UpdatedAt);
 }

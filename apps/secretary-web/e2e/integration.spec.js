@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 const apiBase = 'http://127.0.0.1:8080';
 
 async function listInstances(request) {
-  const res = await request.get(`${apiBase}/api/v2/instances`);
+  const res = await request.get(`${apiBase}/api/instances`);
   expect(res.ok()).toBeTruthy();
   const payload = await res.json();
   return Array.isArray(payload?.items) ? payload.items : [];
@@ -12,7 +12,7 @@ async function listInstances(request) {
 async function cleanupInstances(request) {
   const items = await listInstances(request);
   for (const item of items) {
-    await request.delete(`${apiBase}/api/v2/instances/${encodeURIComponent(item.id)}`);
+    await request.delete(`${apiBase}/api/instances/${encodeURIComponent(item.id)}`);
   }
 }
 

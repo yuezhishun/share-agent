@@ -183,17 +183,16 @@ export function installMockRuntime(page) {
       const url = new URL(reqUrl, globalThis.location.origin);
       const method = String(init.method || 'GET').toUpperCase();
       const pathname = url.pathname.replace(/^\/web-pty/, '');
-      const normalizedPathname = pathname.replace(/^\/api\/v2/, '/api');
 
       if (!pathname.startsWith('/api/')) {
         return nativeFetch(input, init);
       }
 
-      if (normalizedPathname === '/api/instances' && method === 'GET') {
+      if (pathname === '/api/instances' && method === 'GET') {
         return json({ items: state.instances });
       }
 
-      if (normalizedPathname === '/api/nodes' && method === 'GET') {
+      if (pathname === '/api/nodes' && method === 'GET') {
         return json({
           items: state.nodes.map((node) => ({
             ...node,
@@ -203,11 +202,11 @@ export function installMockRuntime(page) {
         });
       }
 
-      if (normalizedPathname === '/api/projects' && method === 'GET') {
+      if (pathname === '/api/projects' && method === 'GET') {
         return json({ base: '/home/yueyuan', items: [{ name: 'demo', path: '/home/yueyuan/demo' }] });
       }
 
-      if (normalizedPathname === '/api/instances' && method === 'POST') {
+      if (pathname === '/api/instances' && method === 'POST') {
         const body = init.body ? JSON.parse(String(init.body)) : {};
         const id = `mock-${state.nextId++}`;
         const cols = Number(body.cols || 80);
@@ -234,10 +233,10 @@ export function installMockRuntime(page) {
           inputBuffer: '',
           rawChunks: [{ seq: 1, data: 'mock ready\r\n' }]
         };
-        return json({ instance_id: id, node_id: 'master-mock', hub_url: `${globalThis.location.origin}/hubs/terminal-v2` });
+        return json({ instance_id: id, node_id: 'master-mock', hub_url: `${globalThis.location.origin}/hubs/terminal` });
       }
 
-      const nodeInstanceMatch = normalizedPathname.match(/^\/api\/nodes\/([^/]+)\/instances$/);
+      const nodeInstanceMatch = pathname.match(/^\/api\/nodes\/([^/]+)\/instances$/);
       if (nodeInstanceMatch && method === 'POST') {
         const nodeId = decodeURIComponent(nodeInstanceMatch[1] || '');
         const targetNode = state.nodes.find((item) => item.node_id === nodeId);
@@ -270,17 +269,17 @@ export function installMockRuntime(page) {
           inputBuffer: '',
           rawChunks: [{ seq: 1, data: `${nodeId} ready\r\n` }]
         };
-        return json({ instance_id: id, node_id: nodeId, hub_url: `${globalThis.location.origin}/hubs/terminal-v2` });
+        return json({ instance_id: id, node_id: nodeId, hub_url: `${globalThis.location.origin}/hubs/terminal` });
       }
 
-      if (normalizedPathname.startsWith('/api/instances/') && method === 'DELETE') {
-        const id = decodeURIComponent(normalizedPathname.split('/').pop() || '');
+      if (pathname.startsWith('/api/instances/') && method === 'DELETE') {
+        const id = decodeURIComponent(pathname.split('/').pop() || '');
         state.instances = state.instances.filter((x) => x.id !== id);
         delete state.screenByInstance[id];
         return json({ ok: true });
       }
 
-      const nodeInstanceDeleteMatch = normalizedPathname.match(/^\/api\/nodes\/([^/]+)\/instances\/([^/]+)$/);
+      const nodeInstanceDeleteMatch = pathname.match(/^\/api\/nodes\/([^/]+)\/instances\/([^/]+)$/);
       if (nodeInstanceDeleteMatch && method === 'DELETE') {
         const instanceId = decodeURIComponent(nodeInstanceDeleteMatch[2] || '');
         state.instances = state.instances.filter((x) => x.id !== instanceId);
@@ -288,7 +287,7 @@ export function installMockRuntime(page) {
         return json({ ok: true, node_id: decodeURIComponent(nodeInstanceDeleteMatch[1] || ''), instance_id: instanceId });
       }
 
-      const nodeProcessesMatch = normalizedPathname.match(/^\/api\/nodes\/([^/]+)\/processes(?:\/([^/]+)(?:\/(output|wait|stop))?)?$/);
+      const nodeProcessesMatch = pathname.match(/^\/api\/nodes\/([^/]+)\/processes(?:\/([^/]+)(?:\/(output|wait|stop))?)?$/);
       if (nodeProcessesMatch) {
         const nodeId = decodeURIComponent(nodeProcessesMatch[1] || '');
         const processId = nodeProcessesMatch[2] ? decodeURIComponent(nodeProcessesMatch[2]) : '';
@@ -515,6 +514,10 @@ export function installMockRuntime(page) {
     function toSnapshot(instanceId) {
       const screen = getScreen(instanceId);
       screen.seq += 1;
+      const visibleRows = Math.max(1, Number(screen.rows) || 25);
+      const visibleLines = screen.lines.slice(Math.max(0, screen.lines.length - visibleRows));
+      const historyLines = screen.lines.slice(0, Math.max(0, screen.lines.length - visibleRows));
+      const newestCursor = `h-${historyLines.length + 1}`;
       return {
         v: 1,
         type: 'term.snapshot',
@@ -522,27 +525,32 @@ export function installMockRuntime(page) {
         seq: screen.seq,
         ts: Date.now(),
         size: { cols: screen.cols, rows: screen.rows },
-        cursor: { x: 0, y: Math.max(0, screen.lines.length - 1), visible: true },
+        cursor: { x: 0, y: Math.max(0, visibleLines.length - 1), visible: true },
         styles: { '0': {} },
-        rows: screen.lines.map((line, y) => ({ y, segs: [[line, 0]] })),
-        history: { available: 0, newest_cursor: 'h-1' }
+        rows: visibleLines.map((line, y) => ({ y, segs: [[line, 0]] })),
+        history: { available: historyLines.length, newest_cursor: newestCursor }
       };
     }
 
-    function toSnapshotV2(instanceId) {
+    function toHistoryChunk(instanceId, reqId, before, limit) {
       const screen = getScreen(instanceId);
-      screen.seq += 1;
+      const visibleRows = Math.max(1, Number(screen.rows) || 25);
+      const historyLines = screen.lines.slice(0, Math.max(0, screen.lines.length - visibleRows));
+      const beforeCursor = Number(String(before || 'h-1').replace(/^h-/, ''));
+      const effectiveBefore = Number.isFinite(beforeCursor) && beforeCursor > 0 ? beforeCursor : historyLines.length + 1;
+      const candidates = historyLines
+        .map((text, index) => ({ cursor: `h-${index + 1}`, text }))
+        .filter((item) => Number(item.cursor.slice(2)) < effectiveBefore);
+      const safeLimit = Math.max(1, Math.min(200, Number(limit) || 50));
+      const lines = candidates.slice(Math.max(0, candidates.length - safeLimit));
       return {
-        v: 2,
-        type: 'term.v2.snapshot',
+        v: 1,
+        type: 'term.history.chunk',
         instance_id: instanceId,
-        seq: screen.seq,
-        ts: Date.now(),
-        size: { cols: screen.cols, rows: screen.rows },
-        cursor: { x: 0, y: Math.max(0, screen.lines.length - 1), visible: true },
-        alternate_screen: false,
-        styles: { '0': {} },
-        rows: screen.lines.map((line, y) => ({ y, segs: [[line, 0]] }))
+        req_id: reqId,
+        lines: lines.map((line) => ({ segs: [[line.text, 0]] })),
+        next_before: lines.length > 0 ? lines[0].cursor : `h-${effectiveBefore}`,
+        exhausted: candidates.length <= lines.length
       };
     }
 
@@ -570,8 +578,8 @@ export function installMockRuntime(page) {
         return null;
       }
       return {
-          v: 2,
-          type: 'term.v2.raw',
+        v: 1,
+        type: 'term.raw',
         instance_id: instanceId,
         replay: false,
         seq,
@@ -644,7 +652,6 @@ export function installMockRuntime(page) {
         this.reconnectedHandler = null;
         this.closeHandler = null;
         this.url = String(url || '');
-        this.isV2 = this.url.includes('/hubs/terminal-v2');
       }
 
       on(event, handler) {
@@ -691,8 +698,8 @@ export function installMockRuntime(page) {
 
       emitSeqGap() {
         this.emit('TerminalEvent', {
-          v: 2,
-          type: 'term.v2.sync.required',
+          v: 1,
+          type: 'term.sync.required',
           instance_id: this.instanceId,
           reason: 'seq_gap',
           node_id: 'master-mock',
@@ -708,7 +715,7 @@ export function installMockRuntime(page) {
           if (!state.joinedInstanceIds.includes(this.instanceId)) {
             state.joinedInstanceIds.push(this.instanceId);
           }
-          this.emit('TerminalEvent', this.isV2 ? toSnapshotV2(this.instanceId) : toSnapshot(this.instanceId));
+          this.emit('TerminalEvent', toSnapshot(this.instanceId));
           return;
         }
 
@@ -724,17 +731,14 @@ export function installMockRuntime(page) {
 
         if (method === 'RequestSync') {
           const id = String(payload.instanceId || this.instanceId);
-          if (String(payload.type || 'raw').toLowerCase() === 'raw') {
+          const syncType = String(payload.type || 'raw').toLowerCase();
+          if (syncType === 'raw') {
             const reqId = String(payload.reqId || `raw-sync-${Date.now()}`);
             const replay = toRawReplay(id, reqId, payload.sinceSeq);
+            this.emit('TerminalEvent', replay);
             this.emit('TerminalEvent', {
-              ...replay,
-              v: 2,
-              type: 'term.v2.raw'
-            });
-            this.emit('TerminalEvent', {
-              v: 2,
-              type: 'term.v2.sync.complete',
+              v: 1,
+              type: 'term.sync.complete',
               instance_id: id,
               req_id: reqId,
               to_seq: replay.to_seq,
@@ -742,7 +746,12 @@ export function installMockRuntime(page) {
             });
             return;
           }
-          this.emit('TerminalEvent', this.isV2 ? toSnapshotV2(id) : toSnapshot(id));
+          if (syncType === 'history') {
+            const reqId = String(payload.reqId || `history-${Date.now()}`);
+            this.emit('TerminalEvent', toHistoryChunk(id, reqId, payload.before, payload.limit));
+            return;
+          }
+          this.emit('TerminalEvent', toSnapshot(id));
           return;
         }
 
@@ -751,11 +760,7 @@ export function installMockRuntime(page) {
           state.wsInputs.push(String(payload.data || ''));
           const raw = appendInput(id, payload.data);
           if (raw) {
-            this.emit('TerminalEvent', this.isV2 ? {
-              ...raw,
-              v: 2,
-              type: 'term.v2.raw'
-            } : raw);
+            this.emit('TerminalEvent', raw);
           }
           return;
         }
@@ -767,17 +772,15 @@ export function installMockRuntime(page) {
           screen.rows = Number(payload.rows || screen.rows);
           state.resizeRequests.push({ cols: screen.cols, rows: screen.rows });
           this.emit('TerminalEvent', {
-            v: this.isV2 ? 2 : 1,
-            type: this.isV2 ? 'term.v2.resize.ack' : 'term.resize.ack',
+            v: 1,
+            type: 'term.resize.ack',
             instance_id: id,
             req_id: String(payload.reqId || ''),
             accepted: true,
             size: { cols: screen.cols, rows: screen.rows },
             ts: Date.now()
           });
-          if (this.isV2) {
-            this.emit('TerminalEvent', toSnapshotV2(id));
-          }
+          this.emit('TerminalEvent', toSnapshot(id));
         }
       }
     }

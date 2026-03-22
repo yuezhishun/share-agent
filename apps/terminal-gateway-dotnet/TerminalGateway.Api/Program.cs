@@ -21,10 +21,10 @@ builder.Services.AddSingleton<InstanceManager>(sp => new InstanceManager(
     options.GatewayRole,
     options.PathPrefixes,
     options.GitBashPath));
-builder.Services.AddSingleton<TerminalConnectionRegistryV2>();
+builder.Services.AddSingleton<TerminalConnectionRegistry>();
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<TerminalOracleManager>();
-builder.Services.AddSingleton<TerminalEventRelayV2>();
+builder.Services.AddSingleton<TerminalEventRelay>();
 builder.Services.AddSingleton<NodeRegistry>();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<RemoteInstanceRegistry>();
@@ -41,13 +41,11 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<SlaveClusterBridge
 var app = builder.Build();
 
 app.MapApiRoutes();
-app.MapApiRoutesV2();
 app.MapProcessEndpoints();
-app.MapHub<TerminalHubV2>("/hubs/terminal");
-app.MapHub<TerminalHubV2>("/hubs/terminal-v2");
+app.MapHub<TerminalHub>("/hubs/terminal");
 app.MapHub<ClusterHub>("/hubs/cluster");
 
-_ = app.Services.GetRequiredService<TerminalEventRelayV2>();
+_ = app.Services.GetRequiredService<TerminalEventRelay>();
 
 app.Run($"http://{options.Host}:{options.Port}");
 

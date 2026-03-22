@@ -18,14 +18,66 @@ public static class ApiRoutes
                 metrics = manager.MetricsSnapshot()
             }));
 
-        app.MapGet("/api/instances", (InstanceManager manager) => Results.Ok(new { items = manager.List() }));
-        app.MapGet("/api/nodes", (InstanceManager manager, NodeRegistry nodes) => Results.Ok(new { items = nodes.ListNodes(manager.List().Count) }));
+        app.MapGet("/api/instances", async (InstanceManager manager, RemoteInstanceRegistry remoteInstances, GatewayOptions options, SlaveClusterBridgeService bridge, CancellationToken ct) =>
+        {
+            var localItems = manager.List();
 
-        app.MapPost("/api/instances", async (HttpRequest request, CreateInstanceRequest body, InstanceManager manager, GatewayOptions options, CancellationToken ct) =>
+            if (IsSlaveMode(options))
+            {
+                var masterView = await bridge.GetMasterInstancesAsync(ct);
+                if (masterView.Ok)
+                {
+                    remoteInstances.UpsertRange(masterView.Items.Where(item =>
+                        !string.Equals((item.NodeId ?? string.Empty).Trim(), options.NodeId, StringComparison.Ordinal)));
+                    return Results.Ok(new
+                    {
+                        items = MergeSlaveVisibleInstances(localItems, masterView.Items)
+                    });
+                }
+
+                return Results.Ok(new
+                {
+                    items = MergeSlaveFallbackInstances(localItems, remoteInstances.List()),
+                    degraded = true,
+                    cluster_error = masterView.Error
+                });
+            }
+
+            return Results.Ok(new
+            {
+                items = MergeSlaveFallbackInstances(localItems, remoteInstances.List())
+            });
+        });
+
+        app.MapGet("/api/nodes", async (InstanceManager manager, NodeRegistry nodes, GatewayOptions options, SlaveClusterBridgeService bridge, CancellationToken ct) =>
+        {
+            var localItems = nodes.ListNodes(manager.List().Count);
+            if (IsSlaveMode(options))
+            {
+                var masterView = await bridge.GetMasterNodesAsync(ct);
+                if (masterView.Ok)
+                {
+                    return Results.Ok(new
+                    {
+                        items = MergeSlaveVisibleNodes(localItems, masterView.Items, options.NodeId)
+                    });
+                }
+
+                return Results.Ok(new { items = localItems, degraded = true, cluster_error = masterView.Error });
+            }
+
+            return Results.Ok(new { items = localItems });
+        });
+
+        app.MapPost("/api/instances", async (HttpRequest request, CreateInstanceRequest body, InstanceManager manager, GatewayOptions options, SlaveClusterBridgeService bridge, CancellationToken ct) =>
         {
             try
             {
                 var instance = await manager.CreateAsync(body, options.FilesBasePath, ct);
+                if (IsSlaveMode(options))
+                {
+                    await bridge.TrySyncLocalInstancesAsync(ct);
+                }
                 var protocol = string.Equals(request.Scheme, "https", StringComparison.OrdinalIgnoreCase) ? "https" : "http";
                 var hubUrl = $"{protocol}://{request.Host}/hubs/terminal";
                 return Results.Ok(new { instance_id = instance.Id, hub_url = hubUrl });
@@ -40,7 +92,7 @@ public static class ApiRoutes
             }
         });
 
-        app.MapPost("/api/nodes/{nodeId}/instances", async (HttpRequest request, string nodeId, CreateInstanceRequest body, InstanceManager manager, GatewayOptions options, ClusterCommandBroker broker, RemoteInstanceRegistry remoteInstances, CancellationToken ct) =>
+        app.MapPost("/api/nodes/{nodeId}/instances", async (HttpRequest request, string nodeId, CreateInstanceRequest body, InstanceManager manager, GatewayOptions options, ClusterCommandBroker broker, RemoteInstanceRegistry remoteInstances, SlaveClusterBridgeService bridge, CancellationToken ct) =>
         {
             if (IsLocalNode(nodeId, options))
             {
@@ -63,7 +115,9 @@ public static class ApiRoutes
 
             try
             {
-                var commandResult = await broker.SendAsync(nodeId, "instance.create", body, ct);
+                var commandResult = IsSlaveMode(options)
+                    ? await bridge.RequestCommandAsync(nodeId, "instance.create", body, ct)
+                    : await broker.SendAsync(nodeId, "instance.create", body, ct);
                 if (!commandResult.Ok)
                 {
                     return Results.BadRequest(new { error = commandResult.Error ?? "remote create failed", node_id = nodeId });
@@ -79,8 +133,9 @@ public static class ApiRoutes
 
                 var protocol = string.Equals(request.Scheme, "https", StringComparison.OrdinalIgnoreCase) ? "https" : "http";
                 var hubUrl = $"{protocol}://{request.Host}/hubs/terminal";
-                remoteInstances.Upsert(instanceId, nodeId);
-                return Results.Ok(new { instance_id = instanceId, hub_url = hubUrl, node_id = nodeId });
+                var summary = ReadRemoteSummary(commandResult.Payload, instanceId, nodeId);
+                remoteInstances.Upsert(summary);
+                return Results.Ok(new { instance_id = instanceId, hub_url = hubUrl, node_id = summary.NodeId });
             }
             catch (Exception ex)
             {
@@ -88,9 +143,14 @@ public static class ApiRoutes
             }
         });
 
-        app.MapDelete("/api/instances/{id}", (string id, InstanceManager manager) =>
+        app.MapDelete("/api/instances/{id}", async (string id, InstanceManager manager, GatewayOptions options, SlaveClusterBridgeService bridge, CancellationToken ct) =>
         {
-            return manager.Terminate(id) ? Results.Ok(new { ok = true }) : Results.NotFound(new { error = "instance not found" });
+            var terminated = manager.Terminate(id);
+            if (terminated && IsSlaveMode(options))
+            {
+                await bridge.TrySyncLocalInstancesAsync(ct);
+            }
+            return terminated ? Results.Ok(new { ok = true }) : Results.NotFound(new { error = "instance not found" });
         });
 
         app.MapPost("/api/nodes/{nodeId}/instances/{instanceId}/input", async (string nodeId, string instanceId, NodeInstanceInputRequest body, InstanceManager manager, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
@@ -140,7 +200,7 @@ public static class ApiRoutes
             }
         });
 
-        app.MapDelete("/api/nodes/{nodeId}/instances/{instanceId}", async (string nodeId, string instanceId, InstanceManager manager, GatewayOptions options, ClusterCommandBroker broker, RemoteInstanceRegistry remoteInstances, CancellationToken ct) =>
+        app.MapDelete("/api/nodes/{nodeId}/instances/{instanceId}", async (string nodeId, string instanceId, InstanceManager manager, GatewayOptions options, ClusterCommandBroker broker, RemoteInstanceRegistry remoteInstances, SlaveClusterBridgeService bridge, CancellationToken ct) =>
         {
             if (IsLocalNode(nodeId, options))
             {
@@ -151,7 +211,9 @@ public static class ApiRoutes
 
             try
             {
-                var result = await broker.SendAsync(nodeId, "instance.terminate", new { instance_id = instanceId }, ct);
+                var result = IsSlaveMode(options)
+                    ? await bridge.RequestCommandAsync(nodeId, "instance.terminate", new { instance_id = instanceId }, ct)
+                    : await broker.SendAsync(nodeId, "instance.terminate", new { instance_id = instanceId }, ct);
                 if (result.Ok)
                 {
                     remoteInstances.Remove(instanceId);
@@ -971,9 +1033,137 @@ public static class ApiRoutes
         return normalized.Length == 0 || string.Equals(normalized, options.NodeId, StringComparison.Ordinal);
     }
 
+    private static bool IsSlaveMode(GatewayOptions options)
+    {
+        return string.Equals(options.GatewayRole, "slave", StringComparison.Ordinal)
+            && !string.IsNullOrWhiteSpace(options.MasterUrl);
+    }
+
     private static bool ParseBooleanFlag(string? value)
     {
         var normalized = (value ?? string.Empty).Trim();
         return normalized == "1" || string.Equals(normalized, "true", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static InstanceSummary ReadRemoteSummary(JsonElement payload, string instanceId, string nodeId)
+    {
+        if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("summary", out var summaryElement))
+        {
+            return ReadInstanceSummary(summaryElement, instanceId, nodeId);
+        }
+
+        return new InstanceSummary
+        {
+            Id = instanceId,
+            Command = "remote-shell",
+            Cwd = string.Empty,
+            Cols = 0,
+            Rows = 0,
+            CreatedAt = DateTimeOffset.UtcNow.ToString("O"),
+            Status = "running",
+            Clients = 0,
+            NodeId = nodeId,
+            NodeName = nodeId,
+            NodeRole = "slave",
+            NodeOnline = true
+        };
+    }
+
+    private static InstanceSummary ReadInstanceSummary(JsonElement summary, string fallbackInstanceId, string fallbackNodeId)
+    {
+        return new InstanceSummary
+        {
+            Id = ReadString(summary, "id") ?? fallbackInstanceId,
+            Command = ReadString(summary, "command") ?? "remote-shell",
+            Cwd = ReadString(summary, "cwd") ?? string.Empty,
+            Cols = ReadInt(summary, "cols"),
+            Rows = ReadInt(summary, "rows"),
+            CreatedAt = ReadString(summary, "created_at") ?? DateTimeOffset.UtcNow.ToString("O"),
+            Status = ReadString(summary, "status") ?? "running",
+            Clients = ReadInt(summary, "clients"),
+            NodeId = ReadString(summary, "node_id") ?? fallbackNodeId,
+            NodeName = ReadString(summary, "node_name") ?? fallbackNodeId,
+            NodeRole = ReadString(summary, "node_role") ?? "slave",
+            NodeOnline = ReadBool(summary, "node_online", true)
+        };
+    }
+
+    private static string? ReadString(JsonElement element, string propertyName)
+    {
+        return element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+    }
+
+    private static int ReadInt(JsonElement element, string propertyName)
+    {
+        return element.TryGetProperty(propertyName, out var value) && value.TryGetInt32(out var number)
+            ? number
+            : 0;
+    }
+
+    private static bool ReadBool(JsonElement element, string propertyName, bool fallback)
+    {
+        return element.TryGetProperty(propertyName, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? value.GetBoolean()
+            : fallback;
+    }
+
+    private static IReadOnlyList<NodeSummary> MergeSlaveVisibleNodes(
+        IReadOnlyList<NodeSummary> localItems,
+        IReadOnlyList<NodeSummary> masterItems,
+        string currentNodeId)
+    {
+        var localById = localItems
+            .Where(item => !string.IsNullOrWhiteSpace(item.NodeId))
+            .ToDictionary(item => item.NodeId, item => item, StringComparer.Ordinal);
+
+        return masterItems
+            .Concat(localItems)
+            .Where(item => !string.IsNullOrWhiteSpace(item.NodeId))
+            .GroupBy(item => item.NodeId, StringComparer.Ordinal)
+            .Select(group =>
+            {
+                var preferred = localById.TryGetValue(group.Key, out var local) ? local : group.First();
+                return new NodeSummary
+                {
+                    NodeId = preferred.NodeId,
+                    NodeName = preferred.NodeName,
+                    NodeRole = preferred.NodeRole,
+                    NodeLabel = preferred.NodeLabel,
+                    IsCurrent = string.Equals(preferred.NodeId, currentNodeId, StringComparison.Ordinal),
+                    NodeOnline = preferred.NodeOnline,
+                    InstanceCount = preferred.InstanceCount,
+                    LastSeenAt = preferred.LastSeenAt
+                };
+            })
+            .OrderBy(item => item.NodeId, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private static IReadOnlyList<InstanceSummary> MergeSlaveVisibleInstances(
+        IReadOnlyList<InstanceSummary> localItems,
+        IReadOnlyList<InstanceSummary> masterItems)
+    {
+        return masterItems
+            .Concat(localItems)
+            .Where(item => !string.IsNullOrWhiteSpace(item.Id))
+            .GroupBy(item => item.Id, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .OrderByDescending(item => item.CreatedAt, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private static IReadOnlyList<InstanceSummary> MergeSlaveFallbackInstances(
+        IReadOnlyList<InstanceSummary> localItems,
+        IReadOnlyList<InstanceSummary> cachedRemoteItems)
+    {
+        return localItems
+            .Concat(cachedRemoteItems)
+            .Where(item => !string.IsNullOrWhiteSpace(item.Id))
+            .GroupBy(item => item.Id, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .OrderByDescending(item => item.CreatedAt, StringComparer.Ordinal)
+            .ToList();
     }
 }

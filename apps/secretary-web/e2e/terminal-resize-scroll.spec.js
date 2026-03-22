@@ -44,6 +44,23 @@ test('desktop should keep output stable when resize ack/snapshot and scrolling h
   await expect(page.getByTestId('plain-output')).toContainText('after-resize-b');
 });
 
+test('desktop should recompute terminal geometry after viewport width changes', async ({ page }) => {
+  await installMockRuntime(page);
+  await page.setViewportSize({ width: 1680, height: 980 });
+  await page.goto('/');
+
+  await page.locator('#instance-list .terminal-item').first().click();
+  await expect(page.getByTestId('status')).toContainText('Connected');
+
+  const before = await page.evaluate(() => globalThis.__PW_MOCK_STATE__.resizeRequests.length);
+
+  await page.setViewportSize({ width: 1260, height: 980 });
+
+  await expect
+    .poll(async () => page.evaluate(() => globalThis.__PW_MOCK_STATE__.resizeRequests.length))
+    .toBeGreaterThan(before);
+});
+
 test('desktop seq gap route should auto trigger resync request', async ({ page }) => {
   await installMockRuntime(page);
   await page.goto('/');

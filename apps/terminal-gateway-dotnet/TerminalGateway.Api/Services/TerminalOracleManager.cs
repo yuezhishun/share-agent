@@ -37,6 +37,8 @@ public sealed class TerminalOracleManager : IDisposable
         bool ansiTruncated;
         int cols;
         int rows;
+        int historyAvailable;
+        string newestHistoryCursor;
         lock (state.Sync)
         {
             ownerConnectionId = state.DisplayOwnerConnectionId;
@@ -47,6 +49,8 @@ public sealed class TerminalOracleManager : IDisposable
             rows = state.Rows;
             ansi = string.Concat(state.RawChunks.Select(x => x.Data));
             ansiTruncated = state.RawChunks.Count > 0 && state.RawChunks[0].Seq > 1;
+            historyAvailable = state.History.Count;
+            newestHistoryCursor = state.History.NewestCursor();
         }
 
         OracleScreenFrame frame;
@@ -58,8 +62,8 @@ public sealed class TerminalOracleManager : IDisposable
 
         return new
         {
-            v = 2,
-            type = "term.v2.snapshot",
+            v = 1,
+            type = "term.snapshot",
             instance_id = state.Id,
             node_id = _manager.NodeId,
             node_name = _manager.NodeName,
@@ -78,7 +82,8 @@ public sealed class TerminalOracleManager : IDisposable
             {
                 ["0"] = new { fg = (int?)null, bg = (int?)null, bold = false, italic = false, underline = false, inverse = false }
             },
-            rows = frame.VisibleLines.Select((line, index) => new { y = index, segs = new object[] { new object[] { line, 0 } } }).ToList()
+            rows = frame.VisibleLines.Select((line, index) => new { y = index, segs = new object[] { new object[] { line, 0 } } }).ToList(),
+            history = new { available = historyAvailable, newest_cursor = newestHistoryCursor }
         };
     }
 

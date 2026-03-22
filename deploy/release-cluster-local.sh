@@ -7,10 +7,10 @@ API_PROJECT="${REPO_ROOT}/apps/terminal-gateway-dotnet/TerminalGateway.Api/Termi
 MASTER_WEB_DIR="${MASTER_WEB_DIR:-/www/wwwroot/pty-agent-web-master}"
 SLAVE_WEB_DIR="${SLAVE_WEB_DIR:-/www/wwwroot/pty-agent-web-slave}"
 MASTER_WEBPTY_BASE="${MASTER_WEBPTY_BASE:-/web-pty}"
-MASTER_HUB_PATH="${MASTER_HUB_PATH:-/hubs/terminal-v2}"
+MASTER_HUB_PATH="${MASTER_HUB_PATH:-/hubs/terminal}"
 MASTER_APP_BASE_PATH="${MASTER_APP_BASE_PATH:-/}"
 SLAVE_WEBPTY_BASE="${SLAVE_WEBPTY_BASE:-/slave/web-pty}"
-SLAVE_HUB_PATH="${SLAVE_HUB_PATH:-/slave/hubs/terminal-v2}"
+SLAVE_HUB_PATH="${SLAVE_HUB_PATH:-/slave/hubs/terminal}"
 SLAVE_APP_BASE_PATH="${SLAVE_APP_BASE_PATH:-/slave/}"
 
 MASTER_SERVICE="${MASTER_SERVICE:-terminal-gateway-master.service}"
@@ -100,7 +100,7 @@ write_service "${SLAVE_SERVICE_FILE}" "slave" "${SLAVE_PORT}" "${SLAVE_NODE_ID}"
 echo "[2/6] build secretary-web for master"
 cd "${REPO_ROOT}/apps/secretary-web"
 VITE_WEBPTY_BASE="${MASTER_WEBPTY_BASE}" \
-VITE_WEBPTY_HUB_PATH_V2="${MASTER_HUB_PATH}" \
+VITE_WEBPTY_HUB_PATH="${MASTER_HUB_PATH}" \
 VITE_APP_BASE_PATH="${MASTER_APP_BASE_PATH}" \
 npm run build
 
@@ -110,7 +110,7 @@ cp -a "${REPO_ROOT}/apps/secretary-web/dist/." "${MASTER_WEB_DIR}/"
 
 echo "[4/6] build secretary-web for slave"
 VITE_WEBPTY_BASE="${SLAVE_WEBPTY_BASE}" \
-VITE_WEBPTY_HUB_PATH_V2="${SLAVE_HUB_PATH}" \
+VITE_WEBPTY_HUB_PATH="${SLAVE_HUB_PATH}" \
 VITE_APP_BASE_PATH="${SLAVE_APP_BASE_PATH}" \
 npm run build
 

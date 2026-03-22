@@ -58,7 +58,7 @@ echo "[3/5] slave instance flow"
 verify_instance_flow "slave" "${SLAVE_BASE_URL}"
 
 echo "[4/5] master nodes contains slave"
-MASTER_NODES_JSON=$(curl -fsS "${MASTER_BASE_URL}${API_PREFIX}/api/v2/nodes")
+MASTER_NODES_JSON=$(curl -fsS "${MASTER_BASE_URL}${API_PREFIX}/api/nodes")
 if [[ "${MASTER_NODES_JSON}" != *"\"node_id\":\"${EXPECTED_MASTER_NODE_ID}\""* ]]; then
   echo "master nodes missing expected master node id ${EXPECTED_MASTER_NODE_ID}: ${MASTER_NODES_JSON}"
   exit 1
@@ -69,7 +69,7 @@ if [[ "${MASTER_NODES_JSON}" != *"\"node_id\":\"${EXPECTED_SLAVE_NODE_ID}\""* ]]
 fi
 
 echo "[5/5] slave nodes contains master"
-SLAVE_NODES_JSON=$(curl -fsS "${SLAVE_BASE_URL}${API_PREFIX}/api/v2/nodes")
+SLAVE_NODES_JSON=$(curl -fsS "${SLAVE_BASE_URL}${API_PREFIX}/api/nodes")
 if [[ "${SLAVE_NODES_JSON}" != *"\"node_id\":\"${EXPECTED_MASTER_NODE_ID}\""* ]]; then
   echo "slave nodes missing expected master node id ${EXPECTED_MASTER_NODE_ID}: ${SLAVE_NODES_JSON}"
   exit 1

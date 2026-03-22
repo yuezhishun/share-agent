@@ -103,7 +103,7 @@ public class GatewayDisplayOwnershipTests
     [Fact]
     public async Task LeaveAll_ShouldReassignDisplayOwner_OnV2Hub()
     {
-        await LeaveAll_ShouldReassignDisplayOwnerAsync("/hubs/terminal-v2");
+        await LeaveAll_ShouldReassignDisplayOwnerAsync("/hubs/terminal");
     }
 
     private static async Task<string> CreateInstanceAsync(HttpClient client)
@@ -122,7 +122,7 @@ public class GatewayDisplayOwnershipTests
 
     private static HubConnection BuildHubConnection(HttpClient client)
     {
-        return BuildHubConnection(client, "/hubs/terminal-v2");
+        return BuildHubConnection(client, "/hubs/terminal");
     }
 
     private static HubConnection BuildHubConnection(HttpClient client, string hubPath)
@@ -180,12 +180,12 @@ public class GatewayDisplayOwnershipTests
             : null;
         return type switch
         {
-            "term.v2.snapshot" => "term.snapshot",
-            "term.v2.raw" => "term.raw",
-            "term.v2.resize.ack" => "term.resize.ack",
-            "term.v2.sync.complete" => "term.sync.complete",
-            "term.v2.sync.required" => "term.sync.required",
-            "term.v2.owner.changed" => "term.owner.changed",
+            "term.snapshot" => "term.snapshot",
+            "term.raw" => "term.raw",
+            "term.resize.ack" => "term.resize.ack",
+            "term.sync.complete" => "term.sync.complete",
+            "term.sync.required" => "term.sync.required",
+            "term.owner.changed" => "term.owner.changed",
             _ => type
         };
     }

@@ -6,39 +6,62 @@
         <span v-if="isMarkdown" class="editor-kind-badge">Markdown IR</span>
       </div>
       <div class="editor-actions">
+        <template v-if="isImage">
+          <button type="button" @click="emit('zoomOut')" :disabled="!canZoomOut">缩小</button>
+          <button type="button" @click="emit('resetZoom')" :disabled="!isZoomChanged">适应</button>
+          <button type="button" @click="emit('zoomIn')" :disabled="!canZoomIn">放大</button>
+        </template>
         <span v-if="activeFileTab.readOnly" class="read-only-badge">只读</span>
         <span v-if="activeFileTab.dirty" class="dirty-indicator">未保存</span>
-        <button type="button" @click="emit('reload')" :disabled="activeFileTab.loading">重载</button>
-        <button v-if="!activeFileTab.readOnly" type="button" class="primary" @click="emit('save')" :disabled="activeFileTab.loading">保存</button>
+        <button v-if="!isImage" type="button" @click="emit('reload')" :disabled="activeFileTab.loading">重载</button>
+        <button v-if="!activeFileTab.readOnly && !isImage" type="button" class="primary" @click="emit('save')" :disabled="activeFileTab.loading">保存</button>
       </div>
     </div>
 
     <div v-if="activeFileTab.error" class="panel-error">{{ activeFileTab.error }}</div>
     <div v-else-if="activeFileTab.loading" class="editor-loading">加载中...</div>
     <template v-else>
-      <div v-if="showProgressiveActions" class="editor-warning editor-warning-actions">
-        <span>{{ progressiveMessage }}</span>
-        <div class="warning-actions">
-          <button v-if="activeFileTab.hasMoreAfter" type="button" @click="emit('loadMore')">加载更多</button>
-          <button v-if="activeFileTab.largeFile" type="button" @click="emit('tailPreview')">查看尾部</button>
-          <button v-if="activeFileTab.cursorStart > 0 || activeFileTab.mode === 'tail'" type="button" @click="emit('loadFromStart')">回到开头</button>
+      <template v-if="isImage">
+        <div class="image-preview-shell">
+          <div class="image-preview-toolbar">
+            <span>缩放 {{ zoomPercent }}</span>
+            <span class="image-preview-hint">默认适应主窗口，可继续放大或缩小。</span>
+          </div>
+          <div class="image-preview-stage">
+            <img
+              :src="activeFileTab.previewUrl"
+              :alt="activeFileTab.name || activeFileTab.path"
+              class="image-preview"
+              :style="{ transform: `scale(${imageZoom})` }"
+            />
+          </div>
         </div>
-      </div>
-      <div v-else-if="activeFileTab.truncated" class="editor-warning">文件内容已截断展示（{{ activeFileTab.truncateReason || 'max_lines' }}）</div>
-      <MarkdownIrEditor
-        v-if="isMarkdown"
-        :model-value="activeFileTab.content"
-        :read-only="activeFileTab.readOnly"
-        @update:model-value="emit('update:modelValue', $event)"
-        @save="emit('save')"
-      />
-      <PlainTextCodeEditor
-        v-else
-        :model-value="activeFileTab.content"
-        :read-only="activeFileTab.readOnly"
-        @update:model-value="emit('update:modelValue', $event)"
-        @save="emit('save')"
-      />
+      </template>
+      <template v-else>
+        <div v-if="showProgressiveActions" class="editor-warning editor-warning-actions">
+          <span>{{ progressiveMessage }}</span>
+          <div class="warning-actions">
+            <button v-if="activeFileTab.hasMoreAfter" type="button" @click="emit('loadMore')">加载更多</button>
+            <button v-if="activeFileTab.largeFile" type="button" @click="emit('tailPreview')">查看尾部</button>
+            <button v-if="activeFileTab.cursorStart > 0 || activeFileTab.mode === 'tail'" type="button" @click="emit('loadFromStart')">回到开头</button>
+          </div>
+        </div>
+        <div v-else-if="activeFileTab.truncated" class="editor-warning">文件内容已截断展示（{{ activeFileTab.truncateReason || 'max_lines' }}）</div>
+        <MarkdownIrEditor
+          v-if="isMarkdown"
+          :model-value="activeFileTab.content"
+          :read-only="activeFileTab.readOnly"
+          @update:model-value="emit('update:modelValue', $event)"
+          @save="emit('save')"
+        />
+        <PlainTextCodeEditor
+          v-else
+          :model-value="activeFileTab.content"
+          :read-only="activeFileTab.readOnly"
+          @update:model-value="emit('update:modelValue', $event)"
+          @save="emit('save')"
+        />
+      </template>
     </template>
   </div>
 </template>
@@ -56,10 +79,29 @@ const props = defineProps({
   }
 });
 
-const emit = defineEmits(['reload', 'save', 'update:modelValue', 'loadMore', 'tailPreview', 'loadFromStart']);
+const emit = defineEmits([
+  'reload',
+  'save',
+  'update:modelValue',
+  'loadMore',
+  'tailPreview',
+  'loadFromStart',
+  'zoomIn',
+  'zoomOut',
+  'resetZoom'
+]);
 
 const isMarkdown = computed(() => props.activeFileTab?.editorKind === 'markdown-ir');
-const showProgressiveActions = computed(() => props.activeFileTab?.largeFile === true || props.activeFileTab?.readOnly === true);
+const isImage = computed(() => props.activeFileTab?.editorKind === 'image');
+const imageZoom = computed(() => {
+  const zoom = Number(props.activeFileTab?.zoom);
+  return Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+});
+const zoomPercent = computed(() => `${Math.round(imageZoom.value * 100)}%`);
+const isZoomChanged = computed(() => Math.abs(imageZoom.value - 1) > 0.001);
+const canZoomOut = computed(() => imageZoom.value > 0.25);
+const canZoomIn = computed(() => imageZoom.value < 4);
+const showProgressiveActions = computed(() => !isImage.value && (props.activeFileTab?.largeFile === true || props.activeFileTab?.readOnly === true));
 const progressiveMessage = computed(() => {
   const tab = props.activeFileTab || {};
   const loadedLines = Number(tab.loadedLines || tab.lines_shown || 0);
@@ -166,6 +208,56 @@ const progressiveMessage = computed(() => {
   padding: 16px;
   color: #b8c7d9;
   font-size: 0.86rem;
+}
+
+.image-preview-shell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.image-preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #2f4257;
+  color: #9fc0dd;
+  font-size: 0.78rem;
+  background: #162230;
+}
+
+.image-preview-hint {
+  color: #7f98b2;
+}
+
+.image-preview-stage {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background:
+    linear-gradient(45deg, rgba(255, 255, 255, 0.03) 25%, transparent 25%, transparent 75%, rgba(255, 255, 255, 0.03) 75%),
+    linear-gradient(45deg, rgba(255, 255, 255, 0.03) 25%, transparent 25%, transparent 75%, rgba(255, 255, 255, 0.03) 75%),
+    #0d1520;
+  background-position: 0 0, 12px 12px;
+  background-size: 24px 24px;
+}
+
+.image-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transform-origin: center center;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+  border-radius: 8px;
 }
 
 .editor-warning {

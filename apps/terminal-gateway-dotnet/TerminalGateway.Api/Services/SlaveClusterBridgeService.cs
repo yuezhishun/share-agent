@@ -14,18 +14,18 @@ public sealed class SlaveClusterBridgeService : BackgroundService
     private readonly ClusterCommandExecutor _executor;
     private readonly object _connectionGate = new();
     private readonly object _subscriptionGate = new();
-    private readonly IHubContext<TerminalHubV2> _terminalHubV2;
+    private readonly IHubContext<TerminalHub> _terminalHub;
 
     private volatile HubConnection? _connection;
     private volatile string? _lastError;
     private readonly Dictionary<string, int> _remoteInstanceSubscriptions = new(StringComparer.Ordinal);
 
-    public SlaveClusterBridgeService(GatewayOptions options, InstanceManager instances, ClusterCommandExecutor executor, IHubContext<TerminalHubV2> terminalHubV2)
+    public SlaveClusterBridgeService(GatewayOptions options, InstanceManager instances, ClusterCommandExecutor executor, IHubContext<TerminalHub> terminalHub)
     {
         _options = options;
         _instances = instances;
         _executor = executor;
-        _terminalHubV2 = terminalHubV2;
+        _terminalHub = terminalHub;
     }
 
     public bool IsEnabled =>
@@ -494,11 +494,11 @@ public sealed class SlaveClusterBridgeService : BackgroundService
             return;
         }
 
-        await _terminalHubV2.Clients.Group(TerminalHubV2.BuildInstanceGroup(instanceId))
-            .SendAsync("TerminalEvent", ConvertPayloadForV2(envelope.Payload));
+        await _terminalHub.Clients.Group(TerminalHub.BuildInstanceGroup(instanceId))
+            .SendAsync("TerminalEvent", ConvertPayload(envelope.Payload));
     }
 
-    private static object ConvertPayloadForV2(JsonElement payload)
+    private static object ConvertPayload(JsonElement payload)
     {
         var type = ReadString(payload, "type") ?? string.Empty;
 
@@ -506,8 +506,8 @@ public sealed class SlaveClusterBridgeService : BackgroundService
         {
             return new
             {
-                v = 2,
-                type = "term.v2.snapshot",
+                v = 1,
+                type = "term.snapshot",
                 instance_id = ReadString(payload, "instance_id"),
                 node_id = ReadString(payload, "node_id"),
                 node_name = ReadString(payload, "node_name"),
@@ -525,8 +525,8 @@ public sealed class SlaveClusterBridgeService : BackgroundService
         {
             return new
             {
-                v = 2,
-                type = "term.v2.raw",
+                v = 1,
+                type = "term.raw",
                 instance_id = ReadString(payload, "instance_id"),
                 node_id = ReadString(payload, "node_id"),
                 node_name = ReadString(payload, "node_name"),
@@ -541,7 +541,7 @@ public sealed class SlaveClusterBridgeService : BackgroundService
         {
             return new
             {
-                v = 2,
+                v = 1,
                 type = "term.exit",
                 instance_id = ReadString(payload, "instance_id"),
                 node_id = ReadString(payload, "node_id"),
@@ -555,8 +555,8 @@ public sealed class SlaveClusterBridgeService : BackgroundService
         {
             return new
             {
-                v = 2,
-                type = "term.v2.owner.changed",
+                v = 1,
+                type = "term.owner.changed",
                 instance_id = ReadString(payload, "instance_id"),
                 node_id = ReadString(payload, "node_id"),
                 node_name = ReadString(payload, "node_name"),

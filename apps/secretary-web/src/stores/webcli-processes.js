@@ -195,7 +195,7 @@ export const useWebCliProcessesStore = defineStore('webcliProcesses', {
       this.loadingNodes = true;
       this.setError('');
       try {
-        const response = await fetch(buildApiPath('/api/v2/nodes'));
+        const response = await fetch(buildApiPath('/api/nodes'));
         if (!response.ok) {
           throw new Error(await parseErrorMessage(response, `load nodes failed: ${response.status}`));
         }

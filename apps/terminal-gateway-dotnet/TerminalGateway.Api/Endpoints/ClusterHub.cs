@@ -14,7 +14,7 @@ public sealed class ClusterHub : Hub
     private readonly ClusterCommandExecutor _executor;
     private readonly ClusterEventDeduplicator _events;
     private readonly RemoteInstanceRegistry _remoteInstances;
-    private readonly IHubContext<TerminalHubV2> _terminalHubV2;
+    private readonly IHubContext<TerminalHub> _terminalHub;
     private readonly ClusterTerminalSubscriptionService _subscriptions;
 
     public ClusterHub(
@@ -24,7 +24,7 @@ public sealed class ClusterHub : Hub
         ClusterCommandExecutor executor,
         ClusterEventDeduplicator events,
         RemoteInstanceRegistry remoteInstances,
-        IHubContext<TerminalHubV2> terminalHubV2,
+        IHubContext<TerminalHub> terminalHub,
         ClusterTerminalSubscriptionService subscriptions)
     {
         _options = options;
@@ -33,7 +33,7 @@ public sealed class ClusterHub : Hub
         _executor = executor;
         _events = events;
         _remoteInstances = remoteInstances;
-        _terminalHubV2 = terminalHubV2;
+        _terminalHub = terminalHub;
         _subscriptions = subscriptions;
     }
 
@@ -131,8 +131,8 @@ public sealed class ClusterHub : Hub
 
         _remoteInstances.Upsert(instanceId, nodeId);
 
-        await _terminalHubV2.Clients.Group(TerminalHubV2.BuildInstanceGroup(instanceId))
-            .SendAsync("TerminalEvent", ConvertPayloadForV2(envelope.Payload));
+        await _terminalHub.Clients.Group(TerminalHub.BuildInstanceGroup(instanceId))
+            .SendAsync("TerminalEvent", ConvertPayload(envelope.Payload));
         await _subscriptions.ForwardClusterEventAsync(instanceId, nodeId, envelope.Payload);
 
         if (string.Equals(envelope.Type, "term.exit", StringComparison.Ordinal))
@@ -142,11 +142,11 @@ public sealed class ClusterHub : Hub
 
         if (hasGap)
         {
-            await _terminalHubV2.Clients.Group(TerminalHubV2.BuildInstanceGroup(instanceId))
+            await _terminalHub.Clients.Group(TerminalHub.BuildInstanceGroup(instanceId))
                 .SendAsync("TerminalEvent", new
                 {
-                    v = 2,
-                    type = "term.v2.sync.required",
+                    v = 1,
+                    type = "term.sync.required",
                     instance_id = instanceId,
                     node_id = nodeId,
                     node_name = boundNode.NodeName,
@@ -291,7 +291,7 @@ public sealed class ClusterHub : Hub
         return normalized;
     }
 
-    private static object ConvertPayloadForV2(JsonElement payload)
+    private static object ConvertPayload(JsonElement payload)
     {
         var type = payload.TryGetProperty("type", out var typeValue) && typeValue.ValueKind == JsonValueKind.String
             ? typeValue.GetString()
@@ -301,8 +301,8 @@ public sealed class ClusterHub : Hub
         {
             return new
             {
-                v = 2,
-                type = "term.v2.snapshot",
+                v = 1,
+                type = "term.snapshot",
                 instance_id = ReadString(payload, "instance_id"),
                 node_id = ReadString(payload, "node_id"),
                 node_name = ReadString(payload, "node_name"),
@@ -320,8 +320,8 @@ public sealed class ClusterHub : Hub
         {
             return new
             {
-                v = 2,
-                type = "term.v2.raw",
+                v = 1,
+                type = "term.raw",
                 instance_id = ReadString(payload, "instance_id"),
                 node_id = ReadString(payload, "node_id"),
                 node_name = ReadString(payload, "node_name"),
@@ -336,8 +336,8 @@ public sealed class ClusterHub : Hub
         {
             return new
             {
-                v = 2,
-                type = "term.v2.sync.complete",
+                v = 1,
+                type = "term.sync.complete",
                 instance_id = ReadString(payload, "instance_id"),
                 req_id = ReadString(payload, "req_id"),
                 to_seq = ReadLong(payload, "to_seq"),
@@ -349,7 +349,7 @@ public sealed class ClusterHub : Hub
         {
             return new
             {
-                v = 2,
+                v = 1,
                 type = "term.exit",
                 instance_id = ReadString(payload, "instance_id"),
                 node_id = ReadString(payload, "node_id"),
@@ -363,8 +363,8 @@ public sealed class ClusterHub : Hub
         {
             return new
             {
-                v = 2,
-                type = "term.v2.owner.changed",
+                v = 1,
+                type = "term.owner.changed",
                 instance_id = ReadString(payload, "instance_id"),
                 node_id = ReadString(payload, "node_id"),
                 node_name = ReadString(payload, "node_name"),

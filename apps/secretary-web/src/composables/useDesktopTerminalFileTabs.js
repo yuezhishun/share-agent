@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue';
-import { FILE_CHUNK_BYTES, FILE_CHUNK_MAX_LINES, resolveEditorKind } from '../utils/desktop-terminal-v4.js';
+import { FILE_CHUNK_BYTES, FILE_CHUNK_MAX_LINES, resolveEditorKind } from '../utils/desktop-terminal.js';
 
 export function useDesktopTerminalFileTabs({
   buildNodeFileApiPath,
@@ -34,16 +34,19 @@ export function useDesktopTerminalFileTabs({
   }
 
   function buildEmptyFileTab(tabId, normalizedNodeId, normalizedPath, displayName) {
+    const editorKind = resolveEditorKind(normalizedPath);
     return {
       id: tabId,
       nodeId: normalizedNodeId,
       path: normalizedPath,
       name: displayName || normalizedPath.split('/').pop() || normalizedPath,
       size: 0,
-      editorKind: resolveEditorKind(normalizedPath),
+      editorKind,
       loading: true,
       error: '',
       content: '',
+      previewUrl: '',
+      zoom: 1,
       lastSavedContent: '',
       dirty: false,
       truncated: false,
@@ -121,6 +124,22 @@ export function useDesktopTerminalFileTabs({
     fileTabs.value = [...fileTabs.value, tab];
     switchCenterTab(tabId);
 
+    if (tab.editorKind === 'image') {
+      patchFileTab(tabId, {
+        size: Number.isFinite(Number(tab.size)) ? tab.size : 0,
+        previewUrl: buildNodeFileApiPath(normalizedNodeId, '/download', {
+          path: normalizedPath
+        }),
+        loading: false,
+        readOnly: true,
+        dirty: false,
+        truncated: false,
+        largeFile: false,
+        mode: 'preview'
+      });
+      return;
+    }
+
     try {
       const payload = await openFileDocument(normalizedPath, normalizedNodeId);
       patchFileTab(tabId, mapFileReadPayload(payload));
@@ -166,13 +185,25 @@ export function useDesktopTerminalFileTabs({
 
   function updateActiveFileContent(value) {
     const tab = activeFileTab.value;
-    if (!tab || tab.readOnly) {
+    if (!tab || tab.readOnly || tab.editorKind === 'image') {
       return;
     }
     patchFileTab(tab.id, {
       content: String(value ?? ''),
       dirty: String(value ?? '') !== tab.lastSavedContent
     });
+  }
+
+  function updateActiveImageZoom(direction) {
+    const tab = activeFileTab.value;
+    if (!tab || tab.editorKind !== 'image') {
+      return;
+    }
+    const current = Number(tab.zoom) || 1;
+    const next = direction === 'reset'
+      ? 1
+      : Math.min(4, Math.max(0.25, Number((current + (direction === 'in' ? 0.25 : -0.25)).toFixed(2))));
+    patchFileTab(tab.id, { zoom: next });
   }
 
   async function saveActiveFileTab() {
@@ -314,6 +345,7 @@ export function useDesktopTerminalFileTabs({
     openFileEntry,
     closeFileTab,
     updateActiveFileContent,
+    updateActiveImageZoom,
     saveActiveFileTab,
     reloadFileTab,
     loadMoreFileTab,

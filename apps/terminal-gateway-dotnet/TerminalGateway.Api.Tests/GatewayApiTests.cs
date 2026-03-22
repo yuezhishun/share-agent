@@ -259,7 +259,7 @@ public class GatewayApiTests
             command = "bash",
             args = new[] { "-i" },
             cols = 80,
-            rows = 25,
+            rows = 10,
             cwd = "/home/yueyuan"
         });
         Assert.Equal(HttpStatusCode.OK, createRes.StatusCode);
@@ -373,6 +373,66 @@ public class GatewayApiTests
         Assert.True(rawReplay.TryGetProperty("seq", out var replaySeqProp), "raw replay missing seq");
         Assert.Equal(toSeqProp.GetInt32(), replaySeqProp.GetInt32());
 
+    }
+
+    [Fact]
+    public async Task SignalR_History_Sync_Work()
+    {
+        await using var app = new GatewayFactory();
+        using var client = app.CreateClient();
+
+        var createRes = await client.PostAsJsonAsync("/api/instances", new
+        {
+            command = "bash",
+            args = new[] { "-i" },
+            cols = 80,
+            rows = 25,
+            cwd = "/home/yueyuan"
+        });
+        Assert.Equal(HttpStatusCode.OK, createRes.StatusCode);
+        var created = JsonDocument.Parse(await createRes.Content.ReadAsStringAsync()).RootElement;
+        var instanceId = created.GetProperty("instance_id").GetString()!;
+
+        await using var hub = BuildHubConnection(client);
+        List<JsonElement> messages = [];
+        var gate = new object();
+
+        hub.On<JsonElement>("TerminalEvent", msg =>
+        {
+            lock (gate)
+            {
+                messages.Add(msg.Clone());
+            }
+        });
+
+        await hub.StartAsync();
+        await hub.InvokeAsync("JoinInstance", new { instanceId });
+        _ = await WaitForMessageAsync(messages, gate, msg => GetType(msg) == "term.snapshot", TimeSpan.FromSeconds(8));
+
+        await hub.InvokeAsync("SendInput", new
+        {
+            instanceId,
+            data = "for i in $(seq 1 35); do echo history-line-$i; done\r"
+        });
+
+        _ = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.raw" && JsonSerializer.Serialize(msg).Contains("history-line-35", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(8));
+
+        await hub.InvokeAsync("RequestSync", new { instanceId, type = "screen" });
+        var snapshot = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.snapshot" && msg.TryGetProperty("history", out var history) && history.GetProperty("available").GetInt32() > 0,
+            TimeSpan.FromSeconds(8));
+
+        var before = snapshot.GetProperty("history").GetProperty("newest_cursor").GetString();
+        await hub.InvokeAsync("RequestSync", new { instanceId, type = "history", before, limit = 50, reqId = "history-test" });
+
+        var historyChunk = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.history.chunk" && GetString(msg, "req_id") == "history-test",
+            TimeSpan.FromSeconds(8));
+
+        Assert.True(historyChunk.TryGetProperty("lines", out var lines) && lines.GetArrayLength() > 0, "history chunk should include lines");
+        Assert.Contains("history-line-", JsonSerializer.Serialize(historyChunk), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1101,11 +1161,11 @@ public class GatewayApiTests
 
         await WaitUntilAsync(async () =>
         {
-            var payload = JsonDocument.Parse(await masterClient.GetStringAsync("/api/v2/nodes")).RootElement;
+            var payload = JsonDocument.Parse(await masterClient.GetStringAsync("/api/nodes")).RootElement;
             return payload.GetProperty("items").EnumerateArray().Any(item => item.GetProperty("node_id").GetString() == "slave-v2-nodes");
         }, TimeSpan.FromSeconds(10));
 
-        var response = await slaveClient.GetAsync("/api/v2/nodes");
+        var response = await slaveClient.GetAsync("/api/nodes");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
         var items = payload.GetProperty("items").EnumerateArray().ToList();
@@ -1134,7 +1194,7 @@ public class GatewayApiTests
         });
         using var masterClient = masterApp.CreateClient();
 
-        var createResponse = await masterClient.PostAsJsonAsync("/api/v2/instances", new
+        var createResponse = await masterClient.PostAsJsonAsync("/api/instances", new
         {
             command = "bash",
             args = new[] { "-i" },
@@ -1159,11 +1219,11 @@ public class GatewayApiTests
 
         await WaitUntilAsync(async () =>
         {
-            var nodesPayload = JsonDocument.Parse(await masterClient.GetStringAsync("/api/v2/nodes")).RootElement;
+            var nodesPayload = JsonDocument.Parse(await masterClient.GetStringAsync("/api/nodes")).RootElement;
             return nodesPayload.GetProperty("items").EnumerateArray().Any(item => item.GetProperty("node_id").GetString() == "slave-v2-instances");
         }, TimeSpan.FromSeconds(10));
 
-        var response = await slaveClient.GetAsync("/api/v2/instances");
+        var response = await slaveClient.GetAsync("/api/instances");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
         var items = payload.GetProperty("items").EnumerateArray().ToList();
@@ -1202,11 +1262,11 @@ public class GatewayApiTests
 
         await WaitUntilAsync(async () =>
         {
-            var payload = JsonDocument.Parse(await masterClient.GetStringAsync("/api/v2/nodes")).RootElement;
+            var payload = JsonDocument.Parse(await masterClient.GetStringAsync("/api/nodes")).RootElement;
             return payload.GetProperty("items").EnumerateArray().Any(item => item.GetProperty("node_id").GetString() == "slave-v2-local-instance");
         }, TimeSpan.FromSeconds(10));
 
-        var createResponse = await slaveClient.PostAsJsonAsync("/api/v2/nodes/slave-v2-local-instance/instances", new
+        var createResponse = await slaveClient.PostAsJsonAsync("/api/nodes/slave-v2-local-instance/instances", new
         {
             command = "bash",
             args = new[] { "-i" },
@@ -1219,7 +1279,7 @@ public class GatewayApiTests
         var instanceId = created.GetProperty("instance_id").GetString();
         Assert.False(string.IsNullOrWhiteSpace(instanceId));
 
-        var response = await slaveClient.GetAsync("/api/v2/instances");
+        var response = await slaveClient.GetAsync("/api/instances");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
         Assert.Contains(payload.GetProperty("items").EnumerateArray(), item =>
@@ -1260,7 +1320,7 @@ public class GatewayApiTests
             NodeOnline = false
         });
 
-        var createResponse = await slaveClient.PostAsJsonAsync("/api/v2/nodes/slave-v2-cache-fallback/instances", new
+        var createResponse = await slaveClient.PostAsJsonAsync("/api/nodes/slave-v2-cache-fallback/instances", new
         {
             command = "bash",
             args = new[] { "-i" },
@@ -1273,7 +1333,7 @@ public class GatewayApiTests
         var localInstanceId = created.GetProperty("instance_id").GetString();
         Assert.False(string.IsNullOrWhiteSpace(localInstanceId));
 
-        var response = await slaveClient.GetAsync("/api/v2/instances");
+        var response = await slaveClient.GetAsync("/api/instances");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
         var items = payload.GetProperty("items").EnumerateArray().ToList();
@@ -1322,7 +1382,7 @@ public class GatewayApiTests
 
         await Task.Delay(TimeSpan.FromMilliseconds(1200));
 
-        var response = await slaveClient.GetAsync("/api/v2/instances");
+        var response = await slaveClient.GetAsync("/api/instances");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
         var items = payload.GetProperty("items").EnumerateArray().ToList();
@@ -1359,11 +1419,11 @@ public class GatewayApiTests
 
         await WaitUntilAsync(async () =>
         {
-            var payload = JsonDocument.Parse(await masterClient.GetStringAsync("/api/v2/nodes")).RootElement;
+            var payload = JsonDocument.Parse(await masterClient.GetStringAsync("/api/nodes")).RootElement;
             return payload.GetProperty("items").EnumerateArray().Any(item => item.GetProperty("node_id").GetString() == "slave-v2-bridge");
         }, TimeSpan.FromSeconds(10));
 
-        var createResponse = await slaveClient.PostAsJsonAsync("/api/v2/nodes/master-v2-bridge/instances", new
+        var createResponse = await slaveClient.PostAsJsonAsync("/api/nodes/master-v2-bridge/instances", new
         {
             command = "bash",
             args = new[] { "-i" },
@@ -1410,7 +1470,7 @@ public class GatewayApiTests
             TimeSpan.FromSeconds(8));
         Assert.Equal("Master V2 Bridge", syncedSnapshot.GetProperty("node_name").GetString());
 
-        var deleteResponse = await slaveClient.DeleteAsync($"/api/v2/nodes/master-v2-bridge/instances/{instanceId}");
+        var deleteResponse = await slaveClient.DeleteAsync($"/api/nodes/master-v2-bridge/instances/{instanceId}");
         Assert.Equal(HttpStatusCode.OK, deleteResponse.StatusCode);
 
         HubException? syncException = null;
@@ -1506,11 +1566,11 @@ public class GatewayApiTests
 
         await WaitUntilAsync(async () =>
         {
-            var payload = JsonDocument.Parse(await masterClient.GetStringAsync("/api/v2/nodes")).RootElement;
+            var payload = JsonDocument.Parse(await masterClient.GetStringAsync("/api/nodes")).RootElement;
             return payload.GetProperty("items").EnumerateArray().Any(item => item.GetProperty("node_id").GetString() == "slave-v2-filter");
         }, TimeSpan.FromSeconds(10));
 
-        var createRemoteResponse = await masterClient.PostAsJsonAsync("/api/v2/nodes/other-slave-v2-filter/instances", new
+        var createRemoteResponse = await masterClient.PostAsJsonAsync("/api/nodes/other-slave-v2-filter/instances", new
         {
             command = "bash",
             args = new[] { "-i" },
@@ -1520,7 +1580,7 @@ public class GatewayApiTests
         });
         Assert.Equal(HttpStatusCode.OK, createRemoteResponse.StatusCode);
 
-        var nodesResponse = await slaveClient.GetAsync("/api/v2/nodes");
+        var nodesResponse = await slaveClient.GetAsync("/api/nodes");
         Assert.Equal(HttpStatusCode.OK, nodesResponse.StatusCode);
         var nodesPayload = JsonDocument.Parse(await nodesResponse.Content.ReadAsStringAsync()).RootElement;
         var nodeIds = nodesPayload.GetProperty("items").EnumerateArray().Select(item => item.GetProperty("node_id").GetString()).ToList();
@@ -1528,7 +1588,7 @@ public class GatewayApiTests
         Assert.Contains("slave-v2-filter", nodeIds);
         Assert.DoesNotContain("other-slave-v2-filter", nodeIds);
 
-        var instancesResponse = await slaveClient.GetAsync("/api/v2/instances");
+        var instancesResponse = await slaveClient.GetAsync("/api/instances");
         Assert.Equal(HttpStatusCode.OK, instancesResponse.StatusCode);
         var instancesPayload = JsonDocument.Parse(await instancesResponse.Content.ReadAsStringAsync()).RootElement;
         Assert.DoesNotContain(instancesPayload.GetProperty("items").EnumerateArray(),
@@ -1581,7 +1641,7 @@ public class GatewayApiTests
             }
         });
 
-        var instancesResponse = await client.GetAsync("/api/v2/instances");
+        var instancesResponse = await client.GetAsync("/api/instances");
         Assert.Equal(HttpStatusCode.OK, instancesResponse.StatusCode);
         var instancesPayload = JsonDocument.Parse(await instancesResponse.Content.ReadAsStringAsync()).RootElement;
         Assert.Contains(instancesPayload.GetProperty("items").EnumerateArray(), item =>
@@ -1595,7 +1655,7 @@ public class GatewayApiTests
             items = Array.Empty<object>()
         });
 
-        var afterResponse = await client.GetAsync("/api/v2/instances");
+        var afterResponse = await client.GetAsync("/api/instances");
         Assert.Equal(HttpStatusCode.OK, afterResponse.StatusCode);
         var afterPayload = JsonDocument.Parse(await afterResponse.Content.ReadAsStringAsync()).RootElement;
         Assert.DoesNotContain(afterPayload.GetProperty("items").EnumerateArray(),
@@ -1630,11 +1690,11 @@ public class GatewayApiTests
 
         await WaitUntilAsync(async () =>
         {
-            var payload = JsonDocument.Parse(await slaveClient.GetStringAsync("/api/v2/nodes")).RootElement;
+            var payload = JsonDocument.Parse(await slaveClient.GetStringAsync("/api/nodes")).RootElement;
             return payload.GetProperty("items").EnumerateArray().Any(item => item.GetProperty("node_id").GetString() == "master-v2-join-cache");
         }, TimeSpan.FromSeconds(10));
 
-        var createResponse = await masterClient.PostAsJsonAsync("/api/v2/instances", new
+        var createResponse = await masterClient.PostAsJsonAsync("/api/instances", new
         {
             command = "bash",
             args = new[] { "-i" },
@@ -1646,7 +1706,7 @@ public class GatewayApiTests
         var createPayload = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
         var instanceId = createPayload.GetProperty("instance_id").GetString()!;
 
-        var instancesResponse = await slaveClient.GetAsync("/api/v2/instances");
+        var instancesResponse = await slaveClient.GetAsync("/api/instances");
         Assert.Equal(HttpStatusCode.OK, instancesResponse.StatusCode);
         var instancesPayload = JsonDocument.Parse(await instancesResponse.Content.ReadAsStringAsync()).RootElement;
         Assert.Contains(instancesPayload.GetProperty("items").EnumerateArray(),
@@ -1674,7 +1734,7 @@ public class GatewayApiTests
         await terminalHub.InvokeAsync("JoinInstance", new { instanceId });
 
         var snapshot = await WaitForMessageAsync(messages, gate, msg =>
-            (GetType(msg) == "term.v2.snapshot" || GetType(msg) == "term.snapshot") && GetString(msg, "instance_id") == instanceId, TimeSpan.FromSeconds(8));
+            (GetType(msg) == "term.snapshot" || GetType(msg) == "term.snapshot") && GetString(msg, "instance_id") == instanceId, TimeSpan.FromSeconds(8));
         Assert.Equal("master-v2-join-cache", snapshot.GetProperty("node_id").GetString());
     }
 
@@ -2423,7 +2483,7 @@ public class GatewayApiTests
     private static HubConnection BuildHubConnection(HttpClient client)
     {
         var baseAddress = client.BaseAddress ?? throw new InvalidOperationException("missing base address");
-        var target = new Uri(baseAddress, "/hubs/terminal-v2");
+        var target = new Uri(baseAddress, "/hubs/terminal");
         return new HubConnectionBuilder()
             .WithUrl(target)
             .Build();
@@ -2455,12 +2515,12 @@ public class GatewayApiTests
 
         return text switch
         {
-            "term.v2.snapshot" => "term.snapshot",
-            "term.v2.raw" => "term.raw",
-            "term.v2.resize.ack" => "term.resize.ack",
-            "term.v2.sync.complete" => "term.sync.complete",
-            "term.v2.sync.required" => "term.sync.required",
-            "term.v2.owner.changed" => "term.owner.changed",
+            "term.snapshot" => "term.snapshot",
+            "term.raw" => "term.raw",
+            "term.resize.ack" => "term.resize.ack",
+            "term.sync.complete" => "term.sync.complete",
+            "term.sync.required" => "term.sync.required",
+            "term.owner.changed" => "term.owner.changed",
             _ => text
         };
     }

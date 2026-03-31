@@ -80,6 +80,17 @@
                 <span class="tab-text">{{ tab.name }}</span>
                 <i class="fa-solid fa-xmark close-icon" @click.stop="closeFileTab(tab.id)" />
               </button>
+
+              <button
+                v-if="showCloseAllFilesEntry"
+                type="button"
+                class="tab-btn tabs-action-btn"
+                :title="closeAllFilesTitle"
+                @click="closeAllFileTabs"
+              >
+                <i class="fa-regular fa-folder-open" />
+                <span>关闭文件</span>
+              </button>
             </div>
             <div class="status-text"><span data-testid="status"><i class="fa-regular fa-keyboard" /> {{ terminalStore.status }}</span></div>
           </div>
@@ -126,6 +137,8 @@
         :show-shortcut-editor="showShortcutEditor"
         :shortcut-editor="shortcutEditor"
         :shortcut-groups="shortcutGroups"
+        :voice-mode-enabled="voiceModeEnabled"
+        :voice-mode-shortcut-label="voiceModeShortcutLabel"
         :show-terminal-size-editor="showTerminalSizeEditor"
         :terminal-size-draft-cols="terminalSizeDraftCols"
         :terminal-size-draft-rows="terminalSizeDraftRows"
@@ -144,6 +157,7 @@
         @toggle-folder-creator="toggleFolderCreator"
         @pick-upload-files="pickUploadFiles"
         @toggle-shortcut-editor="toggleShortcutEditor"
+        @toggle-voice-mode="toggleVoiceMode"
         @toggle-terminal-size-editor="toggleTerminalSizeEditor"
         @update:terminal-size-draft-cols="terminalSizeDraftCols = $event"
         @update:terminal-size-draft-rows="terminalSizeDraftRows = $event"
@@ -171,6 +185,19 @@
     </div>
 
     <input ref="uploadFilesInputRef" class="hidden-input" type="file" multiple @change="onUploadFilesChange" />
+    <textarea
+      ref="voiceInputRef"
+      v-model="voiceInputValue"
+      class="voice-mode-input"
+      data-testid="voice-mode-input"
+      autocapitalize="off"
+      autocomplete="off"
+      autocorrect="off"
+      spellcheck="false"
+      @compositionstart="onVoiceCompositionStart"
+      @compositionend="onVoiceCompositionEnd"
+      @input="onVoiceInput"
+    />
     <input v-model="command" data-testid="command-input" class="test-hook" />
     <input v-model="argsInput" data-testid="args-input" class="test-hook" />
     <input v-model="cwd" data-testid="cwd-input" class="test-hook" />
@@ -187,9 +214,9 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { Terminal } from 'xterm';
+import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import 'xterm/css/xterm.css';
+import '@xterm/xterm/css/xterm.css';
 import { useWebCliTerminalStore } from '../stores/webcli-terminal.js';
 import { useWebCliFilesStore } from '../stores/webcli-files.js';
 import { useWebCliRecipesStore } from '../stores/webcli-recipes.js';
@@ -227,6 +254,11 @@ import {
   toShortcutPayload,
   buildRecipeEditor as buildRecipeEditorState
 } from '../utils/desktop-terminal.js';
+import {
+  DEFAULT_VOICE_COMMIT_DELAY_MS,
+  VOICE_MODE_SHORTCUT_LABEL,
+  isVoiceToggleShortcut
+} from '../utils/voice-terminal.js';
 
 const terminalStore = useWebCliTerminalStore();
 const filesStore = useWebCliFilesStore();
@@ -272,6 +304,11 @@ const plainTextContent = ref('');
 const plainTextTitle = ref('纯文本');
 const plainTextVisible = ref(false);
 const plainOutputProbe = ref('');
+const voiceInputRef = ref(null);
+const voiceInputValue = ref('');
+const voiceModeEnabled = ref(false);
+const voiceModeShortcutLabel = VOICE_MODE_SHORTCUT_LABEL;
+const voiceCompositionActive = ref(false);
 
 let term = null;
 let fitAddon = null;
@@ -283,6 +320,8 @@ let terminalGeometryInitialized = false;
 let terminalResizeObserver = null;
 let pendingTerminalFitFrame = 0;
 let terminalFitRequestId = 0;
+let terminalInputElement = null;
+let voiceCommitTimer = 0;
 
 const recipeItems = computed(() => [...recipesStore.items].sort((a, b) => {
   const groupCompare = String(a.group || 'general').localeCompare(String(b.group || 'general'), 'zh-Hans-CN');
@@ -615,7 +654,199 @@ function toggleShortcutEditor() {
 }
 
 function focusTerminal() {
+  if (voiceModeEnabled.value) {
+    focusVoiceInput();
+    return;
+  }
   term?.focus();
+  terminalInputElement?.focus?.({ preventScroll: true });
+}
+
+function focusVoiceInput() {
+  voiceInputRef.value?.focus?.({ preventScroll: true });
+}
+
+function clearVoiceInputBuffer() {
+  voiceInputValue.value = '';
+  if (voiceInputRef.value && typeof voiceInputRef.value.value === 'string') {
+    voiceInputRef.value.value = '';
+  }
+}
+
+function cancelPendingVoiceCommit() {
+  if (voiceCommitTimer) {
+    clearTimeout(voiceCommitTimer);
+    voiceCommitTimer = 0;
+  }
+}
+
+function isVoiceToggleContextAvailable() {
+  return activeCenterTab.value === 'terminal' && typeof document !== 'undefined';
+}
+
+function isEditableElement(target) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  if (target.isContentEditable) {
+    return true;
+  }
+
+  const tagName = String(target.tagName || '').toLowerCase();
+  return tagName === 'input' || tagName === 'textarea' || tagName === 'select';
+}
+
+function isVoiceToggleBlockedContext() {
+  if (!isVoiceToggleContextAvailable()) {
+    return false;
+  }
+
+  const active = document.activeElement;
+  if (!active) {
+    return false;
+  }
+
+  if (active === voiceInputRef.value) {
+    return false;
+  }
+
+  if (terminalRef.value?.contains?.(active) === true) {
+    return false;
+  }
+
+  return isEditableElement(active);
+}
+
+function applyVoiceMode(next, statusMessage = '', options = {}) {
+  const { preserveFocus = false, preserveBuffer = false } = options;
+  voiceModeEnabled.value = next === true;
+  voiceCompositionActive.value = false;
+  cancelPendingVoiceCommit();
+  if (!preserveBuffer) {
+    clearVoiceInputBuffer();
+  }
+  nextTick(() => {
+    if (preserveFocus) {
+      return;
+    }
+    if (voiceModeEnabled.value) {
+      focusVoiceInput();
+    } else {
+      focusTerminal();
+    }
+  });
+  terminalStore.setStatus(statusMessage || (voiceModeEnabled.value ? '语音模式已开启' : '语音模式已关闭'));
+}
+
+function toggleVoiceMode() {
+  applyVoiceMode(!voiceModeEnabled.value);
+}
+
+async function flushVoiceInput() {
+  cancelPendingVoiceCommit();
+  if (!voiceModeEnabled.value || voiceCompositionActive.value) {
+    return;
+  }
+
+  const payload = String(voiceInputValue.value || '').trim();
+  if (!payload) {
+    clearVoiceInputBuffer();
+    return;
+  }
+
+  if (!terminalStore.wsConnected || !terminalStore.selectedInstanceId) {
+    terminalStore.setStatus('语音模式已激活，但当前没有已连接终端');
+    return;
+  }
+
+  await terminalStore.sendInput(payload, { source: 'voice' });
+  clearVoiceInputBuffer();
+  nextTick(() => {
+    if (voiceModeEnabled.value) {
+      focusVoiceInput();
+    }
+  });
+}
+
+function appendVoiceInputText(text, options = {}) {
+  const payload = String(text || '');
+  if (!payload) {
+    return;
+  }
+  voiceInputValue.value = `${String(voiceInputValue.value || '')}${payload}`;
+  if (!options.deferCommit && !voiceCompositionActive.value) {
+    scheduleVoiceCommit();
+  }
+}
+
+function scheduleVoiceCommit() {
+  cancelPendingVoiceCommit();
+  voiceCommitTimer = setTimeout(() => {
+    flushVoiceInput().catch((error) => {
+      terminalStore.setStatus(String(error?.message || error || 'voice input failed'));
+    });
+  }, DEFAULT_VOICE_COMMIT_DELAY_MS);
+}
+
+function onVoiceCompositionStart() {
+  voiceCompositionActive.value = true;
+  cancelPendingVoiceCommit();
+}
+
+function onVoiceCompositionEnd() {
+  voiceCompositionActive.value = false;
+  scheduleVoiceCommit();
+}
+
+function onVoiceInput() {
+  if (!voiceModeEnabled.value) {
+    clearVoiceInputBuffer();
+    return;
+  }
+  if (voiceCompositionActive.value) {
+    return;
+  }
+  scheduleVoiceCommit();
+}
+
+function onGlobalTerminalKeyDown(event) {
+  if (!isVoiceToggleContextAvailable()) {
+    return;
+  }
+  if (!isVoiceToggleShortcut(event)) {
+    return;
+  }
+  if (isVoiceToggleBlockedContext()) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  applyVoiceMode(!voiceModeEnabled.value, voiceModeEnabled.value ? '语音模式已关闭' : '语音模式已开启');
+}
+
+function resolveTerminalInputElement() {
+  terminalInputElement = terminalRef.value?.querySelector('.xterm-helper-textarea') || null;
+  return terminalInputElement;
+}
+
+function bindTerminalInputHandlers() {
+  const input = resolveTerminalInputElement();
+  if (!input) {
+    return;
+  }
+
+  input.setAttribute('aria-label', 'Terminal input');
+  input.setAttribute('autocapitalize', 'off');
+  input.setAttribute('autocomplete', 'off');
+  input.setAttribute('autocorrect', 'off');
+  input.setAttribute('spellcheck', 'false');
+  input.addEventListener('paste', onTerminalPaste);
+}
+
+function unbindTerminalInputHandlers() {
+  terminalInputElement?.removeEventListener('paste', onTerminalPaste);
+  terminalInputElement = null;
 }
 
 function setTerminalDraftFromCurrent() {
@@ -726,14 +957,40 @@ async function fitTerminal() {
 }
 
 async function resolveCreateGeometry() {
-  const measured = await fitTerminal();
+  await primeCreateGeometryMeasurement();
+
+  const measured = await measureStableTerminalGeometry({
+    activeCenterTab: activeCenterTab.value,
+    hostElement: terminalRef.value,
+    fitAddon,
+    term,
+    isDocumentHidden: () => typeof document !== 'undefined' && document.hidden,
+    attempts: 16,
+    intervalMs: 50
+  });
   if (measured?.cols > 0 && measured?.rows > 0) {
+    try {
+      fitAddon?.fit?.();
+    } catch {
+    }
+    if (Number(term?.cols) !== measured.cols || Number(term?.rows) !== measured.rows) {
+      applyLocalTerminalGeometry(measured.cols, measured.rows);
+    } else {
+      updateStoredTerminalGeometry(measured.cols, measured.rows);
+    }
     return measured;
   }
 
+  if (lastMeasuredGeometry?.cols > 0 && lastMeasuredGeometry?.rows > 0) {
+    return {
+      cols: lastMeasuredGeometry.cols,
+      rows: lastMeasuredGeometry.rows
+    };
+  }
+
   return {
-    cols: Math.max(1, Number(cols.value) || 120),
-    rows: Math.max(1, Number(rows.value) || 34)
+    cols: Math.max(1, Number(cols.value) || 1),
+    rows: Math.max(1, Number(rows.value) || 1)
   };
 }
 
@@ -767,9 +1024,18 @@ function switchCenterTab(tabId) {
   if (tabId === 'terminal') {
     nextTick(() => {
       scheduleTerminalFit('tab_switch');
-      focusTerminal();
+      if (voiceModeEnabled.value) {
+        focusVoiceInput();
+      } else {
+        focusTerminal();
+      }
       syncVisibleTerminal('tab_switch');
     });
+    return;
+  }
+
+  if (voiceModeEnabled.value) {
+    applyVoiceMode(false);
   }
 }
 
@@ -783,6 +1049,7 @@ const {
   activeFileTab,
   openFileEntry,
   closeFileTab,
+  closeAllFileTabs,
   updateActiveFileContent,
   saveActiveFileTab,
   reloadFileTab,
@@ -799,6 +1066,9 @@ const {
   activeCenterTab,
   setStatus: (message) => terminalStore.setStatus(message)
 });
+
+const showCloseAllFilesEntry = computed(() => fileTabs.value.length > 1);
+const closeAllFilesTitle = computed(() => `关闭全部文件标签（当前 ${fileTabs.value.length} 个）`);
 
 async function onTargetNodeChange(nodeId) {
   createNodeId.value = String(nodeId || '').trim();
@@ -1266,14 +1536,28 @@ function saveCurrentAsRecipe() {
 }
 
 function onTerminalPaste(event) {
+  event.preventDefault();
+  event.stopPropagation();
+
   const text = event?.clipboardData?.getData('text');
-  if (!text) {
+  if (text) {
+    terminalStore.sendBracketedPaste(text).finally(() => {
+      focusTerminal();
+    });
     return;
   }
-  event.preventDefault();
-  terminalStore.sendBracketedPaste(text).finally(() => {
-    focusTerminal();
-  });
+
+  readClipboardText()
+    .then((value) => {
+      if (!value) {
+        return;
+      }
+      return terminalStore.sendBracketedPaste(value);
+    })
+    .catch(() => {})
+    .finally(() => {
+      focusTerminal();
+    });
 }
 
 async function writeClipboardText(text) {
@@ -1340,6 +1624,11 @@ function onTerminalContextMenu(event) {
 }
 
 function onTerminalKeyEvent(event) {
+  if (voiceModeEnabled.value && !isCopyKeyboardEvent(event)) {
+    event.preventDefault();
+    return false;
+  }
+
   if (!isCopyKeyboardEvent(event) || !hasTerminalSelection()) {
     return true;
   }
@@ -1357,6 +1646,34 @@ function wait(ms) {
     return Promise.resolve();
   }
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForAnimationFrame() {
+  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+    return new Promise((resolve) => {
+      window.requestAnimationFrame(() => resolve());
+    });
+  }
+  return wait(16);
+}
+
+async function primeCreateGeometryMeasurement() {
+  await nextTick();
+  if (!isTerminalViewportRenderable(activeCenterTab.value, terminalRef.value)) {
+    return;
+  }
+
+  try {
+    fitAddon?.fit?.();
+  } catch {
+  }
+  await waitForAnimationFrame();
+
+  try {
+    fitAddon?.fit?.();
+  } catch {
+  }
+  await waitForAnimationFrame();
 }
 
 function cancelPendingTerminalFit() {
@@ -1450,6 +1767,7 @@ onMounted(async () => {
   fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.open(terminalRef.value);
+  bindTerminalInputHandlers();
   term.attachCustomKeyEventHandler(onTerminalKeyEvent);
   if (typeof window !== 'undefined' && typeof window.__WEBCLI_DESKTOP_TERM_HOOK__ === 'function') {
     window.__WEBCLI_DESKTOP_TERM_HOOK__(term);
@@ -1460,12 +1778,14 @@ onMounted(async () => {
     renderer.onMessage(message);
   });
 
-  term.onData((data) => terminalStore.sendInput(data));
+  term.onData((data) => terminalStore.sendInput(data, { source: 'terminal' }));
   term.onResize(handleTerminalResize);
   terminalRef.value?.addEventListener('copy', onTerminalCopy);
   terminalRef.value?.addEventListener('paste', onTerminalPaste);
   terminalRef.value?.addEventListener('contextmenu', onTerminalContextMenu);
+  terminalRef.value?.addEventListener('mousedown', focusTerminal);
   document.addEventListener('visibilitychange', onDocumentVisibilityChange);
+  document.addEventListener('keydown', onGlobalTerminalKeyDown, true);
   if (typeof window !== 'undefined') {
     window.addEventListener('resize', scheduleTerminalFit);
   }
@@ -1484,22 +1804,30 @@ onMounted(async () => {
     createNodeId.value = String(terminalStore.resolvePreferredNodeId(terminalStore.selectedInstance?.node_id || ''));
   }
   await loadRecipeFolders(createNodeId.value);
-  focusTerminal();
+  if (voiceModeEnabled.value) {
+    focusVoiceInput();
+  } else {
+    focusTerminal();
+  }
 });
 
 onBeforeUnmount(() => {
   cancelPendingTerminalFit();
+  cancelPendingVoiceCommit();
   unsubscribe?.();
   terminalStore.disconnect();
   document.removeEventListener('visibilitychange', onDocumentVisibilityChange);
+  document.removeEventListener('keydown', onGlobalTerminalKeyDown, true);
   if (typeof window !== 'undefined') {
     window.removeEventListener('resize', scheduleTerminalFit);
   }
+  unbindTerminalInputHandlers();
   terminalResizeObserver?.disconnect?.();
   terminalResizeObserver = null;
   terminalRef.value?.removeEventListener('copy', onTerminalCopy);
   terminalRef.value?.removeEventListener('paste', onTerminalPaste);
   terminalRef.value?.removeEventListener('contextmenu', onTerminalContextMenu);
+  terminalRef.value?.removeEventListener('mousedown', focusTerminal);
   term?.dispose();
 });
 
@@ -1518,10 +1846,11 @@ watch(activeCenterTab, (tabId) => {
 }
 
 .app {
-  --terminal-display-width: 1450px;
+  --terminal-display-width: 1500px;
   --terminal-padding: 8px;
-  --terminal-scrollbar-width: 55px;
-  --terminal-shell-width: calc(var(--terminal-display-width) + (var(--terminal-padding) * 2) + var(--terminal-scrollbar-width));
+  --terminal-scrollbar-width: 30px;
+  --terminal-scrollbar-reserve-width: 20px;
+  --terminal-shell-width: calc(var(--terminal-display-width) + var(--terminal-scrollbar-reserve-width));
   font-family: 'Inter', sans-serif;
   background-color: #1e1e1e;
   min-height: 100vh;
@@ -1718,6 +2047,18 @@ button.primary:hover {
   color: #fff;
 }
 
+.tabs-action-btn {
+  flex: 0 0 auto;
+  background-color: #3a3322;
+  border-color: #6f5a2a;
+  color: #f0d89a;
+}
+
+.tabs-action-btn:hover {
+  background-color: #4a4029;
+  color: #fff1c9;
+}
+
 .file-tab .tab-text {
   flex: 1 1 auto;
   min-width: 0;
@@ -1758,7 +2099,9 @@ button.primary:hover {
   min-height: 0;
   height: 100%;
   max-height: none;
-  padding: var(--terminal-padding);
+  padding: var(--terminal-padding) 0;
+  display: flex;
+  position: relative;
 }
 
 .terminal-host {
@@ -1767,13 +2110,29 @@ button.primary:hover {
   height: 100%;
   min-height: 0;
   max-width: 100%;
-  width: calc(100% - var(--terminal-scrollbar-width));
+  flex: 1 1 auto;
 }
 
 
 .hidden-input,
 .test-hook {
   display: none;
+}
+
+.voice-mode-input {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  opacity: 0.01;
+  resize: none;
+  pointer-events: none;
+  background: transparent;
+  color: transparent;
 }
 
 .terminal-viewport :deep(.xterm) {
@@ -1784,24 +2143,35 @@ button.primary:hover {
   overflow: visible;
 }
 
+.terminal-viewport :deep(.xterm .xterm-helper-textarea) {
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0.01;
+  z-index: 1;
+}
+
 .terminal-viewport :deep(.xterm-screen) {
-  width: 100%;
+  width: calc(100% - var(--terminal-scrollbar-reserve-width));
+  max-width: calc(100% - var(--terminal-scrollbar-reserve-width));
 }
 
 .terminal-viewport :deep(.xterm-viewport) {
   scrollbar-width: auto;
+  scrollbar-gutter: stable;
   position: absolute;
   top: 0;
-  right: calc(-1 * var(--terminal-scrollbar-width));
+  right: 0;
   bottom: 0;
-  left: 0;
-  width: auto;
-  max-width: none;
+  left: auto;
+  width: var(--terminal-scrollbar-reserve-width);
+  max-width: var(--terminal-scrollbar-reserve-width);
 }
 
 .terminal-viewport :deep(.xterm-viewport::-webkit-scrollbar) {
   width: var(--terminal-scrollbar-width);
-  height: var(--terminal-scrollbar-width);
+  height: 0;
 }
 
 .terminal-viewport :deep(.xterm-viewport::-webkit-scrollbar-track) {
@@ -1810,8 +2180,9 @@ button.primary:hover {
 
 .terminal-viewport :deep(.xterm-viewport::-webkit-scrollbar-thumb) {
   background: #5a5a5a;
-  border-radius: 10px;
-  border: 12px solid #2d2d2d;
+  border-radius: 8px;
+  border: 0;
+  min-height: 48px;
 }
 
 .terminal-viewport :deep(.xterm-viewport::-webkit-scrollbar-thumb:hover) {

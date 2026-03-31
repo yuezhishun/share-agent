@@ -9,6 +9,7 @@ public static class JsonOptionsSetup
     public static void ConfigureHttpJson(JsonOptions options)
     {
         options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower;
+        options.SerializerOptions.PropertyNameCaseInsensitive = true;
         options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
     }
 }

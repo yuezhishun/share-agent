@@ -183,6 +183,23 @@ export function useDesktopTerminalFileTabs({
     }
   }
 
+  function closeAllFileTabs() {
+    if (fileTabs.value.length === 0) {
+      return;
+    }
+
+    const dirtyTabs = fileTabs.value.filter((tab) => tab?.dirty);
+    if (
+      dirtyTabs.length > 0
+      && !window.confirm(`当前有 ${dirtyTabs.length} 个文件未保存，确认全部关闭并丢弃修改？`)
+    ) {
+      return;
+    }
+
+    fileTabs.value = [];
+    switchCenterTab('terminal');
+  }
+
   function updateActiveFileContent(value) {
     const tab = activeFileTab.value;
     if (!tab || tab.readOnly || tab.editorKind === 'image') {
@@ -344,6 +361,7 @@ export function useDesktopTerminalFileTabs({
     activeFileTab,
     openFileEntry,
     closeFileTab,
+    closeAllFileTabs,
     updateActiveFileContent,
     updateActiveImageZoom,
     saveActiveFileTab,

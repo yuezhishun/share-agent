@@ -4,7 +4,6 @@ import * as signalR from '@microsoft/signalr';
 const INSTANCE_ALIAS_STORAGE_KEY = 'webcli-instance-aliases-v1';
 const RAW_SYNC_TIMEOUT_MS = 1500;
 const SCREEN_SYNC_TIMEOUT_MS = 1500;
-
 function readInstanceAliases() {
   if (typeof window === 'undefined') {
     return {};
@@ -840,13 +839,16 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       this.setStatus('Connected');
     },
 
-    async sendInput(data) {
+    async sendInput(data, options = {}) {
       if (!this.connection || !this.wsConnected || !this.selectedInstanceId) {
         return;
       }
+      const source = String(options?.source || 'programmatic');
+      const payload = String(data || '');
       await this.connection.invoke('SendInput', {
         instanceId: this.selectedInstanceId,
-        data: String(data || '')
+        data: payload,
+        source
       });
     },
 

@@ -26,6 +26,7 @@ public sealed class GatewayOptions
     public string InternalToken { get; init; } = "dev-terminal-token";
     public string WsToken { get; init; } = "dev-ws-token";
     public string ProfileStoreFile { get; init; } = string.Empty;
+    public string CliTemplateDbPath { get; init; } = "/tmp/pty-agent-cli-templates.db";
     public string SettingsStoreFile { get; init; } = "/tmp/pty-agent-terminal-settings.json";
     public int MaxOutputBufferBytes { get; init; } = 8 * 1024 * 1024;
     public int ProcessManagerMaxConcurrency { get; init; } = 4;
@@ -68,6 +69,7 @@ public sealed class GatewayOptions
             InternalToken = Read(config, "TERMINAL_GATEWAY_TOKEN", "Gateway:InternalToken") ?? "dev-terminal-token",
             WsToken = Read(config, "TERMINAL_WS_TOKEN", "Gateway:WsToken") ?? "dev-ws-token",
             ProfileStoreFile = Read(config, "TERMINAL_PROFILE_STORE_FILE", "Gateway:ProfileStoreFile") ?? string.Empty,
+            CliTemplateDbPath = Read(config, "TERMINAL_CLI_TEMPLATE_DB_PATH", "Gateway:CliTemplateDbPath") ?? "/tmp/pty-agent-cli-templates.db",
             SettingsStoreFile = Read(config, "TERMINAL_SETTINGS_STORE_FILE", "Gateway:SettingsStoreFile") ?? "/tmp/pty-agent-terminal-settings.json",
             MaxOutputBufferBytes = ParseInt(config, 8 * 1024 * 1024, "TERMINAL_MAX_OUTPUT_BUFFER_BYTES", "Gateway:MaxOutputBufferBytes"),
             ProcessManagerMaxConcurrency = ParseInt(config, 4, "TERMINAL_PROCESS_MANAGER_MAX_CONCURRENCY", "Gateway:ProcessManagerMaxConcurrency"),

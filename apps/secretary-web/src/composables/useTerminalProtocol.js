@@ -85,6 +85,18 @@ export function createTerminalProtocolRenderer(term) {
     return Math.max(0, Math.floor(value));
   }
 
+  function applyMessageSize(message) {
+    const cols = Math.max(0, Number(message?.size?.cols) || 0);
+    const rows = Math.max(0, Number(message?.size?.rows) || 0);
+    if (cols <= 0 || rows <= 0 || typeof term?.resize !== 'function') {
+      return;
+    }
+    if (Number(term.cols) === cols && Number(term.rows) === rows) {
+      return;
+    }
+    term.resize(cols, rows);
+  }
+
   function buildSnapshotCursorControl(cursor) {
     const x = normalizeCursorCoord(cursor?.x);
     const y = normalizeCursorCoord(cursor?.y);
@@ -98,6 +110,7 @@ export function createTerminalProtocolRenderer(term) {
   }
 
   function renderSnapshot(message) {
+    applyMessageSize(message);
     hardReset();
     const ansi = String(message?.ansi || '');
     if (ansi) {
@@ -176,6 +189,10 @@ export function createTerminalProtocolRenderer(term) {
       state.historyLines = [...lines, ...state.historyLines];
       renderWithHistory(state.lastSnapshot, state.historyLines);
       return;
+    }
+
+    if (message.type === 'term.patch') {
+      applyMessageSize(message);
     }
 
     if (message.type === 'term.raw') {

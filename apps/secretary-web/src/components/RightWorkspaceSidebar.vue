@@ -134,6 +134,25 @@
     </div>
 
     <div v-else-if="activeRightTab === 'shortcuts'" class="shortcut-panel">
+      <div class="voice-mode-card" data-testid="voice-mode-settings">
+        <div class="voice-mode-header">
+          <div class="voice-mode-title">语音输入模式</div>
+          <button
+            type="button"
+            class="voice-mode-toggle-btn"
+            :class="{ active: voiceModeEnabled }"
+            :aria-pressed="voiceModeEnabled"
+            data-testid="voice-mode-toggle"
+            :title="voiceModeEnabled ? '切换到普通终端输入' : '切换到语音输入模式'"
+            @click="emit('toggle-voice-mode')"
+          >
+            <i :class="voiceModeEnabled ? 'fa-regular fa-keyboard' : 'fa-solid fa-microphone-lines'" aria-hidden="true" />
+            <span>{{ voiceModeEnabled ? '切换到终端输入' : '切换到语音输入' }}</span>
+          </button>
+        </div>
+        <div class="voice-mode-meta">网页快捷键：{{ voiceModeShortcutLabel }}</div>
+        <div class="voice-mode-meta">当前输入：{{ voiceModeEnabled ? '语音输入模式' : '普通终端输入' }}</div>
+      </div>
       <form
         v-if="showShortcutEditor"
         class="shortcut-editor"
@@ -184,7 +203,7 @@
           <button type="button" @click="emit('collapse-shortcut-editor')">取消</button>
         </div>
       </form>
-      <div class="shortcut-note">按分组发送控制键或命令，常用新增项收在右上角 `+`。</div>
+      <div class="shortcut-note">按分组发送控制键或命令，常用新增项收在右上角 +</div>
       <div class="shortcut-groups">
         <div v-for="group in shortcutGroups" :key="group.group" class="shortcut-group">
           <div class="shortcut-group-title">{{ group.group }}</div>
@@ -346,6 +365,8 @@ defineProps({
   showShortcutEditor: { type: Boolean, default: false },
   shortcutEditor: { type: Object, required: true },
   shortcutGroups: { type: Array, default: () => [] },
+  voiceModeEnabled: { type: Boolean, default: false },
+  voiceModeShortcutLabel: { type: String, default: '' },
   showTerminalSizeEditor: { type: Boolean, default: false },
   terminalSizeDraftCols: { type: String, default: '' },
   terminalSizeDraftRows: { type: String, default: '' },
@@ -367,6 +388,7 @@ const emit = defineEmits([
   'toggle-folder-creator',
   'pick-upload-files',
   'toggle-shortcut-editor',
+  'toggle-voice-mode',
   'toggle-terminal-size-editor',
   'update:terminalSizeDraftCols',
   'update:terminalSizeDraftRows',
@@ -677,6 +699,51 @@ const emit = defineEmits([
 .shortcut-note {
   font-size: 0.74rem;
   color: #9eb8d4;
+}
+
+.voice-mode-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #2f4251;
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(18, 31, 42, 0.96), rgba(15, 24, 34, 0.96));
+}
+
+.voice-mode-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.voice-mode-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #d8ecff;
+}
+
+.voice-mode-toggle-btn {
+  background: rgba(18, 62, 88, 0.82);
+  border: 1px solid rgba(84, 156, 202, 0.65);
+  color: #dff4ff;
+}
+
+.voice-mode-toggle-btn:hover {
+  background: rgba(23, 78, 109, 0.92);
+}
+
+.voice-mode-toggle-btn.active {
+  background: rgba(22, 102, 67, 0.9);
+  border-color: rgba(94, 204, 149, 0.72);
+  color: #effff6;
+}
+
+.voice-mode-meta {
+  font-size: 0.73rem;
+  color: #95b5d8;
 }
 
 .shortcut-editor {

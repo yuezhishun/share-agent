@@ -43,3 +43,32 @@ test('resolvePreferredNodeId should keep current node, then prefer online curren
   assert.equal(store.resolvePreferredNodeId(''), 'master-offline');
   assert.equal(store.getDefaultNodeId('missing-node'), 'master-offline');
 });
+
+test('sendInput should forward terminal capability responses to the backend', async () => {
+  const store = setupStore();
+  const sent = [];
+  store.connection = {
+    invoke(method, payload) {
+      sent.push({ method, payload });
+      return Promise.resolve();
+    }
+  };
+  store.wsConnected = true;
+  store.selectedInstanceId = 'instance-1';
+
+  const autoResponse = '\u001b[1;1R\u001b[?1;2c';
+  await store.sendInput(autoResponse, { source: 'terminal' });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].payload.data, autoResponse);
+  assert.equal(sent[0].payload.source, 'terminal');
+
+  await store.sendInput('\u001b[A', { source: 'terminal' });
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].payload.data, '\u001b[A');
+  assert.equal(sent[1].payload.source, 'terminal');
+
+  await store.sendInput('\u001b[200~body\u001b[201~');
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2].payload.data, '\u001b[200~body\u001b[201~');
+  assert.equal(sent[2].payload.source, 'programmatic');
+});

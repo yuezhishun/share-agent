@@ -35,6 +35,12 @@ builder.Services.AddSingleton<ClusterTerminalSubscriptionService>();
 builder.Services.AddSingleton<FileApiService>();
 builder.Services.AddSingleton<ProjectApiService>();
 builder.Services.AddSingleton<ProcessApiService>();
+builder.Services.AddSingleton<AgentCatalogService>();
+builder.Services.AddSingleton<AgentGatewayService>();
+builder.Services.AddSingleton(sp => new CliTemplateService(
+    sp.GetRequiredService<GatewayOptions>().CliTemplateDbPath,
+    sp.GetRequiredService<GatewayOptions>().FilesBasePath));
+builder.Services.AddSingleton<CliProcessService>();
 builder.Services.AddSingleton<SlaveClusterBridgeService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SlaveClusterBridgeService>());
 
@@ -42,7 +48,10 @@ var app = builder.Build();
 
 app.MapApiRoutes();
 app.MapProcessEndpoints();
+app.MapAgentGatewayEndpoints();
+app.MapCliEndpoints();
 app.MapHub<TerminalHub>("/hubs/terminal");
+app.MapHub<AgentHub>("/hubs/agent");
 app.MapHub<ClusterHub>("/hubs/cluster");
 
 _ = app.Services.GetRequiredService<TerminalEventRelay>();

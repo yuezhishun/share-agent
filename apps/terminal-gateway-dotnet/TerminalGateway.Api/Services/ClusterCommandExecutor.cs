@@ -14,16 +14,35 @@ public sealed class ClusterCommandExecutor
     private readonly TerminalOracleManager _oracle;
     private readonly FileApiService _files;
     private readonly ProcessApiService _processes;
+    private readonly CliTemplateService _cliTemplates;
+    private readonly CliProcessService _cliProcesses;
+    private readonly AgentCatalogService _agentCatalog;
+    private readonly AgentGatewayService _agentGateway;
     private readonly NodeRegistry _nodes;
     private readonly RemoteInstanceRegistry _remoteInstances;
 
-    public ClusterCommandExecutor(GatewayOptions options, InstanceManager instances, TerminalOracleManager oracle, FileApiService files, ProcessApiService processes, NodeRegistry nodes, RemoteInstanceRegistry remoteInstances)
+    public ClusterCommandExecutor(
+        GatewayOptions options,
+        InstanceManager instances,
+        TerminalOracleManager oracle,
+        FileApiService files,
+        ProcessApiService processes,
+        CliTemplateService cliTemplates,
+        CliProcessService cliProcesses,
+        AgentCatalogService agentCatalog,
+        AgentGatewayService agentGateway,
+        NodeRegistry nodes,
+        RemoteInstanceRegistry remoteInstances)
     {
         _options = options;
         _instances = instances;
         _oracle = oracle;
         _files = files;
         _processes = processes;
+        _cliTemplates = cliTemplates;
+        _cliProcesses = cliProcesses;
+        _agentCatalog = agentCatalog;
+        _agentGateway = agentGateway;
         _nodes = nodes;
         _remoteInstances = remoteInstances;
     }
@@ -330,6 +349,185 @@ public sealed class ClusterCommandExecutor
                     }
 
                     return Ok(command, _processes.RemoveManaged(processId));
+                }
+                case "cli.template.list":
+                    return Ok(command, new { items = _cliTemplates.List() });
+                case "cli.template.create":
+                {
+                    var request = command.Payload.Deserialize<CreateCliTemplateRequest>(CaseInsensitiveJson) ?? new CreateCliTemplateRequest();
+                    return Ok(command, _cliTemplates.Create(request));
+                }
+                case "cli.template.update":
+                {
+                    var templateId = ReadString(command.Payload, "template_id") ?? ReadString(command.Payload, "templateId");
+                    if (string.IsNullOrWhiteSpace(templateId))
+                    {
+                        return Fail(command, "template_id is required");
+                    }
+
+                    UpdateCliTemplateRequest request;
+                    if (TryGetPropertyInsensitive(command.Payload, "updates", out var updatesElement) && updatesElement.ValueKind == JsonValueKind.Object)
+                    {
+                        request = updatesElement.Deserialize<UpdateCliTemplateRequest>(CaseInsensitiveJson) ?? new UpdateCliTemplateRequest();
+                    }
+                    else
+                    {
+                        request = command.Payload.Deserialize<UpdateCliTemplateRequest>(CaseInsensitiveJson) ?? new UpdateCliTemplateRequest();
+                    }
+
+                    return Ok(command, _cliTemplates.Update(templateId, request));
+                }
+                case "cli.template.delete":
+                {
+                    var templateId = ReadString(command.Payload, "template_id") ?? ReadString(command.Payload, "templateId");
+                    if (string.IsNullOrWhiteSpace(templateId))
+                    {
+                        return Fail(command, "template_id is required");
+                    }
+
+                    return Ok(command, _cliTemplates.Delete(templateId));
+                }
+                case "cli.process.start":
+                {
+                    var request = command.Payload.Deserialize<StartCliProcessRequest>(CaseInsensitiveJson) ?? new StartCliProcessRequest();
+                    return Ok(command, await _cliProcesses.StartManagedAsync(request, cancellationToken));
+                }
+                case "cli.process.list":
+                    return Ok(command, new { items = _cliProcesses.ListManaged() });
+                case "cli.process.get":
+                {
+                    var processId = ReadString(command.Payload, "process_id") ?? ReadString(command.Payload, "processId");
+                    if (string.IsNullOrWhiteSpace(processId))
+                    {
+                        return Fail(command, "process_id is required");
+                    }
+
+                    return Ok(command, _cliProcesses.GetManaged(processId));
+                }
+                case "cli.process.output":
+                {
+                    var processId = ReadString(command.Payload, "process_id") ?? ReadString(command.Payload, "processId");
+                    if (string.IsNullOrWhiteSpace(processId))
+                    {
+                        return Fail(command, "process_id is required");
+                    }
+
+                    return Ok(command, new { items = _cliProcesses.GetOutput(processId) });
+                }
+                case "cli.process.wait":
+                {
+                    var processId = ReadString(command.Payload, "process_id") ?? ReadString(command.Payload, "processId");
+                    if (string.IsNullOrWhiteSpace(processId))
+                    {
+                        return Fail(command, "process_id is required");
+                    }
+
+                    var timeoutMs = ReadNullableInt(command.Payload, "timeout_ms") ?? ReadNullableInt(command.Payload, "timeoutMs");
+                    return Ok(command, await _cliProcesses.WaitManagedAsync(processId, timeoutMs));
+                }
+                case "cli.process.stop":
+                {
+                    var processId = ReadString(command.Payload, "process_id") ?? ReadString(command.Payload, "processId");
+                    if (string.IsNullOrWhiteSpace(processId))
+                    {
+                        return Fail(command, "process_id is required");
+                    }
+
+                    var body = command.Payload.Deserialize<StopCliProcessRequest>(CaseInsensitiveJson) ?? new StopCliProcessRequest();
+                    return Ok(command, await _cliProcesses.StopManagedAsync(processId, body.Force == true));
+                }
+                case "cli.process.remove":
+                {
+                    var processId = ReadString(command.Payload, "process_id") ?? ReadString(command.Payload, "processId");
+                    if (string.IsNullOrWhiteSpace(processId))
+                    {
+                        return Fail(command, "process_id is required");
+                    }
+
+                    return Ok(command, _cliProcesses.RemoveManaged(processId));
+                }
+                case "agent.list":
+                    return Ok(command, new { items = _agentCatalog.List() });
+                case "agent.health":
+                {
+                    var backend = ReadString(command.Payload, "backend") ?? string.Empty;
+                    var cliPath = ReadString(command.Payload, "cli_path") ?? ReadString(command.Payload, "cliPath");
+                    return Ok(command, _agentCatalog.CheckHealth(backend, cliPath));
+                }
+                case "agent.session.connect":
+                {
+                    var request = command.Payload.Deserialize<AgentSessionConnectRequest>(CaseInsensitiveJson)
+                        ?? new AgentSessionConnectRequest();
+                    return Ok(command, await _agentGateway.ConnectAsync(request, cancellationToken));
+                }
+                case "agent.session.prompt":
+                {
+                    var gatewaySessionId = ReadString(command.Payload, "gateway_session_id") ?? ReadString(command.Payload, "gatewaySessionId");
+                    if (string.IsNullOrWhiteSpace(gatewaySessionId))
+                    {
+                        return Fail(command, "gateway_session_id is required");
+                    }
+
+                    await _agentGateway.PromptAsync(gatewaySessionId, ReadString(command.Payload, "text") ?? string.Empty, cancellationToken);
+                    return Ok(command, new { ok = true });
+                }
+                case "agent.session.cancel":
+                {
+                    var gatewaySessionId = ReadString(command.Payload, "gateway_session_id") ?? ReadString(command.Payload, "gatewaySessionId");
+                    if (string.IsNullOrWhiteSpace(gatewaySessionId))
+                    {
+                        return Fail(command, "gateway_session_id is required");
+                    }
+
+                    await _agentGateway.CancelAsync(gatewaySessionId, cancellationToken);
+                    return Ok(command, new { ok = true });
+                }
+                case "agent.session.set_mode":
+                {
+                    var gatewaySessionId = ReadString(command.Payload, "gateway_session_id") ?? ReadString(command.Payload, "gatewaySessionId");
+                    if (string.IsNullOrWhiteSpace(gatewaySessionId))
+                    {
+                        return Fail(command, "gateway_session_id is required");
+                    }
+
+                    await _agentGateway.SetModeAsync(gatewaySessionId, ReadString(command.Payload, "mode") ?? "default", cancellationToken);
+                    return Ok(command, new { ok = true });
+                }
+                case "agent.session.set_model":
+                {
+                    var gatewaySessionId = ReadString(command.Payload, "gateway_session_id") ?? ReadString(command.Payload, "gatewaySessionId");
+                    if (string.IsNullOrWhiteSpace(gatewaySessionId))
+                    {
+                        return Fail(command, "gateway_session_id is required");
+                    }
+
+                    var modelId = ReadString(command.Payload, "model_id") ?? ReadString(command.Payload, "modelId") ?? string.Empty;
+                    await _agentGateway.SetModelAsync(gatewaySessionId, modelId, cancellationToken);
+                    return Ok(command, new { ok = true });
+                }
+                case "agent.session.permission_response":
+                {
+                    var gatewaySessionId = ReadString(command.Payload, "gateway_session_id") ?? ReadString(command.Payload, "gatewaySessionId");
+                    if (string.IsNullOrWhiteSpace(gatewaySessionId))
+                    {
+                        return Fail(command, "gateway_session_id is required");
+                    }
+
+                    var request = command.Payload.Deserialize<AgentPermissionResponseRequest>(CaseInsensitiveJson)
+                        ?? new AgentPermissionResponseRequest();
+                    await _agentGateway.RespondPermissionAsync(gatewaySessionId, request, cancellationToken);
+                    return Ok(command, new { ok = true });
+                }
+                case "agent.session.disconnect":
+                {
+                    var gatewaySessionId = ReadString(command.Payload, "gateway_session_id") ?? ReadString(command.Payload, "gatewaySessionId");
+                    if (string.IsNullOrWhiteSpace(gatewaySessionId))
+                    {
+                        return Fail(command, "gateway_session_id is required");
+                    }
+
+                    await _agentGateway.DisconnectAsync(gatewaySessionId);
+                    return Ok(command, new { ok = true });
                 }
                 default:
                     return Fail(command, $"unsupported command: {command.Type}");

@@ -1,0 +1,47 @@
+{
+  "name": "AionUi",
+  "version": "1.9.2",
+  "description": "Web-only terminal client for TerminalGateway.Api.",
+  "keywords": [],
+  "license": "Apache-2.0",
+  "author": {
+    "name": "AionUi",
+    "email": "service@aionui.com"
+  },
+  "scripts": {
+    "dev": "vite --config vite.renderer.config.ts",
+    "start": "vite --config vite.renderer.config.ts",
+    "build": "rm -rf out && vite build --config vite.renderer.config.ts",
+    "preview": "vite preview --config vite.renderer.config.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@arco-design/web-react": "^2.66.1",
+    "@microsoft/signalr": "^8.0.7",
+    "classnames": "^2.5.1",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.8.0",
+    "swr": "^2.3.6",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^24.3.1",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.6",
+    "@vitest/coverage-v8": "^4.0.18",
+    "jsdom": "^28.1.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.4.1",
+    "vitest": "^4.0.18"
+  },
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "productName": "AionUi"
+}

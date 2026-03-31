@@ -223,6 +223,117 @@ public class GatewayApiTests
     }
 
     [Fact]
+    public async Task Cli_Template_Endpoints_Work()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tg-cli-template-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        var dbPath = Path.Combine(tempDir, "cli-templates.db");
+
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["FILES_BASE_PATH"] = tempDir,
+            ["TERMINAL_CLI_TEMPLATE_DB_PATH"] = dbPath,
+            ["NODE_ID"] = "local-node"
+        });
+        using var client = app.CreateClient();
+
+        var listResponse = await client.GetAsync("/api/nodes/local-node/cli/templates");
+        Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
+        var listPayload = JsonDocument.Parse(await listResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Contains(listPayload.GetProperty("items").EnumerateArray(), x => x.GetProperty("template_id").GetString() == "builtin-bash");
+
+        var createResponse = await client.PostAsJsonAsync("/api/nodes/local-node/cli/templates", new
+        {
+            template_id = "custom-build",
+            name = "Custom Build",
+            cli_type = "bash",
+            executable = "sh",
+            base_args = new[] { "-c", "printf custom-template" },
+            default_cwd = tempDir,
+            default_env = new Dictionary<string, string> { ["CLI_TEST_VAR"] = "1" },
+            description = "test template"
+        });
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+
+        var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("custom-build", created.GetProperty("template_id").GetString());
+
+        var updateResponse = await client.PutAsJsonAsync("/api/nodes/local-node/cli/templates/custom-build", new
+        {
+            name = "Custom Build Updated",
+            color = "#123456"
+        });
+        Assert.Equal(HttpStatusCode.OK, updateResponse.StatusCode);
+
+        var updated = JsonDocument.Parse(await updateResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("Custom Build Updated", updated.GetProperty("name").GetString());
+        Assert.Equal("#123456", updated.GetProperty("color").GetString());
+
+        var deleteResponse = await client.DeleteAsync("/api/nodes/local-node/cli/templates/custom-build");
+        Assert.Equal(HttpStatusCode.OK, deleteResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task Cli_Process_Endpoints_Work()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tg-cli-process-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        var dbPath = Path.Combine(tempDir, "cli-templates.db");
+
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["FILES_BASE_PATH"] = tempDir,
+            ["TERMINAL_CLI_TEMPLATE_DB_PATH"] = dbPath,
+            ["NODE_ID"] = "local-node"
+        });
+        using var client = app.CreateClient();
+
+        var templateResponse = await client.PostAsJsonAsync("/api/nodes/local-node/cli/templates", new
+        {
+            template_id = "custom-print",
+            name = "Custom Print",
+            cli_type = "bash",
+            executable = "sh",
+            base_args = new[] { "-c", "printf cli:$CLI_TOKEN" },
+            default_cwd = tempDir
+        });
+        Assert.Equal(HttpStatusCode.OK, templateResponse.StatusCode);
+
+        var createResponse = await client.PostAsJsonAsync("/api/nodes/local-node/cli/processes", new
+        {
+            template_id = "custom-print",
+            env_overrides = new Dictionary<string, string> { ["CLI_TOKEN"] = "works" },
+            timeout_ms = 5000
+        });
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+
+        var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
+        var processId = created.GetProperty("process_id").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(processId));
+
+        var listResponse = await client.GetAsync("/api/nodes/local-node/cli/processes");
+        Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
+        var listPayload = JsonDocument.Parse(await listResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Contains(listPayload.GetProperty("items").EnumerateArray(), item =>
+            item.GetProperty("process_id").GetString() == processId);
+
+        var waitResponse = await client.PostAsync($"/api/nodes/local-node/cli/processes/{processId}/wait?timeout_ms=5000", content: null);
+        Assert.Equal(HttpStatusCode.OK, waitResponse.StatusCode);
+        var waited = JsonDocument.Parse(await waitResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.True(waited.GetProperty("completed").GetBoolean());
+        Assert.Contains("cli:works", waited.GetProperty("result").GetProperty("standard_output").GetString() ?? string.Empty);
+
+        var outputResponse = await client.GetAsync($"/api/nodes/local-node/cli/processes/{processId}/output");
+        Assert.Equal(HttpStatusCode.OK, outputResponse.StatusCode);
+        var outputPayload = JsonDocument.Parse(await outputResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Contains(outputPayload.GetProperty("items").EnumerateArray(), item =>
+            (item.GetProperty("content").GetString() ?? string.Empty).Contains("cli:works", StringComparison.Ordinal));
+
+        var deleteResponse = await client.DeleteAsync($"/api/nodes/local-node/cli/processes/{processId}");
+        Assert.Equal(HttpStatusCode.OK, deleteResponse.StatusCode);
+    }
+
+    [Fact]
     public async Task Process_Run_Endpoint_Rejects_Cwd_Outside_Base()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"tg-process-cwd-{Guid.NewGuid():N}");

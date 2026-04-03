@@ -36,20 +36,6 @@ function readFitAddonGeometry(fitAddon) {
   }
 }
 
-function readTerminalScrollbarReserveWidth(hostElement) {
-  if (!hostElement || typeof hostElement.querySelector !== 'function') {
-    return 0;
-  }
-
-  const viewportElement = hostElement.querySelector('.xterm-viewport');
-  if (!viewportElement || typeof viewportElement.getBoundingClientRect !== 'function') {
-    return 0;
-  }
-
-  const rect = viewportElement.getBoundingClientRect();
-  return Math.max(0, Number(rect.width) || 0);
-}
-
 function readTerminalCellSize(term) {
   const dims = term?._core?._renderService?.dimensions?.css?.cell;
   const width = Number(dims?.width) || 0;
@@ -61,26 +47,13 @@ function readTerminalCellSize(term) {
 }
 
 function readTerminalContentRect(hostElement) {
-  if (hostElement && typeof hostElement.querySelector === 'function') {
-    const screenElement = hostElement.querySelector('.xterm-screen');
-    if (screenElement && typeof screenElement.getBoundingClientRect === 'function') {
-      const rect = screenElement.getBoundingClientRect();
-      const width = Math.max(0, Number(rect.width) || 0);
-      const height = Math.max(0, Number(rect.height) || 0);
-      if (width > 0 && height > 0) {
-        return { width, height };
-      }
-    }
-  }
-
   if (!hostElement || typeof hostElement.getBoundingClientRect !== 'function') {
     return null;
   }
 
   const rect = hostElement.getBoundingClientRect();
-  const scrollbarReserveWidth = readTerminalScrollbarReserveWidth(hostElement);
   return {
-    width: Math.max(0, (Number(rect.width) || 0) - scrollbarReserveWidth),
+    width: Math.max(0, Number(rect.width) || 0),
     height: Math.max(0, Number(rect.height) || 0)
   };
 }

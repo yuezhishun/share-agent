@@ -93,7 +93,7 @@ test('measureStableTerminalGeometry should prefer fitAddon dimensions over DOM m
   assert.deepEqual(geometry, { cols: 132, rows: 41 });
 });
 
-test('measureStableTerminalGeometry should prefer xterm screen width when scrollbar reserve is present', async () => {
+test('measureStableTerminalGeometry should use host width for DOM measurement', async () => {
   const term = {
     _core: {
       _renderService: {
@@ -109,16 +109,6 @@ test('measureStableTerminalGeometry should prefer xterm screen width when scroll
     }
   };
   const host = {
-    querySelector(selector) {
-      if (selector !== '.xterm-screen') {
-        return null;
-      }
-      return {
-        getBoundingClientRect() {
-          return { width: 940, height: 612 };
-        }
-      };
-    },
     getBoundingClientRect() {
       return { width: 960, height: 612 };
     }
@@ -131,10 +121,10 @@ test('measureStableTerminalGeometry should prefer xterm screen width when scroll
     wait: async () => {}
   });
 
-  assert.deepEqual(geometry, { cols: 117, rows: 34 });
+  assert.deepEqual(geometry, { cols: 120, rows: 34 });
 });
 
-test('measureStableTerminalGeometry should subtract viewport reserve width when screen element is not ready', async () => {
+test('measureStableTerminalGeometry should keep waiting until a stable host measurement is available', async () => {
   const term = {
     _core: {
       _renderService: {
@@ -149,79 +139,13 @@ test('measureStableTerminalGeometry should subtract viewport reserve width when 
       }
     }
   };
+  let hostReads = 0;
   const host = {
-    querySelector(selector) {
-      if (selector === '.xterm-screen') {
-        return null;
-      }
-      if (selector === '.xterm-viewport') {
-        return {
-          getBoundingClientRect() {
-            return { width: 20, height: 612 };
-          }
-        };
-      }
-      return null;
-    },
     getBoundingClientRect() {
-      return { width: 960, height: 612 };
-    }
-  };
-
-  const geometry = await measureStableTerminalGeometry({
-    activeCenterTab: 'terminal',
-    hostElement: host,
-    term,
-    wait: async () => {}
-  });
-
-  assert.deepEqual(geometry, { cols: 117, rows: 34 });
-});
-
-test('measureStableTerminalGeometry should keep waiting until a stable screen measurement is available', async () => {
-  const term = {
-    _core: {
-      _renderService: {
-        dimensions: {
-          css: {
-            cell: {
-              width: 8,
-              height: 18
-            }
-          }
-        }
+      hostReads += 1;
+      if (hostReads < 2) {
+        return { width: 0, height: 0 };
       }
-    }
-  };
-  let screenReads = 0;
-  const host = {
-    querySelector(selector) {
-      if (selector === '.xterm-screen') {
-        screenReads += 1;
-        if (screenReads < 2) {
-          return {
-            getBoundingClientRect() {
-              return { width: 0, height: 0 };
-            }
-          };
-        }
-        return {
-          getBoundingClientRect() {
-            return { width: 940, height: 612 };
-          }
-        };
-      }
-      if (selector === '.xterm-viewport') {
-        const reserveWidth = screenReads < 2 ? 960 : 20;
-        return {
-          getBoundingClientRect() {
-            return { width: reserveWidth, height: 612 };
-          }
-        };
-      }
-      return null;
-    },
-    getBoundingClientRect() {
       return { width: 960, height: 612 };
     }
   };
@@ -237,8 +161,8 @@ test('measureStableTerminalGeometry should keep waiting until a stable screen me
     }
   });
 
-  assert.deepEqual(geometry, { cols: 117, rows: 34 });
-  assert.ok(screenReads >= 3);
+  assert.deepEqual(geometry, { cols: 120, rows: 34 });
+  assert.ok(hostReads >= 3);
   assert.ok(waits.length >= 2);
 });
 

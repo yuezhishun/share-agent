@@ -214,9 +214,9 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { Terminal } from '@xterm/xterm';
+import { Terminal } from 'xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import '@xterm/xterm/css/xterm.css';
+import 'xterm/css/xterm.css';
 import { useWebCliTerminalStore } from '../stores/webcli-terminal.js';
 import { useWebCliFilesStore } from '../stores/webcli-files.js';
 import { useWebCliRecipesStore } from '../stores/webcli-recipes.js';
@@ -1846,11 +1846,10 @@ watch(activeCenterTab, (tabId) => {
 }
 
 .app {
-  --terminal-display-width: 1500px;
+  --terminal-display-width: 1450px;
   --terminal-padding: 8px;
-  --terminal-scrollbar-width: 30px;
-  --terminal-scrollbar-reserve-width: 20px;
-  --terminal-shell-width: calc(var(--terminal-display-width) + var(--terminal-scrollbar-reserve-width));
+  --terminal-scrollbar-width: 55px;
+  --terminal-shell-width: calc(var(--terminal-display-width) + (var(--terminal-padding) * 2) + var(--terminal-scrollbar-width));
   font-family: 'Inter', sans-serif;
   background-color: #1e1e1e;
   min-height: 100vh;
@@ -2099,18 +2098,15 @@ button.primary:hover {
   min-height: 0;
   height: 100%;
   max-height: none;
-  padding: var(--terminal-padding) 0;
-  display: flex;
-  position: relative;
+  padding: var(--terminal-padding);
 }
 
 .terminal-host {
   position: relative;
-  width: 100%;
   height: 100%;
   min-height: 0;
   max-width: 100%;
-  flex: 1 1 auto;
+  width: calc(100% - var(--terminal-scrollbar-width));
 }
 
 
@@ -2153,25 +2149,23 @@ button.primary:hover {
 }
 
 .terminal-viewport :deep(.xterm-screen) {
-  width: calc(100% - var(--terminal-scrollbar-reserve-width));
-  max-width: calc(100% - var(--terminal-scrollbar-reserve-width));
+  width: 100%;
 }
 
 .terminal-viewport :deep(.xterm-viewport) {
   scrollbar-width: auto;
-  scrollbar-gutter: stable;
   position: absolute;
   top: 0;
-  right: 0;
+  right: calc(-1 * var(--terminal-scrollbar-width));
   bottom: 0;
-  left: auto;
-  width: var(--terminal-scrollbar-reserve-width);
-  max-width: var(--terminal-scrollbar-reserve-width);
+  left: 0;
+  width: auto;
+  max-width: none;
 }
 
 .terminal-viewport :deep(.xterm-viewport::-webkit-scrollbar) {
   width: var(--terminal-scrollbar-width);
-  height: 0;
+  height: var(--terminal-scrollbar-width);
 }
 
 .terminal-viewport :deep(.xterm-viewport::-webkit-scrollbar-track) {
@@ -2180,9 +2174,8 @@ button.primary:hover {
 
 .terminal-viewport :deep(.xterm-viewport::-webkit-scrollbar-thumb) {
   background: #5a5a5a;
-  border-radius: 8px;
-  border: 0;
-  min-height: 48px;
+  border-radius: 10px;
+  border: 12px solid #2d2d2d;
 }
 
 .terminal-viewport :deep(.xterm-viewport::-webkit-scrollbar-thumb:hover) {

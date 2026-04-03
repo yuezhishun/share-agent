@@ -2,6 +2,8 @@
 
 本文档记录 `DesktopTerminalView.vue` 中终端主区域宽度、滚动条宽度和满高布局的稳定做法。当前目标版本是宽滚动条方案，并直接使用 `"xterm": "^5.3.0"`。
 
+除非特别说明，下文第 2-6 节描述的都是桌面端默认布局，也就是未命中 `@media (max-width: 980px)` / `@media (max-width: 820px)` 覆盖规则时的结构语义。
+
 后续如果继续调整 V4，请以这套“宽滚动条 + 独立右侧槽位”的语义为准，不要再切回当前主线曾经使用过的窄滚动条保留宽度方案。
 
 ## 1. 核心结论
@@ -89,7 +91,7 @@
 
 ### 3.3 实际宽度扣减链路
 
-当前桌面端实际内容宽度大致经过下面这条链路：
+当前桌面端默认布局下，实际内容宽度大致经过下面这条链路：
 
 1. `.main` 三栏 grid 先分掉左右栏宽度：
 
@@ -152,7 +154,18 @@ terminal-panel-content 宽度 = min(中栏可用宽度 - 28px, 1521px)
 = min(中栏可用宽度 - 28px, 1521px) - 71px
 ```
 
-这才是 `fitAddon.fit()` 最终能拿去计算列数的宽度。
+这才是桌面端默认布局里 `fitAddon.fit()` 最终能拿去计算列数的宽度。
+
+### 3.4 响应式断点例外
+
+上面的宽度公式不适用于所有断点。当前代码在窄屏下有明确例外：
+
+- `@media (max-width: 980px)` 时，`.terminal-panel` 的 padding 会从 `12px 14px` 变成 `10px`。
+- 同一个断点下，`.terminal-panel-content`、`.terminal-viewport`、`.terminal-host`、`.xterm`、`.xterm-viewport` 都会统一覆盖成 `width: 100%; max-width: 100%`。
+- 这意味着 `.terminal-host { width: calc(100% - var(--terminal-scrollbar-width)) }` 只应被视为桌面端默认布局规则，不是所有断点下都必须保持不变。
+- `@media (max-width: 820px)` 时，`.main` 会从三栏 grid 切成纵向 flex，整体宽度来源也会随之变化。
+
+因此，后续如果核对“宽滚动条 + 独立右侧槽位”方案是否仍然成立，必须先区分是在桌面端默认布局，还是在响应式覆盖后的移动/窄屏布局。
 
 ## 4. 测量逻辑原则
 
@@ -225,12 +238,17 @@ max-height: min(100%, 960px);
 - 想让滚动条更容易点中：改 `--terminal-scrollbar-width`
 - 想让内容离外壳边界更远或更近：改 `--terminal-padding`
 
-除非明确知道影响，否则不要轻易改下面这些结构规则：
+除非明确知道影响，否则不要轻易改下面这些桌面端默认布局规则：
 
 - `.terminal-host { width: calc(100% - var(--terminal-scrollbar-width)) }`
 - `.xterm-viewport` 的绝对定位和负 `right`
 - `.terminal-panel-content` / `.terminal-viewport` 的 `flex: 1 1 auto` 与 `min-height: 0`
 - DOM 回退测量直接读取 `hostElement.getBoundingClientRect()`
+
+响应式断点下当前允许的例外是：
+
+- `<=980px` 时，宽度相关节点统一回退到 `width: 100%`
+- `<=820px` 时，整体主布局切成纵向堆叠
 
 ## 7. 验收检查清单
 

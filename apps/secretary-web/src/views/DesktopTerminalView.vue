@@ -2,11 +2,34 @@
   <div class="app">
     <div class="toolbar">
       <div class="logo"><i class="fa-solid fa-terminal" /> 多终端管理器 (实时)</div>
+      <div class="toolbar-actions">
+        <button
+          type="button"
+          class="toolbar-toggle-btn"
+          data-testid="toggle-left-sidebar"
+          :title="leftSidebarCollapsed ? '显示左栏' : '隐藏左栏'"
+          @click="toggleLeftSidebar"
+        >
+          <i :class="leftSidebarCollapsed ? 'fa-solid fa-chevron-right' : 'fa-solid fa-chevron-left'" />
+          <span>{{ leftSidebarCollapsed ? '显示左栏' : '隐藏左栏' }}</span>
+        </button>
+        <button
+          type="button"
+          class="toolbar-toggle-btn"
+          data-testid="toggle-right-sidebar"
+          :title="rightSidebarCollapsed ? '显示右栏' : '隐藏右栏'"
+          @click="toggleRightSidebar"
+        >
+          <span>{{ rightSidebarCollapsed ? '显示右栏' : '隐藏右栏' }}</span>
+          <i :class="rightSidebarCollapsed ? 'fa-solid fa-chevron-left' : 'fa-solid fa-chevron-right'" />
+        </button>
+      </div>
     </div>
 
-    <div class="main">
+    <div class="main" :class="mainLayoutClasses">
       <TerminalSidebar
         class="sidebar-column left-sidebar"
+        :class="{ collapsed: leftSidebarCollapsed }"
         :nodes="terminalStore.nodes"
         :create-node-id="createNodeId"
         :selected-node="selectedNode"
@@ -39,8 +62,19 @@
         @begin-rename-instance="beginRenameInstance"
         @close-terminal="closeTerminal"
       />
+      <button
+        v-if="!isCompactViewport"
+        type="button"
+        class="sidebar-gutter left-gutter"
+        data-testid="left-sidebar-gutter"
+        :title="leftSidebarCollapsed ? '展开左栏' : '收起左栏'"
+        :aria-label="leftSidebarCollapsed ? '展开左栏' : '收起左栏'"
+        @click="toggleLeftSidebar"
+      >
+        <i :class="leftSidebarCollapsed ? 'fa-solid fa-chevron-right' : 'fa-solid fa-chevron-left'" />
+      </button>
 
-      <div class="terminal-panel">
+      <div class="terminal-panel" data-testid="terminal" @mousedown="focusTerminal">
         <div class="terminal-panel-content">
           <div class="terminal-header">
             <div class="terminal-tabs">
@@ -96,7 +130,7 @@
           </div>
 
           <div v-show="activeCenterTab === 'terminal'" class="terminal-viewport">
-            <div id="terminalContent" ref="terminalRef" class="terminal-host" data-testid="terminal" />
+            <div id="terminalContent" ref="terminalRef" class="terminal-host" />
           </div>
 
           <div v-if="activeCenterTab === 'plain-text' && plainTextVisible" class="plain-text-panel">
@@ -122,9 +156,21 @@
           />
         </div>
       </div>
+      <button
+        v-if="!isCompactViewport"
+        type="button"
+        class="sidebar-gutter right-gutter"
+        data-testid="right-sidebar-gutter"
+        :title="rightSidebarCollapsed ? '展开右栏' : '收起右栏'"
+        :aria-label="rightSidebarCollapsed ? '展开右栏' : '收起右栏'"
+        @click="toggleRightSidebar"
+      >
+        <i :class="rightSidebarCollapsed ? 'fa-solid fa-chevron-left' : 'fa-solid fa-chevron-right'" />
+      </button>
 
       <RightWorkspaceSidebar
         class="sidebar-column right-sidebar"
+        :class="{ collapsed: rightSidebarCollapsed }"
         :files-store="filesStore"
         :active-right-tab="activeRightTab"
         :right-tab-icon-class="rightTabIconClass"
@@ -151,7 +197,9 @@
         :recipe-items="recipeItems"
         :is-default-create-recipe="isDefaultCreateRecipe"
         :format-recipe-summary="formatRecipeSummary"
-        :shortcut-label-input-ref="shortcutLabelInputRef"
+        :set-shortcut-label-input-ref="setShortcutLabelInputRef"
+        :set-folder-name-input-ref="setFolderNameInputRef"
+        :set-recipe-name-input-ref="setRecipeNameInputRef"
         @toggle-show-hidden="toggleShowHidden"
         @refresh-files-list="reloadFilesList"
         @toggle-folder-creator="toggleFolderCreator"
@@ -300,6 +348,8 @@ const renamingInstanceId = ref('');
 const renameInstanceValue = ref('');
 const renameInstanceInputRef = ref(null);
 const shortcutLabelInputRef = ref(null);
+const folderNameInputRef = ref(null);
+const recipeNameInputRef = ref(null);
 const plainTextContent = ref('');
 const plainTextTitle = ref('纯文本');
 const plainTextVisible = ref(false);
@@ -309,6 +359,7 @@ const voiceInputValue = ref('');
 const voiceModeEnabled = ref(false);
 const voiceModeShortcutLabel = VOICE_MODE_SHORTCUT_LABEL;
 const voiceCompositionActive = ref(false);
+const isCompactViewport = ref(false);
 
 let term = null;
 let fitAddon = null;
@@ -378,6 +429,13 @@ const activeRightTab = computed(() => {
   const tab = String(terminalStore.uiSession.activeRightTab || 'files').trim();
   return ['files', 'shortcuts', 'recipes'].includes(tab) ? tab : 'files';
 });
+const leftSidebarCollapsed = computed(() => terminalStore.uiSession.leftSidebarCollapsed === true);
+const rightSidebarCollapsed = computed(() => terminalStore.uiSession.rightSidebarCollapsed === true);
+const mainLayoutClasses = computed(() => ({
+  'left-collapsed': leftSidebarCollapsed.value,
+  'right-collapsed': rightSidebarCollapsed.value,
+  'both-collapsed': leftSidebarCollapsed.value && rightSidebarCollapsed.value
+}));
 const rightTabTitle = computed(() => {
   if (activeRightTab.value === 'shortcuts') {
     return '快捷指令';
@@ -647,10 +705,27 @@ function collapseShortcutEditor() {
 function toggleShortcutEditor() {
   showShortcutEditor.value = !showShortcutEditor.value;
   if (showShortcutEditor.value) {
-    nextTick(() => {
-      shortcutLabelInputRef.value?.focus();
-    });
+    focusShortcutLabelInput();
   }
+}
+
+function focusFormInput(inputRef) {
+  nextTick(() => {
+    inputRef.value?.focus?.({ preventScroll: true });
+    inputRef.value?.select?.();
+  });
+}
+
+function focusShortcutLabelInput() {
+  focusFormInput(shortcutLabelInputRef);
+}
+
+function focusFolderNameInput() {
+  focusFormInput(folderNameInputRef);
+}
+
+function focusRecipeNameInput() {
+  focusFormInput(recipeNameInputRef);
 }
 
 function focusTerminal() {
@@ -1044,6 +1119,28 @@ function switchRightTab(tabId) {
   terminalStore.setUiSession({ activeRightTab: target });
 }
 
+function applySidebarCollapsePatch(patch) {
+  terminalStore.setUiSession(patch);
+  nextTick(() => {
+    scheduleTerminalFit('sidebar_toggle');
+    if (activeCenterTab.value === 'terminal') {
+      focusTerminal();
+    }
+  });
+}
+
+function toggleLeftSidebar() {
+  applySidebarCollapsePatch({
+    leftSidebarCollapsed: !leftSidebarCollapsed.value
+  });
+}
+
+function toggleRightSidebar() {
+  applySidebarCollapsePatch({
+    rightSidebarCollapsed: !rightSidebarCollapsed.value
+  });
+}
+
 const {
   fileTabs,
   activeFileTab,
@@ -1092,6 +1189,18 @@ function setRenameInstanceInputRef(element) {
   renameInstanceInputRef.value = element;
 }
 
+function setShortcutLabelInputRef(element) {
+  shortcutLabelInputRef.value = element;
+}
+
+function setFolderNameInputRef(element) {
+  folderNameInputRef.value = element;
+}
+
+function setRecipeNameInputRef(element) {
+  recipeNameInputRef.value = element;
+}
+
 function beginRenameInstance(instance) {
   renamingInstanceId.value = String(instance?.id || '').trim();
   renameInstanceValue.value = terminalStore.getInstanceAlias(instance?.id) || '';
@@ -1133,6 +1242,10 @@ async function connect(instanceId) {
   if (!id) {
     return;
   }
+  if (terminalStore.selectedInstanceId === id && terminalStore.wsConnected) {
+    switchCenterTab('terminal');
+    return;
+  }
   try {
     const measured = await syncTerminalFit('connect_prepare', { syncRemote: false });
     const nextCols = Math.max(1, Number(measured?.cols) || Number(cols.value) || 120);
@@ -1144,9 +1257,7 @@ async function connect(instanceId) {
 
     await terminalStore.connect(id);
     applyLocalTerminalGeometry(nextCols, nextRows);
-    if (activeCenterTab.value === 'terminal') {
-      focusTerminal();
-    }
+    switchCenterTab('terminal');
     loadFilesForSelected().catch(() => {});
   } catch (error) {
     terminalStore.setStatus(String(error?.message || error || 'connect failed'));
@@ -1359,7 +1470,9 @@ function toggleFolderCreator() {
   showFolderCreator.value = !showFolderCreator.value;
   if (!showFolderCreator.value) {
     folderName.value = '';
+    return;
   }
+  focusFolderNameInput();
 }
 
 async function createFolder() {
@@ -1450,12 +1563,14 @@ function addNewRecipe() {
     env: parseJsonOrDefault(envInput.value, {}),
     group: 'custom'
   });
+  focusRecipeNameInput();
 }
 
 function editRecipe(item) {
   showRecipeEditor.value = true;
   editingRecipeId.value = item.id;
   recipeEditor.value = buildRecipeEditor(item);
+  focusRecipeNameInput();
 }
 
 function cancelRecipeEdit() {
@@ -1530,6 +1645,7 @@ function saveCurrentAsRecipe() {
     });
     editingRecipeId.value = '';
     terminalStore.setStatus('已填充当前配置，请点击“保存配方”确认');
+    focusRecipeNameInput();
   } catch (error) {
     terminalStore.setStatus(String(error?.message || error || 'prepare recipe failed'));
   }
@@ -1657,6 +1773,37 @@ function waitForAnimationFrame() {
   return wait(16);
 }
 
+function syncCompactViewportState() {
+  if (typeof window === 'undefined') {
+    isCompactViewport.value = false;
+    return;
+  }
+  isCompactViewport.value = window.innerWidth <= 820;
+}
+
+function applyResponsiveSidebarDefaults() {
+  syncCompactViewportState();
+  if (!isCompactViewport.value) {
+    return;
+  }
+  terminalStore.setUiSession({
+    leftSidebarCollapsed: true,
+    rightSidebarCollapsed: true
+  });
+}
+
+function onWindowResize() {
+  const wasCompact = isCompactViewport.value;
+  syncCompactViewportState();
+  if (!wasCompact && isCompactViewport.value) {
+    terminalStore.setUiSession({
+      leftSidebarCollapsed: true,
+      rightSidebarCollapsed: true
+    });
+  }
+  scheduleTerminalFit('window_resize');
+}
+
 async function primeCreateGeometryMeasurement() {
   await nextTick();
   if (!isTerminalViewportRenderable(activeCenterTab.value, terminalRef.value)) {
@@ -1743,6 +1890,7 @@ async function sendShortcut(item) {
 }
 
 onMounted(async () => {
+  applyResponsiveSidebarDefaults();
   recipesStore.hydrate();
   hydrateDefaultCreateRecipe();
   hydrateCustomShortcuts();
@@ -1787,7 +1935,7 @@ onMounted(async () => {
   document.addEventListener('visibilitychange', onDocumentVisibilityChange);
   document.addEventListener('keydown', onGlobalTerminalKeyDown, true);
   if (typeof window !== 'undefined') {
-    window.addEventListener('resize', scheduleTerminalFit);
+    window.addEventListener('resize', onWindowResize);
   }
   if (typeof ResizeObserver !== 'undefined' && terminalRef.value) {
     terminalResizeObserver = new ResizeObserver(() => {
@@ -1819,7 +1967,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', onDocumentVisibilityChange);
   document.removeEventListener('keydown', onGlobalTerminalKeyDown, true);
   if (typeof window !== 'undefined') {
-    window.removeEventListener('resize', scheduleTerminalFit);
+    window.removeEventListener('resize', onWindowResize);
   }
   unbindTerminalInputHandlers();
   terminalResizeObserver?.disconnect?.();
@@ -1867,6 +2015,7 @@ watch(activeCenterTab, (tabId) => {
   padding: 8px 16px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 16px;
   border-bottom: 1px solid #3c3c3c;
   flex-shrink: 0;
@@ -1883,6 +2032,23 @@ watch(activeCenterTab, (tabId) => {
 
 .toolbar .logo i {
   color: #007acc;
+}
+
+.toolbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toolbar-toggle-btn {
+  padding: 6px 10px;
+  background: #262f3a;
+  border-color: #3f5368;
+  color: #d7e7f7;
+}
+
+.toolbar-toggle-btn:hover {
+  background: #314052;
 }
 
 .plain-text-panel {
@@ -1960,12 +2126,28 @@ button.primary:hover {
 }
 
 .main {
+  --left-sidebar-width: minmax(230px, 320px);
+  --right-sidebar-width: minmax(260px, 320px);
+  --sidebar-gutter-width: 10px;
   display: grid;
-  grid-template-columns: minmax(230px, 320px) minmax(560px, 1fr) minmax(260px, 320px);
+  grid-template-columns:
+    var(--left-sidebar-width)
+    var(--sidebar-gutter-width)
+    minmax(560px, 1fr)
+    var(--sidebar-gutter-width)
+    var(--right-sidebar-width);
   flex: 1;
   overflow: hidden;
   min-height: 0;
   min-width: 0;
+}
+
+.main.left-collapsed {
+  --left-sidebar-width: 0px;
+}
+
+.main.right-collapsed {
+  --right-sidebar-width: 0px;
 }
 
 .sidebar-column {
@@ -1976,12 +2158,62 @@ button.primary:hover {
   min-width: 0;
 }
 
+.sidebar-column.collapsed {
+  visibility: hidden;
+  pointer-events: none;
+  border: none;
+}
+
 .left-sidebar {
   border-right: 1px solid #3c3c3c;
 }
 
 .right-sidebar {
   border-left: 1px solid #3c3c3c;
+}
+
+.sidebar-gutter {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  justify-content: center;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.05));
+  color: #8aa2bc;
+  position: relative;
+}
+
+.sidebar-gutter::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(14, 99, 156, 0), rgba(14, 99, 156, 0.18), rgba(14, 99, 156, 0));
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.sidebar-gutter:hover::before,
+.sidebar-gutter:focus-visible::before {
+  opacity: 1;
+}
+
+.sidebar-gutter:hover,
+.sidebar-gutter:focus-visible {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.1));
+  color: #d9ebff;
+}
+
+.sidebar-gutter:focus-visible {
+  outline: 1px solid #3f87bf;
+  outline-offset: -1px;
+}
+
+.sidebar-gutter i {
+  position: relative;
+  z-index: 1;
+  font-size: 0.72rem;
 }
 
 .terminal-panel {
@@ -2184,7 +2416,14 @@ button.primary:hover {
 
 @media (max-width: 1380px) {
   .main {
-    grid-template-columns: minmax(210px, 280px) minmax(500px, 1fr) minmax(240px, 300px);
+    --left-sidebar-width: minmax(210px, 280px);
+    --right-sidebar-width: minmax(240px, 300px);
+    grid-template-columns:
+      var(--left-sidebar-width)
+      var(--sidebar-gutter-width)
+      minmax(500px, 1fr)
+      var(--sidebar-gutter-width)
+      var(--right-sidebar-width);
   }
 }
 
@@ -2194,14 +2433,29 @@ button.primary:hover {
   }
 
   .main {
-    grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+    --left-sidebar-width: minmax(220px, 300px);
+    --right-sidebar-width: minmax(240px, 300px);
+    grid-template-columns:
+      var(--left-sidebar-width)
+      var(--sidebar-gutter-width)
+      minmax(0, 1fr)
+      var(--sidebar-gutter-width)
+      var(--right-sidebar-width);
   }
 
   .right-sidebar {
-    grid-column: 1 / -1;
+    grid-column: 5;
     border-left: none;
     border-top: 1px solid #3c3c3c;
     max-height: 38vh;
+  }
+
+  .left-sidebar {
+    grid-column: 1;
+  }
+
+  .terminal-panel {
+    grid-column: 3;
   }
 
   .terminal-panel {
@@ -2231,6 +2485,12 @@ button.primary:hover {
     gap: 10px;
   }
 
+  .toolbar-actions {
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
   .toolbar .logo {
     font-size: 0.98rem;
   }
@@ -2240,6 +2500,10 @@ button.primary:hover {
     flex-direction: column;
     min-height: 0;
     overflow: visible;
+  }
+
+  .sidebar-gutter {
+    display: none;
   }
 
   .left-sidebar,

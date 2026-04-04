@@ -183,6 +183,7 @@ export function installMockRuntime(page) {
       const url = new URL(reqUrl, globalThis.location.origin);
       const method = String(init.method || 'GET').toUpperCase();
       const pathname = url.pathname.replace(/^\/web-pty/, '');
+      const normalizedPathname = pathname.replace(/^\/api\/nodes\/[^/]+/, '/api');
 
       if (!pathname.startsWith('/api/')) {
         return nativeFetch(input, init);
@@ -357,7 +358,7 @@ export function installMockRuntime(page) {
         }
       }
 
-      if (normalizedPathname.startsWith('/api/nodes/') && normalizedPathname.endsWith('/files/upload') && method === 'POST') {
+      if (pathname.startsWith('/api/nodes/') && pathname.endsWith('/files/upload') && method === 'POST') {
         return json({ node_id: 'master-mock', instance_id: 'mock-1', upload: { path: '/tmp/mock-upload.png', size: 11 } });
       }
 

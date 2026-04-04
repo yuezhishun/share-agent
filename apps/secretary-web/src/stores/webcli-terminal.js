@@ -128,7 +128,9 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
     resizeAckByInstance: {},
     pendingHistoryRequests: {},
     uiSession: {
-      activeRightTab: 'files'
+      activeRightTab: 'files',
+      leftSidebarCollapsed: false,
+      rightSidebarCollapsed: false
     }
   }),
 

@@ -86,6 +86,7 @@
         @submit.prevent="emit('create-folder')"
       >
         <input
+          :ref="setFolderNameInputRef"
           :value="folderName"
           class="folder-creator-input"
           data-testid="folder-name-input"
@@ -162,7 +163,7 @@
         <div class="shortcut-editor-field">
           <span class="shortcut-editor-label">按钮名</span>
           <input
-            :ref="shortcutLabelInputRef"
+            :ref="setShortcutLabelInputRef"
             :value="shortcutEditor.label"
             type="text"
             placeholder="如 tail日志"
@@ -255,6 +256,7 @@
       </div>
       <form v-if="showRecipeEditor" class="recipe-editor" @submit.prevent="emit('submit-recipe-editor')">
         <input
+          :ref="setRecipeNameInputRef"
           :value="recipeEditor.name"
           type="text"
           placeholder="显示名（可选）"
@@ -379,7 +381,9 @@ defineProps({
   recipeItems: { type: Array, default: () => [] },
   isDefaultCreateRecipe: { type: Function, required: true },
   formatRecipeSummary: { type: Function, required: true },
-  shortcutLabelInputRef: { type: [Function, Object], required: true }
+  setShortcutLabelInputRef: { type: Function, required: true },
+  setFolderNameInputRef: { type: Function, required: true },
+  setRecipeNameInputRef: { type: Function, required: true }
 });
 
 const emit = defineEmits([

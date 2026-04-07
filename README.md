@@ -12,7 +12,7 @@
 - `apps/terminal-gateway-dotnet/TerminalGateway.Api`：网关主服务
 - `apps/terminal-gateway-dotnet/TerminalGateway.Api.Tests`：xUnit 测试
 - `apps/secretary-web`：前端控制台与 Playwright E2E
-- `deploy`：本地部署、集群部署、验证和 Nginx 示例配置
+- `deploy`：按场景组织的部署入口、验证脚本和 Docker 联调配置
 - `docs`：运行说明、部署说明和接口文档
 
 ## 本地开发
@@ -45,7 +45,7 @@ npm install
 npm run dev
 ```
 
-默认前端通过 `/web-pty/api/*`、`/web-pty/hubs/terminal` 和 `/web-pty/hubs/cluster` 访问网关。
+默认前端通过 `/api/*`、`/hubs/terminal` 和 `/hubs/cluster` 访问网关。
 
 ## 构建与验证
 
@@ -77,22 +77,22 @@ npm run test:e2e:cluster
 ### Docker Compose 与部署验证
 
 ```bash
-cd deploy
+cd deploy/docker
 docker compose up --build
 ./smoke.sh
 ```
 
 ## 部署脚本
 
-- `deploy/release-local.sh`：单机 master 发布
-- `deploy/release-frontend-local.sh`：单机前端单独发布
-- `deploy/release-cluster-local.sh`：本地 master/slave 集群发布
-- `deploy/release-cluster-frontend-local.sh`：集群前端单独发布
-- `deploy/verify-local.sh`：单机部署验证
-- `deploy/verify-cluster-local.sh`：集群部署验证
-- `deploy/nginx.conf`：单机 Nginx 示例
-- `deploy/nginx-cluster-master.conf.example`：集群 master Nginx 示例
-- `deploy/nginx-cluster-slave.conf.example`：集群 slave Nginx 示例
+- `deploy/single-master`：单机 master 的前端构建、systemd、Nginx 和验证入口
+- `deploy/cluster-lan`：公网 master + 局域网 slave 的部署入口
+- `deploy/cluster-examples`：仅用于本机快速启动 cluster 示例
+- `deploy/docker`：Docker Compose 联调环境
+
+建议先看：
+
+- `deploy/README.md`
+- `docs/terminal-gateway-deploy.md`
 
 ## 清理构建产物
 

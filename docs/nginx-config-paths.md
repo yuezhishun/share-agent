@@ -19,14 +19,15 @@
 - 历史 WebSocket 路由（如 `/ws/terminal`、`/ws/term`）仅在旧方案中出现，若仍有残留请按当前代码核对是否仍需要。
 
 ## 3. 仓库部署参考配置
-- `deploy/nginx.conf`
-- `deploy/nginx-cluster-master.conf.example`
-- `deploy/nginx-cluster-slave.conf.example`
-- `deploy/install-cluster-nginx-local.sh`
+- `deploy/single-master/install-nginx.sh`
+- `deploy/cluster-lan/install-master-nginx.sh`
+- `deploy/cluster-lan/install-slave-nginx.sh`
+- `deploy/docker/nginx.conf`
 
 说明：
-- 该文件用于仓库内 Docker Compose 部署场景的 Nginx 配置模板。
-- 不一定与线上宝塔/宿主机 Nginx 完全一致，排障时请先确认当前实际加载的是哪套配置。
-- 双套 master/slave 本地部署时，优先使用 `deploy/install-cluster-nginx-local.sh` 生成两个 vhost，分别把：
-  - `master-ui` 的 `/web-pty` 反代到 `127.0.0.1:7310`
-  - `slave-ui` 的 `/web-pty` 反代到 `127.0.0.1:7320`
+- 生产 master 默认走同域同前缀：
+  - 前端：`/`
+  - API：`/api/`
+  - Hub：`/hubs/terminal`
+- 局域网 slave 本地站点也走相同前缀，只是反代到 slave 本机端口。
+- Docker 联调使用 `deploy/docker/nginx.conf`，不要和宿主机宝塔 vhost 混用。

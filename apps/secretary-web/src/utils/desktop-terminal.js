@@ -1,8 +1,17 @@
-export const DEFAULT_CWD_PATH = '/home/yueyuan';
+export function detectDefaultCwdPath() {
+  if (typeof navigator !== 'undefined') {
+    const platform = String(navigator.platform || navigator.userAgent || '').toLowerCase();
+    if (platform.includes('win')) {
+      return 'D:/workspace/code';
+    }
+  }
+
+  return '/home/yueyuan';
+}
+
+export const DEFAULT_CWD_PATH = detectDefaultCwdPath();
 export const FILE_CHUNK_BYTES = 64 * 1024;
 export const FILE_CHUNK_MAX_LINES = 800;
-export const DEFAULT_RECIPE_STORAGE_KEY = 'webcli-default-create-recipe-v1';
-export const CUSTOM_SHORTCUT_STORAGE_KEY = 'webcli-shortcuts-v1';
 export const COMBO_KEY_INTERVAL_MS = 120;
 export const QUICK_COMMAND_INTERVAL_MS = 300;
 export const SHORTCUT_GROUP_ORDER = ['控制键', '导航键', '常用命令', 'custom', '自定义'];
@@ -51,15 +60,22 @@ export const BUILT_IN_SHORTCUT_ITEMS = [
 
 export function buildRecipeEditor(seed, normalizeSelectableCwd, formatCommandLine) {
   const source = seed || {};
+  const command = String(source.command || '').trim();
+  const args = Array.isArray(source.args) ? source.args : [];
+  const envOverrides = source.envOverrides && typeof source.envOverrides === 'object' && !Array.isArray(source.envOverrides)
+    ? source.envOverrides
+    : (source.env && typeof source.env === 'object' && !Array.isArray(source.env) ? source.env : {});
   return {
     name: String(source.name || ''),
     cwd: normalizeSelectableCwd(source.cwd),
-    commandLine: formatCommandLine(
-      String(source.command || 'bash') || 'bash',
-      Array.isArray(source.args) ? source.args : ['-i']
-    ),
-    envInput: JSON.stringify(source.env && typeof source.env === 'object' && !Array.isArray(source.env) ? source.env : {}, null, 2),
-    group: String(source.group || 'general')
+    commandLine: command ? formatCommandLine(command, args) : '',
+    envInput: JSON.stringify(envOverrides, null, 2),
+    group: String(source.group || 'general'),
+    supportedOs: Array.isArray(source.supportedOs) ? source.supportedOs.map((item) => String(item || '').trim()).filter(Boolean) : [],
+    selectedEnvGroupNames: Array.isArray(source.envGroupNames) && source.envGroupNames.length > 0
+      ? [String(source.envGroupNames[0] || '').trim()].filter(Boolean)
+      : [],
+    selectedEnvEntryIds: Array.isArray(source.envEntryIds) ? source.envEntryIds.map((item) => String(item || '').trim()).filter(Boolean) : []
   };
 }
 
@@ -89,13 +105,30 @@ export function compressPath(path) {
     return '/';
   }
 
-  const normalized = raw.replace(/\/+/g, '/');
+  const normalized = raw.replace(/\\/g, '/').replace(/\/+/g, '/');
   const segments = normalized.split('/').filter(Boolean);
   if (segments.length <= 3) {
     return normalized;
   }
 
   return `.../${segments.slice(-3).join('/')}`;
+}
+
+function extractCommandLabel(command) {
+  const raw = String(command || '').trim();
+  if (!raw) {
+    return 'bash';
+  }
+
+  const match = raw.match(/^"([^"]+)"|^'([^']+)'|^(\S+)/);
+  const token = String(match?.[1] || match?.[2] || match?.[3] || raw).trim();
+  if (!token) {
+    return 'bash';
+  }
+
+  const normalized = token.replace(/\\/g, '/');
+  const baseName = normalized.split('/').filter(Boolean).pop() || normalized;
+  return baseName.replace(/\.(exe|cmd|bat)$/i, '') || 'bash';
 }
 
 export function normalizeShortcutGroup(value) {
@@ -122,30 +155,6 @@ export function compareShortcutGroup(a, b) {
   return left.localeCompare(right, 'zh-Hans-CN');
 }
 
-export function toShortcutPayload(item) {
-  const id = String(item?.id || '').trim();
-  const label = String(item?.label || '').trim();
-  const group = normalizeShortcutGroup(item?.group);
-  const sequence = Array.isArray(item?.sequence)
-    ? item.sequence.map((x) => String(x ?? '')).filter((x) => x.length > 0)
-    : [];
-  const value = String(item?.value || '').trim();
-  const intervalMs = Number(item?.intervalMs);
-
-  if (!id || !label) {
-    return null;
-  }
-
-  return {
-    id,
-    label,
-    group,
-    sequence,
-    value,
-    intervalMs: Number.isFinite(intervalMs) ? Math.max(0, Math.floor(intervalMs)) : QUICK_COMMAND_INTERVAL_MS
-  };
-}
-
 export function formatNodeOption(node) {
   if (!node) {
     return '未知节点';
@@ -158,8 +167,8 @@ export function formatNodeOption(node) {
 
 export function formatInstanceSummary(instance) {
   const instanceCwd = String(instance?.cwd || '').trim() || '~';
-  const instanceCommand = String(instance?.command || '').trim() || 'bash';
-  return `${instanceCommand} · ${compressPath(instanceCwd)}`;
+  const instanceCommand = extractCommandLabel(instance?.command);
+  return `${instanceCommand} ${instanceCwd}`;
 }
 
 export function formatInstanceTooltip(instance, instanceAlias) {

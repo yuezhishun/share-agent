@@ -1,0 +1,24 @@
+services:
+  terminal-gateway-dotnet:
+    image: mcr.microsoft.com/dotnet/sdk:10.0
+    working_dir: /workspace
+    command: ["dotnet", "run", "--project", "apps/terminal-gateway-dotnet/TerminalGateway.Api/TerminalGateway.Api.csproj"]
+    volumes:
+      - ../..:/workspace
+    environment:
+      PORT: 7300
+      HOST: 0.0.0.0
+
+  secretary-web:
+    build:
+      context: ../../apps/secretary-web
+
+  gateway:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      - terminal-gateway-dotnet
+      - secretary-web

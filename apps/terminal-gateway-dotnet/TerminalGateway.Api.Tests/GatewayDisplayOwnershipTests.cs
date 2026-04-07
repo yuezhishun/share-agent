@@ -113,7 +113,7 @@ public class GatewayDisplayOwnershipTests
             command = "/bin/cat",
             cols = 80,
             rows = 25,
-            cwd = "/home/yueyuan"
+            cwd = TestPaths.DefaultCwd
         });
         Assert.Equal(HttpStatusCode.OK, createRes.StatusCode);
         var created = JsonDocument.Parse(await createRes.Content.ReadAsStringAsync()).RootElement;

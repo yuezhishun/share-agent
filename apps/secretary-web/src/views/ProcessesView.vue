@@ -292,6 +292,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useWebCliProcessesStore } from '../stores/webcli-processes.js';
+import { DEFAULT_CWD_PATH } from '../utils/desktop-terminal.js';
 
 const processStore = useWebCliProcessesStore();
 const outputFilter = ref('all');
@@ -300,7 +301,7 @@ const outputScrollerRef = ref(null);
 const commandInputRef = ref(null);
 const settingsFirstInputRef = ref(null);
 const showSettingsForm = ref(false);
-const defaultCwdPath = '/home/yueyuan';
+const defaultCwdPath = DEFAULT_CWD_PATH;
 const cwdOptions = ref([]);
 const cwdOptionsLoading = ref(false);
 const cwdOptionsError = ref('');
@@ -444,7 +445,7 @@ function applyShortcut(command) {
 }
 
 function resolveHttpBase() {
-  return String(import.meta.env?.VITE_WEBPTY_BASE || '/web-pty').trim();
+  return String(import.meta.env?.VITE_WEBPTY_BASE || '').trim();
 }
 
 function buildApiPath(pathname, params) {

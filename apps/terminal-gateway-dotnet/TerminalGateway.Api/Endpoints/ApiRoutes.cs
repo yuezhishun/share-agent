@@ -80,7 +80,7 @@ public static class ApiRoutes
                 }
                 var protocol = string.Equals(request.Scheme, "https", StringComparison.OrdinalIgnoreCase) ? "https" : "http";
                 var hubUrl = $"{protocol}://{request.Host}/hubs/terminal";
-                return Results.Ok(new { instance_id = instance.Id, hub_url = hubUrl });
+                return Results.Ok(new { instance_id = instance.Id, hub_url = hubUrl, node_id = options.NodeId, summary = instance });
             }
             catch (UnauthorizedAccessException ex)
             {
@@ -101,7 +101,7 @@ public static class ApiRoutes
                     var instance = await manager.CreateAsync(body, options.FilesBasePath, ct);
                     var protocol = string.Equals(request.Scheme, "https", StringComparison.OrdinalIgnoreCase) ? "https" : "http";
                     var hubUrl = $"{protocol}://{request.Host}/hubs/terminal";
-                    return Results.Ok(new { instance_id = instance.Id, hub_url = hubUrl, node_id = options.NodeId });
+                    return Results.Ok(new { instance_id = instance.Id, hub_url = hubUrl, node_id = options.NodeId, summary = instance });
                 }
                 catch (UnauthorizedAccessException ex)
                 {
@@ -135,7 +135,7 @@ public static class ApiRoutes
                 var hubUrl = $"{protocol}://{request.Host}/hubs/terminal";
                 var summary = ReadRemoteSummary(commandResult.Payload, instanceId, nodeId);
                 remoteInstances.Upsert(summary);
-                return Results.Ok(new { instance_id = instanceId, hub_url = hubUrl, node_id = summary.NodeId });
+                return Results.Ok(new { instance_id = instanceId, hub_url = hubUrl, node_id = summary.NodeId, summary });
             }
             catch (Exception ex)
             {
@@ -449,7 +449,7 @@ public static class ApiRoutes
             }
         });
 
-        app.MapPost("/api/nodes/{nodeId}/files/upload", async (HttpRequest request, string nodeId, InstanceManager manager, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        app.MapPost("/api/nodes/{nodeId}/files/upload", async (HttpRequest request, string nodeId, InstanceManager manager, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, SlaveClusterBridgeService bridge, CancellationToken ct) =>
         {
             if (!request.HasFormContentType)
             {
@@ -511,7 +511,15 @@ public static class ApiRoutes
                     return Results.BadRequest(new { error = "file too large", node_id = nodeId, instance_id = instanceId });
                 }
 
-                var result = await broker.SendAsync(nodeId, "files.upload", new
+                var result = IsSlaveMode(options)
+                    ? await bridge.RequestCommandAsync(nodeId, "files.upload", new
+                    {
+                        instance_id = instanceId,
+                        path = targetPath,
+                        file_name = file.FileName,
+                        content_base64 = Convert.ToBase64String(buffer.ToArray())
+                    }, ct)
+                    : await broker.SendAsync(nodeId, "files.upload", new
                 {
                     instance_id = instanceId,
                     path = targetPath,
@@ -536,7 +544,7 @@ public static class ApiRoutes
             }
         });
 
-        app.MapGet("/api/nodes/{nodeId}/files/list", async (string nodeId, string? path, string? show_hidden, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        app.MapGet("/api/nodes/{nodeId}/files/list", async (string nodeId, string? path, string? show_hidden, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, SlaveClusterBridgeService bridge, CancellationToken ct) =>
         {
             var showHidden = ParseBooleanFlag(show_hidden);
             if (IsLocalNode(nodeId, options))
@@ -561,7 +569,13 @@ public static class ApiRoutes
 
             try
             {
-                var result = await broker.SendAsync(nodeId, "files.list", new
+                var result = IsSlaveMode(options)
+                    ? await bridge.RequestCommandAsync(nodeId, "files.list", new
+                    {
+                        path,
+                        show_hidden = showHidden
+                    }, ct)
+                    : await broker.SendAsync(nodeId, "files.list", new
                 {
                     path,
                     show_hidden = showHidden
@@ -576,7 +590,7 @@ public static class ApiRoutes
             }
         });
 
-        app.MapGet("/api/nodes/{nodeId}/files/read", async (string nodeId, string? path, int? max_lines, int? chunk_bytes, int? line_offset, string? direction, string? mode, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        app.MapGet("/api/nodes/{nodeId}/files/read", async (string nodeId, string? path, int? max_lines, int? chunk_bytes, int? line_offset, string? direction, string? mode, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, SlaveClusterBridgeService bridge, CancellationToken ct) =>
         {
             var maxLines = Math.Clamp(max_lines ?? options.FileChunkMaxLines, 1, 5000);
             var chunkBytes = Math.Clamp(chunk_bytes ?? options.FileChunkBytes, 1, 1024 * 1024);
@@ -616,7 +630,17 @@ public static class ApiRoutes
 
             try
             {
-                var result = await broker.SendAsync(nodeId, "files.read", new
+                var result = IsSlaveMode(options)
+                    ? await bridge.RequestCommandAsync(nodeId, "files.read", new
+                    {
+                        path,
+                        max_lines = maxLines,
+                        chunk_bytes = chunkBytes,
+                        line_offset = lineOffset,
+                        direction,
+                        mode
+                    }, ct)
+                    : await broker.SendAsync(nodeId, "files.read", new
                 {
                     path,
                     max_lines = maxLines,
@@ -635,7 +659,7 @@ public static class ApiRoutes
             }
         });
 
-        app.MapPost("/api/nodes/{nodeId}/files/write", async (string nodeId, FileWriteRequest body, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        app.MapPost("/api/nodes/{nodeId}/files/write", async (string nodeId, FileWriteRequest body, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, SlaveClusterBridgeService bridge, CancellationToken ct) =>
         {
             if (IsLocalNode(nodeId, options))
             {
@@ -663,7 +687,9 @@ public static class ApiRoutes
 
             try
             {
-                var result = await broker.SendAsync(nodeId, "files.write", body, ct);
+                var result = IsSlaveMode(options)
+                    ? await bridge.RequestCommandAsync(nodeId, "files.write", body, ct)
+                    : await broker.SendAsync(nodeId, "files.write", body, ct);
                 return result.Ok
                     ? Results.Ok(result.Payload)
                     : Results.BadRequest(new { error = result.Error ?? "remote file write failed", node_id = nodeId, path = body.Path });
@@ -674,7 +700,7 @@ public static class ApiRoutes
             }
         });
 
-        app.MapPost("/api/nodes/{nodeId}/files/mkdir", async (string nodeId, FileMkdirRequest body, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        app.MapPost("/api/nodes/{nodeId}/files/mkdir", async (string nodeId, FileMkdirRequest body, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, SlaveClusterBridgeService bridge, CancellationToken ct) =>
         {
             var targetPath = string.IsNullOrWhiteSpace(body.Path) ? options.FilesBasePath : body.Path;
             if (IsLocalNode(nodeId, options))
@@ -704,7 +730,13 @@ public static class ApiRoutes
 
             try
             {
-                var result = await broker.SendAsync(nodeId, "files.mkdir", new
+                var result = IsSlaveMode(options)
+                    ? await bridge.RequestCommandAsync(nodeId, "files.mkdir", new
+                    {
+                        path = targetPath,
+                        name = body.Name
+                    }, ct)
+                    : await broker.SendAsync(nodeId, "files.mkdir", new
                 {
                     path = targetPath,
                     name = body.Name
@@ -719,7 +751,7 @@ public static class ApiRoutes
             }
         });
 
-        app.MapGet("/api/nodes/{nodeId}/files/download", async (string nodeId, string? path, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, CancellationToken ct) =>
+        app.MapGet("/api/nodes/{nodeId}/files/download", async (string nodeId, string? path, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, SlaveClusterBridgeService bridge, CancellationToken ct) =>
         {
             if (IsLocalNode(nodeId, options))
             {
@@ -748,7 +780,9 @@ public static class ApiRoutes
 
             try
             {
-                var result = await broker.SendAsync(nodeId, "files.download", new { path }, ct);
+                var result = IsSlaveMode(options)
+                    ? await bridge.RequestCommandAsync(nodeId, "files.download", new { path }, ct)
+                    : await broker.SendAsync(nodeId, "files.download", new { path }, ct);
                 if (!result.Ok)
                 {
                     return Results.BadRequest(new { error = result.Error ?? "remote download failed", node_id = nodeId, path });
@@ -778,6 +812,111 @@ public static class ApiRoutes
                 }
 
                 return Results.File(bytes, contentType ?? "application/octet-stream", fileName);
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, path });
+            }
+        });
+
+        app.MapPost("/api/nodes/{nodeId}/files/rename", async (string nodeId, FileRenameRequest body, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, SlaveClusterBridgeService bridge, CancellationToken ct) =>
+        {
+            if (IsLocalNode(nodeId, options))
+            {
+                try
+                {
+                    var item = files.RenameEntry(options.FilesBasePath, body.Path, body.NewName);
+                    return Results.Ok(new { item });
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    return Results.Json(new { error = ex.Message, @base = options.FilesBasePath, node_id = nodeId }, statusCode: StatusCodes.Status403Forbidden);
+                }
+                catch (FileNotFoundException ex)
+                {
+                    return Results.NotFound(new { error = ex.Message, path = ex.FileName ?? body.Path, node_id = nodeId });
+                }
+                catch (InvalidDataException ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message, path = body.Path, node_id = nodeId });
+                }
+                catch (Exception ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message, path = body.Path, node_id = nodeId });
+                }
+            }
+
+            try
+            {
+                var result = IsSlaveMode(options)
+                    ? await bridge.RequestCommandAsync(nodeId, "files.rename", new
+                    {
+                        path = body.Path,
+                        new_name = body.NewName
+                    }, ct)
+                    : await broker.SendAsync(nodeId, "files.rename", new
+                {
+                    path = body.Path,
+                    new_name = body.NewName
+                }, ct);
+                return result.Ok
+                    ? Results.Ok(new { item = result.Payload })
+                    : Results.BadRequest(new { error = result.Error ?? "remote rename failed", node_id = nodeId, path = body.Path });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message, node_id = nodeId, path = body.Path });
+            }
+        });
+
+        app.MapDelete("/api/nodes/{nodeId}/files/remove", async (string nodeId, string? path, string? recursive, FileApiService files, GatewayOptions options, ClusterCommandBroker broker, SlaveClusterBridgeService bridge, CancellationToken ct) =>
+        {
+            var allowRecursive = ParseBooleanFlag(recursive);
+            if (IsLocalNode(nodeId, options))
+            {
+                try
+                {
+                    var result = files.RemoveEntry(options.FilesBasePath, path, allowRecursive);
+                    return Results.Ok(result);
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    return Results.Json(new { error = ex.Message, @base = options.FilesBasePath, node_id = nodeId }, statusCode: StatusCodes.Status403Forbidden);
+                }
+                catch (FileNotFoundException ex)
+                {
+                    return Results.NotFound(new { error = ex.Message, path = ex.FileName ?? path, node_id = nodeId });
+                }
+                catch (InvalidOperationException ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message, path, node_id = nodeId });
+                }
+                catch (IOException ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message, path, node_id = nodeId });
+                }
+                catch (Exception ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message, path, node_id = nodeId });
+                }
+            }
+
+            try
+            {
+                var result = IsSlaveMode(options)
+                    ? await bridge.RequestCommandAsync(nodeId, "files.remove", new
+                    {
+                        path,
+                        recursive = allowRecursive
+                    }, ct)
+                    : await broker.SendAsync(nodeId, "files.remove", new
+                {
+                    path,
+                    recursive = allowRecursive
+                }, ct);
+                return result.Ok
+                    ? Results.Ok(result.Payload)
+                    : Results.BadRequest(new { error = result.Error ?? "remote remove failed", node_id = nodeId, path });
             }
             catch (Exception ex)
             {
@@ -1130,6 +1269,7 @@ public static class ApiRoutes
                     NodeId = preferred.NodeId,
                     NodeName = preferred.NodeName,
                     NodeRole = preferred.NodeRole,
+                    NodeOs = preferred.NodeOs,
                     NodeLabel = preferred.NodeLabel,
                     IsCurrent = string.Equals(preferred.NodeId, currentNodeId, StringComparison.Ordinal),
                     NodeOnline = preferred.NodeOnline,

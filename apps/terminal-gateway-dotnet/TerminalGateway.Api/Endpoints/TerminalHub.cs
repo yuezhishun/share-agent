@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.Logging;
 using TerminalGateway.Api.Infrastructure;
 using TerminalGateway.Api.Models;
 using TerminalGateway.Api.Services;
@@ -15,6 +16,7 @@ public sealed class TerminalHub : Hub
     private readonly GatewayOptions _options;
     private readonly TerminalOracleManager _oracle;
     private readonly SlaveClusterBridgeService _slaveBridge;
+    private readonly ILogger<TerminalHub> _logger;
 
     public TerminalHub(
         InstanceManager manager,
@@ -23,7 +25,8 @@ public sealed class TerminalHub : Hub
         RemoteInstanceRegistry remoteInstances,
         GatewayOptions options,
         TerminalOracleManager oracle,
-        SlaveClusterBridgeService slaveBridge)
+        SlaveClusterBridgeService slaveBridge,
+        ILogger<TerminalHub> logger)
     {
         _manager = manager;
         _registry = registry;
@@ -32,6 +35,7 @@ public sealed class TerminalHub : Hub
         _options = options;
         _oracle = oracle;
         _slaveBridge = slaveBridge;
+        _logger = logger;
     }
 
     public static string BuildInstanceGroup(string instanceId) => $"instance:{instanceId}";
@@ -67,12 +71,15 @@ public sealed class TerminalHub : Hub
 
         if (!TryResolveRemoteNode(instanceId, out var nodeId))
         {
-            throw new HubException("instance not found");
+            await HandleMissingInstanceAsync(instanceId, newlyJoined);
+            return;
         }
 
         if (IsLocalNode(nodeId))
         {
-            throw new HubException("instance not found");
+            _remoteInstances.Remove(instanceId);
+            await HandleMissingInstanceAsync(instanceId, newlyJoined);
+            return;
         }
 
         var acquiredRemoteSubscription = false;
@@ -90,8 +97,24 @@ public sealed class TerminalHub : Hub
                 await Clients.Caller.SendAsync("TerminalEvent", remoteSnapshot);
             }
         }
-        catch
+        catch (HubException ex) when (IsMissingInstanceError(ex.Message))
         {
+            _remoteInstances.Remove(instanceId);
+            if (acquiredRemoteSubscription)
+            {
+                await _slaveBridge.ReleaseRemoteInstanceSubscriptionAsync(instanceId, CancellationToken.None);
+            }
+
+            await HandleMissingInstanceAsync(instanceId, newlyJoined);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "JoinInstance failed for instance_id={InstanceId} node_id={NodeId} connection_id={ConnectionId}",
+                instanceId,
+                nodeId,
+                connectionId);
             if (acquiredRemoteSubscription)
             {
                 await _slaveBridge.ReleaseRemoteInstanceSubscriptionAsync(instanceId, CancellationToken.None);
@@ -197,7 +220,10 @@ public sealed class TerminalHub : Hub
                 throw new HubException(result.Error ?? "remote resize failed");
             }
 
-            await Clients.Caller.SendAsync("TerminalEvent", BuildResizeAck(instanceId, nodeId, reqId, true, cols, rows, 0, null));
+            var remoteNodeName = _remoteInstances.TryGetSummary(instanceId, out var summary)
+                ? summary.NodeName
+                : nodeId;
+            await Clients.Caller.SendAsync("TerminalEvent", BuildResizeAck(instanceId, nodeId, remoteNodeName, reqId, true, cols, rows, 0, null));
             if (TryReadRemoteSnapshot(result.Payload, out var remoteSnapshot))
             {
                 await Clients.Group(BuildInstanceGroup(instanceId)).SendAsync("TerminalEvent", ConvertSnapshot(remoteSnapshot));
@@ -207,11 +233,11 @@ public sealed class TerminalHub : Hub
 
         if (!resized.Accepted)
         {
-            await Clients.Caller.SendAsync("TerminalEvent", BuildResizeAck(instanceId, _options.NodeId, reqId, false, resized.Cols, resized.Rows, resized.RenderEpoch, "not_owner"));
+            await Clients.Caller.SendAsync("TerminalEvent", BuildResizeAck(instanceId, _options.NodeId, _options.NodeName, reqId, false, resized.Cols, resized.Rows, resized.RenderEpoch, "not_owner"));
             return;
         }
 
-        await Clients.Caller.SendAsync("TerminalEvent", BuildResizeAck(instanceId, _options.NodeId, reqId, true, resized.Cols, resized.Rows, resized.RenderEpoch, null));
+        await Clients.Caller.SendAsync("TerminalEvent", BuildResizeAck(instanceId, _options.NodeId, _options.NodeName, reqId, true, resized.Cols, resized.Rows, resized.RenderEpoch, null));
         var snapshot = _oracle.BuildSnapshot(instanceId);
         if (snapshot is not null)
         {
@@ -242,15 +268,28 @@ public sealed class TerminalHub : Hub
 
             if (!TryResolveRemoteNode(instanceId, out var rawNodeId))
             {
-                throw new HubException("instance not found");
+                await NotifyInstanceMissingAsync(instanceId, syncType);
+                return;
             }
 
             if (IsLocalNode(rawNodeId))
             {
-                throw new HubException("instance not found");
+                _remoteInstances.Remove(instanceId);
+                await NotifyInstanceMissingAsync(instanceId, syncType);
+                return;
             }
 
-            var remoteRaw = await RequestRemoteSyncAsync(rawNodeId, instanceId, request, Context.ConnectionAborted);
+            JsonElement remoteRaw;
+            try
+            {
+                remoteRaw = await RequestRemoteSyncAsync(rawNodeId, instanceId, request, Context.ConnectionAborted);
+            }
+            catch (HubException ex) when (IsMissingInstanceError(ex.Message))
+            {
+                _remoteInstances.Remove(instanceId);
+                await NotifyInstanceMissingAsync(instanceId, syncType);
+                return;
+            }
             if (!IsRawEvent(remoteRaw))
             {
                 throw new HubException("remote raw sync failed");
@@ -275,15 +314,28 @@ public sealed class TerminalHub : Hub
 
             if (!TryResolveRemoteNode(instanceId, out var historyNodeId))
             {
-                throw new HubException("instance not found");
+                await NotifyInstanceMissingAsync(instanceId, syncType);
+                return;
             }
 
             if (IsLocalNode(historyNodeId))
             {
-                throw new HubException("instance not found");
+                _remoteInstances.Remove(instanceId);
+                await NotifyInstanceMissingAsync(instanceId, syncType);
+                return;
             }
 
-            var remoteHistory = await RequestRemoteSyncAsync(historyNodeId, instanceId, request, Context.ConnectionAborted);
+            JsonElement remoteHistory;
+            try
+            {
+                remoteHistory = await RequestRemoteSyncAsync(historyNodeId, instanceId, request, Context.ConnectionAborted);
+            }
+            catch (HubException ex) when (IsMissingInstanceError(ex.Message))
+            {
+                _remoteInstances.Remove(instanceId);
+                await NotifyInstanceMissingAsync(instanceId, syncType);
+                return;
+            }
             if (remoteHistory.ValueKind != JsonValueKind.Object || !string.Equals(ReadString(remoteHistory, "type"), "term.history.chunk", StringComparison.Ordinal))
             {
                 throw new HubException("remote history sync failed");
@@ -302,15 +354,28 @@ public sealed class TerminalHub : Hub
 
         if (!TryResolveRemoteNode(instanceId, out var nodeId))
         {
-            throw new HubException("instance not found");
+            await NotifyInstanceMissingAsync(instanceId, syncType);
+            return;
         }
 
         if (IsLocalNode(nodeId))
         {
-            throw new HubException("instance not found");
+            _remoteInstances.Remove(instanceId);
+            await NotifyInstanceMissingAsync(instanceId, syncType);
+            return;
         }
 
-        var remoteSnapshot = await RequestRemoteSyncAsync(nodeId, instanceId, request, Context.ConnectionAborted);
+        JsonElement remoteSnapshot;
+        try
+        {
+            remoteSnapshot = await RequestRemoteSyncAsync(nodeId, instanceId, request, Context.ConnectionAborted);
+        }
+        catch (HubException ex) when (IsMissingInstanceError(ex.Message))
+        {
+            _remoteInstances.Remove(instanceId);
+            await NotifyInstanceMissingAsync(instanceId, syncType);
+            return;
+        }
         if (remoteSnapshot.ValueKind != JsonValueKind.Object)
         {
             throw new HubException("remote screen sync failed");
@@ -341,6 +406,28 @@ public sealed class TerminalHub : Hub
 
         var nextOwner = _registry.GetConnections(instanceId).FirstOrDefault();
         _manager.SetDisplayOwner(instanceId, nextOwner);
+    }
+
+    private async Task HandleMissingInstanceAsync(string instanceId, bool newlyJoined)
+    {
+        if (newlyJoined && _registry.Unbind(Context.ConnectionId, instanceId))
+        {
+            await Groups.RemoveFromGroupAsync(Context.ConnectionId, BuildInstanceGroup(instanceId));
+            await ReassignDisplayOwnerAsync(instanceId);
+        }
+
+        await NotifyInstanceMissingAsync(instanceId, "join");
+    }
+
+    private Task NotifyInstanceMissingAsync(string instanceId, string action)
+    {
+        return Clients.Caller.SendAsync("TerminalEvent", BuildInstanceMissing(instanceId, action));
+    }
+
+    private static bool IsMissingInstanceError(string? message)
+    {
+        return !string.IsNullOrWhiteSpace(message)
+            && message.Contains("instance not found", StringComparison.OrdinalIgnoreCase);
     }
 
     private bool TryResolveRemoteNode(string instanceId, out string nodeId)
@@ -415,7 +502,7 @@ public sealed class TerminalHub : Hub
         await _slaveBridge.ReleaseRemoteInstanceSubscriptionAsync(instanceId, CancellationToken.None);
     }
 
-    private static object BuildResizeAck(string instanceId, string nodeId, string reqId, bool accepted, int cols, int rows, long renderEpoch, string? reason)
+    private static object BuildResizeAck(string instanceId, string nodeId, string nodeName, string reqId, bool accepted, int cols, int rows, long renderEpoch, string? reason)
     {
         return new
         {
@@ -423,12 +510,25 @@ public sealed class TerminalHub : Hub
             type = "term.resize.ack",
             instance_id = instanceId,
             node_id = nodeId,
-            node_name = nodeId,
+            node_name = nodeName,
             req_id = reqId,
             accepted,
             reason,
             size = new { cols, rows },
             render_epoch = renderEpoch,
+            ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
+    }
+
+    private static object BuildInstanceMissing(string instanceId, string action)
+    {
+        return new
+        {
+            v = 1,
+            type = "term.instance.missing",
+            instance_id = instanceId,
+            action,
+            reason = "not_found",
             ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
         };
     }

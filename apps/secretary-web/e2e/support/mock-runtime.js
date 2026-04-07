@@ -182,7 +182,7 @@ export function installMockRuntime(page) {
       const reqUrl = typeof input === 'string' ? input : input?.url || '';
       const url = new URL(reqUrl, globalThis.location.origin);
       const method = String(init.method || 'GET').toUpperCase();
-      const pathname = url.pathname.replace(/^\/web-pty/, '');
+      const pathname = url.pathname;
       const normalizedPathname = pathname.replace(/^\/api\/nodes\/[^/]+/, '/api');
 
       if (!pathname.startsWith('/api/')) {

@@ -242,35 +242,224 @@ public class GatewayApiTests
         var listPayload = JsonDocument.Parse(await listResponse.Content.ReadAsStringAsync()).RootElement;
         Assert.Contains(listPayload.GetProperty("items").EnumerateArray(), x => x.GetProperty("template_id").GetString() == "builtin-bash");
 
+        var initialTerminalResponse = await client.GetAsync("/api/nodes/local-node/cli/templates?kind=terminal");
+        Assert.Equal(HttpStatusCode.OK, initialTerminalResponse.StatusCode);
+        var initialTerminalPayload = JsonDocument.Parse(await initialTerminalResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.NotEqual(0, initialTerminalPayload.GetProperty("items").GetArrayLength());
+        Assert.Contains(initialTerminalPayload.GetProperty("items").EnumerateArray(), x => x.GetProperty("is_default").GetBoolean());
+
         var createResponse = await client.PostAsJsonAsync("/api/nodes/local-node/cli/templates", new
         {
             template_id = "custom-build",
             name = "Custom Build",
+            template_kind = "terminal",
             cli_type = "bash",
             executable = "sh",
             base_args = new[] { "-c", "printf custom-template" },
             default_cwd = tempDir,
             default_env = new Dictionary<string, string> { ["CLI_TEST_VAR"] = "1" },
-            description = "test template"
+            description = "test template",
+            is_default = true
         });
         Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
 
         var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
         Assert.Equal("custom-build", created.GetProperty("template_id").GetString());
+        Assert.Equal("terminal", created.GetProperty("template_kind").GetString());
+        Assert.True(created.GetProperty("is_default").GetBoolean());
+
+        var terminalOnlyResponse = await client.GetAsync("/api/nodes/local-node/cli/templates?kind=terminal");
+        Assert.Equal(HttpStatusCode.OK, terminalOnlyResponse.StatusCode);
+        var terminalOnlyPayload = JsonDocument.Parse(await terminalOnlyResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Contains(terminalOnlyPayload.GetProperty("items").EnumerateArray(), x => x.GetProperty("template_id").GetString() == "custom-build");
+        Assert.DoesNotContain(terminalOnlyPayload.GetProperty("items").EnumerateArray(), x => x.GetProperty("template_id").GetString() == "builtin-bash");
 
         var updateResponse = await client.PutAsJsonAsync("/api/nodes/local-node/cli/templates/custom-build", new
         {
             name = "Custom Build Updated",
-            color = "#123456"
+            color = "#123456",
+            is_default = false
         });
         Assert.Equal(HttpStatusCode.OK, updateResponse.StatusCode);
 
         var updated = JsonDocument.Parse(await updateResponse.Content.ReadAsStringAsync()).RootElement;
         Assert.Equal("Custom Build Updated", updated.GetProperty("name").GetString());
         Assert.Equal("#123456", updated.GetProperty("color").GetString());
+        Assert.False(updated.GetProperty("is_default").GetBoolean());
 
         var deleteResponse = await client.DeleteAsync("/api/nodes/local-node/cli/templates/custom-build");
         Assert.Equal(HttpStatusCode.OK, deleteResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task Terminal_Shortcut_Endpoints_Work()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tg-terminal-shortcuts-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        var dbPath = Path.Combine(tempDir, "cli-templates.db");
+
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["FILES_BASE_PATH"] = tempDir,
+            ["TERMINAL_CLI_TEMPLATE_DB_PATH"] = dbPath,
+            ["NODE_ID"] = "local-node"
+        });
+        using var client = app.CreateClient();
+
+        var listResponse = await client.GetAsync("/api/terminal/shortcuts");
+        Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
+        var initialPayload = JsonDocument.Parse(await listResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal(0, initialPayload.GetProperty("items").GetArrayLength());
+
+        var createResponse = await client.PostAsJsonAsync("/api/terminal/shortcuts", new
+        {
+            label = "Tail logs",
+            command = "tail -f app.log",
+            group_name = "custom",
+            press_enter = true
+        });
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+        var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
+        var shortcutId = created.GetProperty("shortcut_id").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(shortcutId));
+        Assert.Equal("Tail logs", created.GetProperty("label").GetString());
+        Assert.Equal("custom", created.GetProperty("group_name").GetString());
+        Assert.True(created.GetProperty("press_enter").GetBoolean());
+
+        var updateResponse = await client.PutAsJsonAsync($"/api/terminal/shortcuts/{shortcutId}", new
+        {
+            label = "Tail app logs",
+            press_enter = false
+        });
+        Assert.Equal(HttpStatusCode.OK, updateResponse.StatusCode);
+        var updated = JsonDocument.Parse(await updateResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("Tail app logs", updated.GetProperty("label").GetString());
+        Assert.False(updated.GetProperty("press_enter").GetBoolean());
+
+        var reloadResponse = await client.GetAsync("/api/terminal/shortcuts");
+        Assert.Equal(HttpStatusCode.OK, reloadResponse.StatusCode);
+        var reloadPayload = JsonDocument.Parse(await reloadResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Contains(reloadPayload.GetProperty("items").EnumerateArray(), item =>
+            item.GetProperty("shortcut_id").GetString() == shortcutId);
+
+        var deleteResponse = await client.DeleteAsync($"/api/terminal/shortcuts/{shortcutId}");
+        Assert.Equal(HttpStatusCode.OK, deleteResponse.StatusCode);
+
+        var missingDeleteResponse = await client.DeleteAsync($"/api/terminal/shortcuts/{shortcutId}");
+        Assert.Equal(HttpStatusCode.NotFound, missingDeleteResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task Terminal_Env_Endpoints_Should_Bind_SnakeCase_Payload()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tg-terminal-envs-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        var dbPath = Path.Combine(tempDir, "cli-templates.db");
+
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["FILES_BASE_PATH"] = tempDir,
+            ["TERMINAL_CLI_TEMPLATE_DB_PATH"] = dbPath,
+            ["NODE_ID"] = "local-node"
+        });
+        using var client = app.CreateClient();
+
+        var createResponse = await client.PostAsJsonAsync("/api/nodes/local-node/terminal-envs", new
+        {
+            key = "TEST_FLAG",
+            value = "1",
+            group_name = "custom",
+            sort_order = 12,
+            enabled = true
+        });
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+
+        var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
+        var envId = created.GetProperty("id").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(envId));
+        Assert.Equal("custom", created.GetProperty("group").GetString());
+        Assert.Equal(12, created.GetProperty("sort_order").GetInt32());
+
+        var updateResponse = await client.PutAsJsonAsync($"/api/nodes/local-node/terminal-envs/{envId}", new
+        {
+            key = "TEST_FLAG",
+            value = "2",
+            group_name = "ops",
+            sort_order = 3,
+            enabled = true
+        });
+        Assert.Equal(HttpStatusCode.OK, updateResponse.StatusCode);
+
+        var updated = JsonDocument.Parse(await updateResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("ops", updated.GetProperty("group").GetString());
+        Assert.Equal(3, updated.GetProperty("sort_order").GetInt32());
+        Assert.Equal("2", updated.GetProperty("value").GetString());
+    }
+
+    [Fact]
+    public async Task Cli_Template_Endpoints_Should_Persist_Terminal_Template_When_Frontend_Uses_SnakeCase_Payload()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tg-cli-template-frontend-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        var dbPath = Path.Combine(tempDir, "cli-templates.db");
+
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["FILES_BASE_PATH"] = tempDir,
+            ["TERMINAL_CLI_TEMPLATE_DB_PATH"] = dbPath,
+            ["NODE_ID"] = "local-node"
+        });
+        using var client = app.CreateClient();
+
+        var createResponse = await client.PostAsJsonAsync("/api/nodes/local-node/cli/templates", new
+        {
+            name = "Frontend Recipe",
+            template_kind = "terminal",
+            cli_type = "custom",
+            executable = "bash",
+            base_args = new[] { "-lc", "echo frontend" },
+            default_cwd = tempDir,
+            default_env = new Dictionary<string, string> { ["RECIPE_FLAG"] = "1" },
+            description = "custom",
+            icon = "terminal",
+            color = "#0e639c",
+            is_default = false
+        });
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+
+        var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Equal("terminal", created.GetProperty("template_kind").GetString());
+
+        var terminalOnlyResponse = await client.GetAsync("/api/nodes/local-node/cli/templates?kind=terminal");
+        Assert.Equal(HttpStatusCode.OK, terminalOnlyResponse.StatusCode);
+        var terminalOnlyPayload = JsonDocument.Parse(await terminalOnlyResponse.Content.ReadAsStringAsync()).RootElement;
+        Assert.Contains(terminalOnlyPayload.GetProperty("items").EnumerateArray(), item =>
+            item.GetProperty("name").GetString() == "Frontend Recipe");
+    }
+
+    [Fact]
+    public async Task Cli_Template_Endpoints_Should_Seed_Default_Terminal_Template_In_Database()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"tg-cli-template-seed-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        var dbPath = Path.Combine(tempDir, "cli-templates.db");
+
+        await using var app = new GatewayFactory(new Dictionary<string, string?>
+        {
+            ["FILES_BASE_PATH"] = tempDir,
+            ["TERMINAL_CLI_TEMPLATE_DB_PATH"] = dbPath,
+            ["NODE_ID"] = "local-node"
+        });
+        using var client = app.CreateClient();
+
+        var response = await client.GetAsync("/api/nodes/local-node/cli/templates?kind=terminal");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        var items = payload.GetProperty("items").EnumerateArray().ToList();
+        Assert.NotEmpty(items);
+        Assert.Contains(items, item => item.GetProperty("is_default").GetBoolean());
+        Assert.DoesNotContain(items, item => item.GetProperty("is_builtin").GetBoolean());
     }
 
     [Fact]
@@ -371,13 +560,15 @@ public class GatewayApiTests
             args = new[] { "-i" },
             cols = 80,
             rows = 10,
-            cwd = "/home/yueyuan"
+            cwd = TestPaths.DefaultCwd
         });
         Assert.Equal(HttpStatusCode.OK, createRes.StatusCode);
 
         var created = JsonDocument.Parse(await createRes.Content.ReadAsStringAsync()).RootElement;
         var instanceId = created.GetProperty("instance_id").GetString()!;
         Assert.True(created.TryGetProperty("hub_url", out _));
+        Assert.True(created.TryGetProperty("summary", out var createSummary));
+        Assert.Equal(instanceId, createSummary.GetProperty("id").GetString());
 
         await using var hub = BuildHubConnection(client);
         List<JsonElement> messages = [];
@@ -417,7 +608,7 @@ public class GatewayApiTests
             args = new[] { "-i" },
             cols = 80,
             rows = 25,
-            cwd = "/home/yueyuan"
+            cwd = TestPaths.DefaultCwd
         });
         Assert.Equal(HttpStatusCode.OK, createRes.StatusCode);
         var created = JsonDocument.Parse(await createRes.Content.ReadAsStringAsync()).RootElement;
@@ -498,7 +689,7 @@ public class GatewayApiTests
             args = new[] { "-i" },
             cols = 80,
             rows = 25,
-            cwd = "/home/yueyuan"
+            cwd = TestPaths.DefaultCwd
         });
         Assert.Equal(HttpStatusCode.OK, createRes.StatusCode);
         var created = JsonDocument.Parse(await createRes.Content.ReadAsStringAsync()).RootElement;
@@ -729,7 +920,7 @@ public class GatewayApiTests
             command = "/bin/bash -lc \"echo bye-webcli-dotnet\"",
             cols = 80,
             rows = 25,
-            cwd = "/home/yueyuan"
+            cwd = TestPaths.DefaultCwd
         });
         Assert.Equal(HttpStatusCode.OK, createRes.StatusCode);
         var created = JsonDocument.Parse(await createRes.Content.ReadAsStringAsync()).RootElement;
@@ -758,7 +949,7 @@ public class GatewayApiTests
 
         Assert.Contains(items, x =>
             x.GetProperty("node_id").GetString() == "master-a" &&
-            x.GetProperty("node_name").GetString() == "Master A" &&
+            x.GetProperty("node_name").GetString() == BuildExpectedNodeName("Master A") &&
             x.GetProperty("node_role").GetString() == "master" &&
             x.GetProperty("node_online").GetBoolean());
     }
@@ -976,12 +1167,15 @@ public class GatewayApiTests
             args = new[] { "-i" },
             cols = 80,
             rows = 25,
-            cwd = "/home/yueyuan"
+            cwd = TestPaths.DefaultCwd
         });
         Assert.Equal(HttpStatusCode.OK, createRes.StatusCode);
         var created = JsonDocument.Parse(await createRes.Content.ReadAsStringAsync()).RootElement;
         var instanceId = created.GetProperty("instance_id").GetString();
         Assert.False(string.IsNullOrWhiteSpace(instanceId));
+        Assert.True(created.TryGetProperty("summary", out var remoteSummary));
+        Assert.Equal(instanceId, remoteSummary.GetProperty("id").GetString());
+        Assert.Equal("slave-1", remoteSummary.GetProperty("node_id").GetString());
 
         var inputRes = await client.PostAsJsonAsync($"/api/nodes/slave-1/instances/{instanceId}/input", new { data = "echo hi" });
         Assert.Equal(HttpStatusCode.OK, inputRes.StatusCode);
@@ -1149,9 +1343,24 @@ public class GatewayApiTests
         Assert.Equal(HttpStatusCode.OK, mkdirResponse.StatusCode);
         Assert.True(Directory.Exists(Path.Combine(tempDir, "beta")));
 
-        var downloadResponse = await client.GetAsync($"/api/nodes/slave-files/files/download?path={Uri.EscapeDataString(writePath)}");
+        var renameSource = Path.Combine(tempDir, "alpha", "new.txt");
+        var renameResponse = await client.PostAsJsonAsync("/api/nodes/slave-files/files/rename", new
+        {
+            path = renameSource,
+            new_name = "renamed.txt"
+        });
+        Assert.Equal(HttpStatusCode.OK, renameResponse.StatusCode);
+        var renamedPath = Path.Combine(tempDir, "alpha", "renamed.txt");
+        Assert.True(File.Exists(renamedPath));
+        Assert.False(File.Exists(renameSource));
+
+        var removeResponse = await client.DeleteAsync($"/api/nodes/slave-files/files/remove?path={Uri.EscapeDataString(renamedPath)}&recursive=0");
+        Assert.Equal(HttpStatusCode.OK, removeResponse.StatusCode);
+        Assert.False(File.Exists(renamedPath));
+
+        var downloadResponse = await client.GetAsync($"/api/nodes/slave-files/files/download?path={Uri.EscapeDataString(Path.Combine(tempDir, "alpha", "hello.txt"))}");
         Assert.Equal(HttpStatusCode.OK, downloadResponse.StatusCode);
-        Assert.Equal("new-slave-content", await downloadResponse.Content.ReadAsStringAsync());
+        Assert.Equal("from-slave-file", await downloadResponse.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -1187,7 +1396,7 @@ public class GatewayApiTests
                 args = new[] { "-i" },
                 cols = 80,
                 rows = 25,
-                cwd = "/home/yueyuan"
+                cwd = TestPaths.DefaultCwd
             }
         });
         Assert.True(createResult.Ok);
@@ -1227,7 +1436,7 @@ public class GatewayApiTests
         Assert.True(syncResult.Ok);
         Assert.Equal("term.snapshot", syncResult.Payload.GetProperty("type").GetString());
         Assert.Equal("master-reverse", syncResult.Payload.GetProperty("node_id").GetString());
-        Assert.Equal("Master Reverse", syncResult.Payload.GetProperty("node_name").GetString());
+        Assert.Equal(BuildExpectedNodeName("Master Reverse"), syncResult.Payload.GetProperty("node_name").GetString());
 
         var terminateResult = await slaveHub.InvokeAsync<ClusterCommandResult>("RequestCommand", new
         {
@@ -1311,7 +1520,7 @@ public class GatewayApiTests
             args = new[] { "-i" },
             cols = 80,
             rows = 25,
-            cwd = "/home/yueyuan"
+            cwd = TestPaths.DefaultCwd
         });
         Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
         var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
@@ -1383,7 +1592,7 @@ public class GatewayApiTests
             args = new[] { "-i" },
             cols = 80,
             rows = 25,
-            cwd = "/home/yueyuan"
+            cwd = TestPaths.DefaultCwd
         });
         Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
         var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
@@ -1419,7 +1628,7 @@ public class GatewayApiTests
         {
             Id = "cached-master-instance",
             Command = "bash",
-            Cwd = "/home/yueyuan",
+            Cwd = TestPaths.DefaultCwd,
             Cols = 80,
             Rows = 25,
             CreatedAt = DateTimeOffset.UtcNow.ToString("O"),
@@ -1437,7 +1646,7 @@ public class GatewayApiTests
             args = new[] { "-i" },
             cols = 80,
             rows = 25,
-            cwd = "/home/yueyuan"
+            cwd = TestPaths.DefaultCwd
         });
         Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
         var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
@@ -1479,7 +1688,7 @@ public class GatewayApiTests
         {
             Id = "expired-master-instance",
             Command = "bash",
-            Cwd = "/home/yueyuan",
+            Cwd = TestPaths.DefaultCwd,
             Cols = 80,
             Rows = 25,
             CreatedAt = DateTimeOffset.UtcNow.ToString("O"),
@@ -1540,7 +1749,7 @@ public class GatewayApiTests
             args = new[] { "-i" },
             cols = 80,
             rows = 25,
-            cwd = "/home/yueyuan"
+            cwd = TestPaths.DefaultCwd
         });
         Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
         var created = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
@@ -1579,30 +1788,16 @@ public class GatewayApiTests
         var syncedSnapshot = await WaitForMessageAsync(messages, gate,
             msg => GetType(msg) == "term.snapshot" && msg.GetProperty("node_id").GetString() == "master-v2-bridge",
             TimeSpan.FromSeconds(8));
-        Assert.Equal("Master V2 Bridge", syncedSnapshot.GetProperty("node_name").GetString());
+        Assert.Equal(BuildExpectedNodeName("Master V2 Bridge"), syncedSnapshot.GetProperty("node_name").GetString());
 
         var deleteResponse = await slaveClient.DeleteAsync($"/api/nodes/master-v2-bridge/instances/{instanceId}");
         Assert.Equal(HttpStatusCode.OK, deleteResponse.StatusCode);
 
-        HubException? syncException = null;
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline)
-        {
-            try
-            {
-                await terminalHub.InvokeAsync("RequestSync", new { instanceId, type = "screen" });
-            }
-            catch (HubException ex)
-            {
-                syncException = ex;
-                break;
-            }
-
-            await Task.Delay(100);
-        }
-
-        Assert.NotNull(syncException);
-        Assert.Contains("instance not found", syncException!.Message, StringComparison.Ordinal);
+        await terminalHub.InvokeAsync("RequestSync", new { instanceId, type = "screen" });
+        var missing = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.instance.missing" && GetString(msg, "instance_id") == instanceId,
+            TimeSpan.FromSeconds(8));
+        Assert.Equal("not_found", GetString(missing, "reason"));
     }
 
     [Fact]
@@ -1687,7 +1882,7 @@ public class GatewayApiTests
             args = new[] { "-i" },
             cols = 80,
             rows = 25,
-            cwd = "/home/yueyuan"
+            cwd = TestPaths.DefaultCwd
         });
         Assert.Equal(HttpStatusCode.OK, createRemoteResponse.StatusCode);
 
@@ -1811,7 +2006,7 @@ public class GatewayApiTests
             args = new[] { "-i" },
             cols = 80,
             rows = 24,
-            cwd = "/home/yueyuan"
+            cwd = TestPaths.DefaultCwd
         });
         Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
         var createPayload = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync()).RootElement;
@@ -1976,7 +2171,7 @@ public class GatewayApiTests
                 args = new[] { "-i" },
                 cols = 80,
                 rows = 25,
-                cwd = "/home/yueyuan"
+                cwd = TestPaths.DefaultCwd
             }
         });
         Assert.True(createResult.Ok);
@@ -1997,7 +2192,7 @@ public class GatewayApiTests
         await terminalHub.InvokeAsync("JoinInstance", new { instanceId });
         var snapshot = await WaitForMessageAsync(messages, gate, msg => GetType(msg) == "term.snapshot", TimeSpan.FromSeconds(8));
         Assert.Equal("master-join", snapshot.GetProperty("node_id").GetString());
-        Assert.Equal("Master Join", snapshot.GetProperty("node_name").GetString());
+        Assert.Equal(BuildExpectedNodeName("Master Join"), snapshot.GetProperty("node_name").GetString());
 
         await terminalHub.InvokeAsync("SendInput", new { instanceId, data = "echo reverse-terminal\r" });
         var raw = await WaitForMessageAsync(messages, gate,
@@ -2020,25 +2215,11 @@ public class GatewayApiTests
             payload = new { instance_id = instanceId }
         });
 
-        HubException? syncException = null;
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline)
-        {
-            try
-            {
-                await terminalHub.InvokeAsync("RequestSync", new { instanceId, type = "screen" });
-            }
-            catch (HubException ex)
-            {
-                syncException = ex;
-                break;
-            }
-
-            await Task.Delay(100);
-        }
-
-        Assert.NotNull(syncException);
-        Assert.Contains("instance not found", syncException!.Message, StringComparison.Ordinal);
+        await terminalHub.InvokeAsync("RequestSync", new { instanceId, type = "screen" });
+        var missing = await WaitForMessageAsync(messages, gate,
+            msg => GetType(msg) == "term.instance.missing" && GetString(msg, "instance_id") == instanceId,
+            TimeSpan.FromSeconds(8));
+        Assert.Equal("not_found", GetString(missing, "reason"));
     }
 
     [Fact]
@@ -2182,7 +2363,7 @@ public class GatewayApiTests
             sourceNodeId = "slave-unknown",
             targetNodeId = "master-auth",
             type = "instance.create",
-            payload = new { command = "bash", args = new[] { "-i" }, cwd = "/home/yueyuan" }
+            payload = new { command = "bash", args = new[] { "-i" }, cwd = TestPaths.DefaultCwd }
         }));
         Assert.Contains("source node mismatch", unregistered.Message, StringComparison.Ordinal);
 
@@ -2202,7 +2383,7 @@ public class GatewayApiTests
             sourceNodeId = "slave-other",
             targetNodeId = "master-auth",
             type = "instance.create",
-            payload = new { command = "bash", args = new[] { "-i" }, cwd = "/home/yueyuan" }
+            payload = new { command = "bash", args = new[] { "-i" }, cwd = TestPaths.DefaultCwd }
         }));
         Assert.Contains("source node mismatch", mismatched.Message, StringComparison.Ordinal);
 
@@ -2212,7 +2393,7 @@ public class GatewayApiTests
             sourceNodeId = "slave-auth",
             targetNodeId = "master-auth",
             type = "instance.create",
-            payload = new { command = "bash", args = new[] { "-i" }, cwd = "/home/yueyuan" }
+            payload = new { command = "bash", args = new[] { "-i" }, cwd = TestPaths.DefaultCwd }
         }));
         Assert.Contains("unauthorized cluster token", badToken.Message, StringComparison.Ordinal);
     }
@@ -2274,7 +2455,7 @@ public class GatewayApiTests
             args = new[] { "-i" },
             cols = 80,
             rows = 25,
-            cwd = "/home/yueyuan"
+            cwd = TestPaths.DefaultCwd
         });
         Assert.Equal(HttpStatusCode.OK, createRes.StatusCode);
         var created = JsonDocument.Parse(await createRes.Content.ReadAsStringAsync()).RootElement;
@@ -2383,7 +2564,7 @@ public class GatewayApiTests
             command = "/bin/cat",
             cols = 80,
             rows = 25,
-            cwd = "/home/yueyuan"
+            cwd = TestPaths.DefaultCwd
         });
         Assert.Equal(HttpStatusCode.OK, createRes.StatusCode);
         var created = JsonDocument.Parse(await createRes.Content.ReadAsStringAsync()).RootElement;
@@ -2523,6 +2704,17 @@ public class GatewayApiTests
                     basePath,
                     TryGetPropertyInsensitive(command.Payload, "path", out var mkdirPath) ? mkdirPath.GetString() : null,
                     TryGetPropertyInsensitive(command.Payload, "name", out var mkdirName) ? mkdirName.GetString() : null),
+                "files.rename" => slaveFiles.RenameEntry(
+                    basePath,
+                    TryGetPropertyInsensitive(command.Payload, "path", out var renamePath) ? renamePath.GetString() : null,
+                    TryGetPropertyInsensitive(command.Payload, "new_name", out var newName) ? newName.GetString() : null),
+                "files.remove" => slaveFiles.RemoveEntry(
+                    basePath,
+                    TryGetPropertyInsensitive(command.Payload, "path", out var removePath) ? removePath.GetString() : null,
+                    TryGetPropertyInsensitive(command.Payload, "recursive", out var recursive) && (
+                        recursive.ValueKind == JsonValueKind.True
+                        || (recursive.ValueKind == JsonValueKind.Number && recursive.GetInt32() != 0)
+                        || (recursive.ValueKind == JsonValueKind.String && bool.TryParse(recursive.GetString(), out var recursiveBool) && recursiveBool))),
                 "files.download" => await BuildDownloadPayloadAsync(
                     slaveFiles,
                     basePath,
@@ -2721,6 +2913,11 @@ public class GatewayApiTests
         };
     }
 
+    private static string BuildExpectedNodeName(string configuredNodeName)
+    {
+        return $"{configuredNodeName}-{Environment.MachineName}";
+    }
+
 }
 
 internal sealed class GatewayFactory : WebApplicationFactory<Program>
@@ -2738,6 +2935,11 @@ internal sealed class GatewayFactory : WebApplicationFactory<Program>
         builder.UseSetting("PORT", "0");
         builder.UseSetting("HOST", "127.0.0.1");
         builder.UseSetting("HISTORY_LIMIT", "200");
+        builder.UseSetting("GATEWAY_ROLE", "master");
+        builder.UseSetting("NODE_ID", "test-master");
+        builder.UseSetting("NODE_NAME", "Test Master");
+        builder.UseSetting("MASTER_URL", string.Empty);
+        builder.UseSetting("FILES_BASE_PATH", TestPaths.DefaultCwd);
 
         foreach (var kv in _settings)
         {

@@ -2,8 +2,12 @@ namespace TerminalGateway.Api.Infrastructure;
 
 public sealed class GatewayOptions
 {
-    private static readonly string[] DefaultFsAllowedRoots = ["/home", "/workspace", "/www"];
-    private static readonly string[] DefaultPathPrefixes = ["/www/server/nodejs/v22.22.0/bin"];
+    private static readonly string[] DefaultFsAllowedRoots = OperatingSystem.IsWindows()
+        ? ["D:/workspace/code"]
+        : ["/home", "/workspace", "/www"];
+    private static readonly string[] DefaultPathPrefixes = OperatingSystem.IsWindows()
+        ? []
+        : ["/www/server/nodejs/v22.22.0/bin"];
 
     public string GatewayRole { get; init; } = "master";
     public string? MasterUrl { get; init; }
@@ -16,7 +20,7 @@ public sealed class GatewayOptions
     public string Host { get; init; } = "0.0.0.0";
     public int Port { get; init; } = 8080;
     public int HistoryLimit { get; init; } = 5000;
-    public string FilesBasePath { get; init; } = "/home/yueyuan";
+    public string FilesBasePath { get; init; } = OperatingSystem.IsWindows() ? "D:/workspace/code" : "/home/yueyuan";
     public int LargeFileThresholdBytes { get; init; } = 100 * 1024;
     public int FileChunkBytes { get; init; } = 64 * 1024;
     public int FileChunkMaxLines { get; init; } = 800;
@@ -43,8 +47,8 @@ public sealed class GatewayOptions
         var nodeId = Read(config, "NODE_ID", "Gateway:NodeId");
         nodeId = string.IsNullOrWhiteSpace(nodeId) ? $"node-{Environment.MachineName}".ToLowerInvariant() : nodeId;
 
-        var nodeName = Read(config, "NODE_NAME", "Gateway:NodeName");
-        nodeName = string.IsNullOrWhiteSpace(nodeName) ? nodeId : nodeName;
+        var configuredNodeName = Read(config, "NODE_NAME", "Gateway:NodeName");
+        var nodeName = ComposeNodeDisplayName(configuredNodeName, nodeId);
 
         return new GatewayOptions
         {
@@ -59,7 +63,7 @@ public sealed class GatewayOptions
             Host = Read(config, "HOST", "Gateway:Host") ?? "0.0.0.0",
             Port = ParseInt(config, 8080, "PORT", "Gateway:Port"),
             HistoryLimit = ParseInt(config, 5000, "HISTORY_LIMIT", "Gateway:HistoryLimit"),
-            FilesBasePath = Read(config, "FILES_BASE_PATH", "Gateway:FilesBasePath") ?? "/home/yueyuan",
+            FilesBasePath = Read(config, "FILES_BASE_PATH", "Gateway:FilesBasePath") ?? (OperatingSystem.IsWindows() ? "D:/workspace/code" : "/home/yueyuan"),
             LargeFileThresholdBytes = ParseInt(config, 100 * 1024, "TERMINAL_LARGE_FILE_THRESHOLD_BYTES", "Gateway:LargeFileThresholdBytes"),
             FileChunkBytes = ParseInt(config, 64 * 1024, "TERMINAL_FILE_CHUNK_BYTES", "Gateway:FileChunkBytes"),
             FileChunkMaxLines = ParseInt(config, 800, "TERMINAL_FILE_CHUNK_MAX_LINES", "Gateway:FileChunkMaxLines"),
@@ -125,6 +129,26 @@ public sealed class GatewayOptions
         return string.Equals(raw, "slave", StringComparison.OrdinalIgnoreCase) ? "slave" : "master";
     }
 
+    private static string ComposeNodeDisplayName(string? configuredNodeName, string fallbackNodeId)
+    {
+        var machineName = (Environment.MachineName ?? string.Empty).Trim();
+        var prefix = string.IsNullOrWhiteSpace(configuredNodeName)
+            ? fallbackNodeId
+            : configuredNodeName.Trim();
+
+        if (machineName.Length == 0)
+        {
+            return prefix;
+        }
+
+        if (prefix.EndsWith(machineName, StringComparison.OrdinalIgnoreCase))
+        {
+            return prefix;
+        }
+
+        return $"{prefix}-{machineName}";
+    }
+
     private static IReadOnlyList<string> ParseRoots(IConfiguration config)
     {
         var raw = Read(config, "TERMINAL_FS_ALLOWED_ROOTS", "Gateway:FsAllowedRoots");
@@ -134,10 +158,15 @@ public sealed class GatewayOptions
             return parsedRaw;
         }
 
-        var parsedSection = ParseRootsValues(config.GetSection("Gateway:FsAllowedRoots")
-            .GetChildren()
-            .Select(x => x.Value));
-        return parsedSection.Count > 0 ? parsedSection : DefaultFsAllowedRoots;
+        var section = config.GetSection("Gateway:FsAllowedRoots");
+        if (section.Exists())
+        {
+            return ParseRootsValues(section
+                .GetChildren()
+                .Select(x => x.Value));
+        }
+
+        return DefaultFsAllowedRoots;
     }
 
     private static IReadOnlyList<string> ParseRootsString(string? raw)
@@ -167,10 +196,15 @@ public sealed class GatewayOptions
             return parsedRaw;
         }
 
-        var parsedSection = ParsePathPrefixValues(config.GetSection("Gateway:PathPrefixes")
-            .GetChildren()
-            .Select(x => x.Value));
-        return parsedSection.Count > 0 ? parsedSection : DefaultPathPrefixes;
+        var section = config.GetSection("Gateway:PathPrefixes");
+        if (section.Exists())
+        {
+            return ParsePathPrefixValues(section
+                .GetChildren()
+                .Select(x => x.Value));
+        }
+
+        return DefaultPathPrefixes;
     }
 
     private static IReadOnlyList<string> ParsePathPrefixString(string? raw)

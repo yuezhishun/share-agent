@@ -89,6 +89,32 @@ test('desktop view should auto-collapse both sidebars on phone viewport', async 
   await expect(rightSidebar).toBeHidden();
 });
 
+test('phone viewport should keep right shortcut buttons in four columns', async ({ page }) => {
+  await installMockRuntime(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+
+  const rightToggle = page.getByTestId('toggle-right-sidebar');
+  await rightToggle.click();
+
+  const shortcutTab = page.getByRole('button', { name: '快捷指令' });
+  await shortcutTab.click();
+
+  const shortcutGrid = page.locator('.right-sidebar .shortcut-grid').first();
+  await expect(shortcutGrid).toBeVisible();
+
+  await expect
+    .poll(async () => page.evaluate(() => {
+      const grid = document.querySelector('.right-sidebar .shortcut-grid');
+      if (!grid) {
+        return 0;
+      }
+      const columns = getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean);
+      return columns.length;
+    }))
+    .toBe(4);
+});
+
 test('desktop gutters should collapse and expand sidebars independently', async ({ page }) => {
   await installMockRuntime(page);
   await page.goto('/');

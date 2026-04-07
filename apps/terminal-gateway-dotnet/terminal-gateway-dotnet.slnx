@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="TerminalGateway.Api.Tests/TerminalGateway.Api.Tests.csproj" />
+  <Project Path="TerminalGateway.Api/TerminalGateway.Api.csproj" />
+</Solution>

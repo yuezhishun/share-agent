@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>移动终端管理器 · 持久终端</title>
+    <!-- Font Awesome 6 (免费) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: #1e1e1e;
+            height: 100vh;
+            overflow: hidden;
+            color: #e0e0e0;
+        }
+        .app {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            background-color: #1e1e1e;
+        }
+
+        /* 顶部栏 */
+        .top-bar {
+            background-color: #2d2d2d;
+            padding: 10px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid #3c3c3c;
+            flex-shrink: 0;
+        }
+        .top-bar .logo {
+            font-weight: 600;
+            font-size: 1rem;
+            color: #ccc;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .top-bar .logo i {
+            color: #007acc;
+        }
+        .top-bar .actions {
+            display: flex;
+            gap: 16px;
+        }
+        .top-bar .actions i {
+            font-size: 1.3rem;
+            color: #b4b4b4;
+            cursor: pointer;
+            padding: 6px;
+        }
+        .top-bar .actions i:active {
+            background-color: #3a3a3a;
+            border-radius: 50%;
+        }
+
+        /* 主内容区域 — 视图容器 */
+        .main-content {
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: hidden;
+            padding: 12px 12px 4px 12px;
+            scroll-behavior: smooth;
+        }
+
+        /* 各视图默认隐藏，通过激活显示 */
+        .view {
+            display: none;
+            height: 100%;
+            flex-direction: column;
+        }
+        .view.active {
+            display: flex;
+        }
+
+        /* ----- 终端视图 ----- */
+        .terminal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+            background-color: #2d2d2d;
+            padding: 10px 12px;
+            border-radius: 24px;
+        }
+        .terminal-selector {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex: 1;
+        }
+        .terminal-selector select {
+            background-color: #3c3c3c;
+            color: #fff;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 40px;
+            font-size: 1rem;
+            font-family: 'Inter', sans-serif;
+            flex: 1;
+            -webkit-appearance: none;
+            appearance: none;
+            background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="%23ffffff" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>');
+            background-repeat: no-repeat;
+            background-position: right 12px center;
+            background-size: 16px;
+        }
+        .close-terminal {
+            background-color: #4a4a4a;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+        .close-terminal i {
+            font-size: 1.2rem;
+            color: #e0e0e0;
+        }
+        .close-terminal:active {
+            background-color: #5e5e5e;
+        }
+
+        .terminal-content {
+            background-color: #0d0d0d;
+            border-radius: 16px;
+            padding: 16px;
+            flex: 1;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            line-height: 1.5;
+            color: #d4d4d4;
+            margin-bottom: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .terminal-line {
+            margin-bottom: 4px;
+        }
+
+        .input-area {
+            display: flex;
+            gap: 8px;
+            background-color: #2d2d2d;
+            border-radius: 40px;
+            padding: 6px 6px 6px 16px;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .input-area input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: #e0e0e0;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1rem;
+            padding: 8px 0;
+            outline: none;
+        }
+        .input-area button {
+            background-color: #0e639c;
+            border: none;
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            color: white;
+            font-size: 1.3rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+        .input-area button:active {
+            background-color: #1177bb;
+        }
+
+        /* ----- 文件浏览器视图 ----- */
+        .file-header {
+            background-color: #2d2d2d;
+            padding: 12px 16px;
+            border-radius: 40px;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .path-breadcrumb {
+            background-color: #3c3c3c;
+            padding: 8px 14px;
+            border-radius: 40px;
+            font-size: 0.9rem;
+            font-family: 'JetBrains Mono', monospace;
+            color: #9cdcfe;
+            flex: 1;
+            overflow-x: auto;
+            white-space: nowrap;
+        }
+        .upload-btn {
+            background-color: #0e639c;
+            border-radius: 40px;
+            padding: 8px 16px;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+        }
+        .file-list {
+            list-style: none;
+            background-color: #252526;
+            border-radius: 24px;
+            padding: 8px 0;
+            overflow-y: auto;
+            flex: 1;
+        }
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 14px 20px;
+            gap: 16px;
+            border-bottom: 1px solid #3c3c3c;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+        .file-item:active {
+            background-color: #2a2d2e;
+        }
+        .file-item i {
+            width: 24px;
+            font-size: 1.2rem;
+        }
+        .file-name {
+            flex: 1;
+        }
+        .file-size {
+            color: #9e9e9e;
+            font-size: 0.8rem;
+        }
+        .folder-icon { color: #c586c0; }
+        .file-icon { color: #9cdcfe; }
+
+        /* ----- 配方视图 ----- */
+        .recipe-header {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 16px;
+        }
+        .recipe-list {
+            list-style: none;
+            background-color: #252526;
+            border-radius: 24px;
+            padding: 8px 0;
+            overflow-y: auto;
+            flex: 1;
+        }
+        .recipe-item {
+            display: flex;
+            align-items: center;
+            padding: 14px 20px;
+            gap: 14px;
+            border-bottom: 1px solid #3c3c3c;
+        }
+        .recipe-icon {
+            color: #c586c0;
+            font-size: 1.2rem;
+            width: 30px;
+        }
+        .recipe-info {
+            flex: 1;
+        }
+        .recipe-name {
+            font-weight: 600;
+            font-size: 1rem;
+        }
+        .recipe-command {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            color: #9cdcfe;
+            margin-top: 4px;
+        }
+        .recipe-actions {
+            display: flex;
+            gap: 16px;
+        }
+        .recipe-actions i {
+            font-size: 1.2rem;
+            color: #b4b4b4;
+            padding: 8px;
+            cursor: pointer;
+        }
+        .recipe-actions i:active {
+            background-color: #4a4a4a;
+            border-radius: 50%;
+        }
+
+        /* 底部导航栏 */
+        .bottom-nav {
+            background-color: #2d2d2d;
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+            padding: 8px 0 12px 0;
+            border-top: 1px solid #3c3c3c;
+            flex-shrink: 0;
+        }
+        .nav-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            color: #9e9e9e;
+            font-size: 0.75rem;
+            gap: 4px;
+            cursor: pointer;
+            padding: 8px 16px;
+            border-radius: 40px;
+            transition: background 0.1s;
+        }
+        .nav-item i {
+            font-size: 1.6rem;
+        }
+        .nav-item.active {
+            color: #007acc;
+        }
+        .nav-item:active {
+            background-color: #3a3a3a;
+        }
+
+        /* 隐藏的文件输入 */
+        #fileInput {
+            display: none;
+        }
+
+        /* 小调整 */
+        .no-touch {
+            -webkit-tap-highlight-color: transparent;
+        }
+    </style>
+</head>
+<body>
+<div class="app">
+    <!-- 顶部栏 -->
+    <div class="top-bar">
+        <div class="logo">
+            <i class="fa-solid fa-terminal"></i> 移动终端
+        </div>
+        <div class="actions">
+            <i class="fa-solid fa-plus" id="newTerminalBtn" title="新建终端"></i>
+            <i class="fa-regular fa-floppy-disk" id="saveRecipeBtn" title="保存当前配方"></i>
+            <i class="fa-solid fa-rotate" id="refreshBtn" title="刷新终端列表"></i>
+        </div>
+    </div>
+
+    <!-- 主内容区域：三个视图 -->
+    <div class="main-content" id="mainContent">
+        <!-- 终端视图 -->
+        <div class="view active" id="terminalView">
+            <div class="terminal-header">
+                <div class="terminal-selector">
+                    <select id="terminalSelect"></select>
+                </div>
+                <div class="close-terminal" id="closeTerminalBtn">
+                    <i class="fa-regular fa-trash-can"></i>
+                </div>
+            </div>
+            <div class="terminal-content" id="terminalContent"></div>
+            <div class="input-area">
+                <input type="text" id="commandInput" placeholder="输入命令..." value="ls -la">
+                <button id="sendCommandBtn"><i class="fa-regular fa-paper-plane"></i></button>
+            </div>
+        </div>
+
+        <!-- 文件浏览器视图 -->
+        <div class="view" id="fileView">
+            <div class="file-header">
+                <span class="path-breadcrumb" id="currentPath">/home/user</span>
+                <span class="upload-btn" id="uploadBtn"><i class="fa-solid fa-upload"></i> 上传</span>
+            </div>
+            <ul class="file-list" id="fileList"></ul>
+        </div>
+
+        <!-- 配方视图 -->
+        <div class="view" id="recipeView">
+            <div class="recipe-header">
+                <span class="upload-btn" id="addRecipeBtn"><i class="fa-solid fa-plus"></i> 新建配方</span>
+            </div>
+            <ul class="recipe-list" id="recipeList"></ul>
+        </div>
+    </div>
+
+    <!-- 底部导航 -->
+    <div class="bottom-nav">
+        <div class="nav-item active" data-view="terminal" id="navTerminal">
+            <i class="fa-regular fa-window-terminal"></i>
+            <span>终端</span>
+        </div>
+        <div class="nav-item" data-view="file" id="navFile">
+            <i class="fa-regular fa-folder-open"></i>
+            <span>文件</span>
+        </div>
+        <div class="nav-item" data-view="recipe" id="navRecipe">
+            <i class="fa-regular fa-bookmark"></i>
+            <span>配方</span>
+        </div>
+    </div>
+
+    <!-- 隐藏的文件输入 -->
+    <input type="file" id="fileInput" multiple>
+</div>
+
+<script>
+    (function() {
+        // ========== 持久化存储键 ==========
+        const STORAGE_TERMINALS = 'mobile_term_terminals';
+        const STORAGE_RECIPES = 'mobile_term_recipes';
+        const STORAGE_NEXT_TERM_ID = 'mobile_term_nextId';
+        const STORAGE_NEXT_RECIPE_ID = 'mobile_term_nextRecipeId';
+
+        // ========== 虚拟文件系统 (同之前) ==========
+        const virtualFS = {
+            '/': { type: 'dir', children: ['home', 'etc', 'var', 'tmp'] },
+            '/home': { type: 'dir', children: ['user'] },
+            '/home/user': { type: 'dir', children: ['Desktop', 'Downloads', 'projects', 'file1.txt', 'script.sh', 'notes.md'] },
+            '/home/user/Desktop': { type: 'dir', children: ['readme.txt'] },
+            '/home/user/Downloads': { type: 'dir', children: ['package.tar.gz'] },
+            '/home/user/projects': { type: 'dir', children: ['web-terminal'] },
+            '/home/user/projects/web-terminal': { type: 'dir', children: ['index.html', 'style.css'] },
+            '/home/user/file1.txt': { type: 'file', size: '2.3 KB', content: 'Hello, this is file1.txt\nSecond line.' },
+            '/home/user/script.sh': { type: 'file', size: '512 B', content: '#!/bin/bash\necho "Hello"' },
+            '/home/user/notes.md': { type: 'file', size: '1.1 KB', content: '# Notes\n- Item 1\n- Item 2' },
+            '/home/user/Desktop/readme.txt': { type: 'file', size: '45 B', content: 'This is Desktop readme' },
+            '/home/user/Downloads/package.tar.gz': { type: 'file', size: '2.1 MB', content: 'compressed archive' },
+            '/home/user/projects/web-terminal/index.html': { type: 'file', size: '3.2 KB', content: '<!DOCTYPE html>\n...' },
+            '/home/user/projects/web-terminal/style.css': { type: 'file', size: '1.4 KB', content: 'body { margin:0; }' },
+        };
+
+        function getDirContents(path) {
+            const node = virtualFS[path];
+            if (!node || node.type !== 'dir') return [];
+            return node.children.map(name => {
+                const fullPath = path === '/' ? '/' + name : path + '/' + name;
+                const item = virtualFS[fullPath] || { type: 'file', size: '0 B' };
+                return {
+                    name: name,
+                    path: fullPath,
+                    type: item.type || 'file',
+                    size: item.size || '0 B'
+                };
+            }).sort((a, b) => {
+                if (a.type === 'dir' && b.type !== 'dir') return -1;
+                if (a.type !== 'dir' && b.type === 'dir') return 1;
+                return a.name.localeCompare(b.name);
+            });
+        }
+
+        // ========== 状态 ==========
+        let terminals = [];
+        let nextTerminalId = 1;
+        let activeTerminalId = null;
+
+        let recipes = [];
+        let nextRecipeId = 1;
+
+        let currentFsPath = '/home/user';   // 文件浏览器路径
+
+        // ========== 加载/保存 ==========
+        function loadFromStorage() {
+            try {
+                const savedTerms = localStorage.getItem(STORAGE_TERMINALS);
+                if (savedTerms) {
+                    terminals = JSON.parse(savedTerms);
+                    terminals.forEach(t => { if (!t.cwd) t.cwd = '/home/user'; });
+                } else {
+                    terminals = [{
+                        id: 1,
+                        name: '终端 1',
+                        cwd: '/home/user',
+                        lines: ['欢迎使用持久终端 (bash)', 'user@web-host:/home/user$ ']
+                    }];
+                }
+                const savedNextId = localStorage.getItem(STORAGE_NEXT_TERM_ID);
+                nextTerminalId = savedNextId ? parseInt(savedNextId) : 2;
+
+                const savedRecipes = localStorage.getItem(STORAGE_RECIPES);
+                if (savedRecipes) {
+                    recipes = JSON.parse(savedRecipes);
+                } else {
+                    recipes = [
+                        { id: 'r1', name: '更新系统', command: 'sudo apt update && sudo apt upgrade -y' },
+                        { id: 'r2', name: '查看日志', command: 'journalctl -xe --no-pager | head -20' },
+                        { id: 'r3', name: '磁盘占用', command: 'df -h' }
+                    ];
+                }
+                const savedNextRecipe = localStorage.getItem(STORAGE_NEXT_RECIPE_ID);
+                nextRecipeId = savedNextRecipe ? parseInt(savedNextRecipe) : 4;
+            } catch (e) {
+                console.warn('加载失败', e);
+            }
+            if (!terminals.length) {
+                terminals = [{ id: 1, name: '终端 1', cwd: '/home/user', lines: ['默认终端'] }];
+            }
+            activeTerminalId = terminals[0].id;
+            currentFsPath = terminals.find(t => t.id === activeTerminalId)?.cwd || '/home/user';
+        }
+
+        function saveTerminals() {
+            localStorage.setItem(STORAGE_TERMINALS, JSON.stringify(terminals));
+            localStorage.setItem(STORAGE_NEXT_TERM_ID, nextTerminalId.toString());
+        }
+        function saveRecipes() {
+            localStorage.setItem(STORAGE_RECIPES, JSON.stringify(recipes));
+            localStorage.setItem(STORAGE_NEXT_RECIPE_ID, nextRecipeId.toString());
+        }
+
+        // 获取当前终端对象
+        function getActiveTerminal() {
+            return terminals.find(t => t.id === activeTerminalId);
+        }
+
+        // ========== 渲染函数 ==========
+        function renderTerminalSelect() {
+            const select = document.getElementById('terminalSelect');
+            select.innerHTML = '';
+            terminals.forEach(term => {
+                const option = document.createElement('option');
+                option.value = term.id;
+                option.textContent = term.name;
+                if (term.id === activeTerminalId) option.selected = true;
+                select.appendChild(option);
+            });
+        }
+
+        function renderTerminalContent() {
+            const contentDiv = document.getElementById('terminalContent');
+            const term = getActiveTerminal();
+            if (!term) return;
+            contentDiv.innerHTML = '';
+            term.lines.forEach(line => {
+                const lineDiv = document.createElement('div');
+                lineDiv.className = 'terminal-line';
+                lineDiv.textContent = line;
+                contentDiv.appendChild(lineDiv);
+            });
+            contentDiv.scrollTop = contentDiv.scrollHeight;
+        }
+
+        function renderFileList() {
+            const listEl = document.getElementById('fileList');
+            const pathEl = document.getElementById('currentPath');
+            pathEl.textContent = currentFsPath;
+
+            const contents = getDirContents(currentFsPath);
+            listEl.innerHTML = '';
+
+            // 返回上级
+            if (currentFsPath !== '/') {
+                const parentLi = document.createElement('li');
+                parentLi.className = 'file-item';
+                parentLi.innerHTML = `<i class="fa-regular fa-folder-open folder-icon"></i>
+                    <span class="file-name">..</span>
+                    <span class="file-size"></span>`;
+                parentLi.addEventListener('click', () => {
+                    const newPath = currentFsPath.substring(0, currentFsPath.lastIndexOf('/')) || '/';
+                    navigateToDir(newPath);
+                });
+                listEl.appendChild(parentLi);
+            }
+
+            contents.forEach(item => {
+                const li = document.createElement('li');
+                li.className = 'file-item';
+                const icon = item.type === 'dir' ? '<i class="fa-regular fa-folder-open folder-icon"></i>' : '<i class="fa-regular fa-file file-icon"></i>';
+                li.innerHTML = `${icon}<span class="file-name">${item.name}</span><span class="file-size">${item.size}</span>`;
+                li.addEventListener('click', () => {
+                    if (item.type === 'dir') {
+                        navigateToDir(item.path);
+                    } else {
+                        viewFile(item.path);
+                    }
+                });
+                listEl.appendChild(li);
+            });
+        }
+
+        function navigateToDir(path) {
+            if (!virtualFS[path] || virtualFS[path].type !== 'dir') return;
+            currentFsPath = path;
+            const term = getActiveTerminal();
+            if (term) {
+                term.cwd = path;
+                saveTerminals();
+            }
+            renderFileList();
+        }
+
+        function viewFile(filePath) {
+            const node = virtualFS[filePath];
+            if (!node || node.type !== 'file') {
+                appendToTerminal(`cat: 无法读取文件 (模拟)`);
+                return;
+            }
+            const content = node.content || '（空文件）';
+            appendCommandOutput(`cat ${filePath.split('/').pop()}`, content);
+            // 切换到终端视图方便查看
+            switchView('terminal');
+        }
+
+        function appendToTerminal(line) {
+            const term = getActiveTerminal();
+            if (term) {
+                term.lines.push(line);
+                renderTerminalContent();
+                saveTerminals();
+            }
+        }
+
+        function appendCommandOutput(cmd, output) {
+            const term = getActiveTerminal();
+            if (!term) return;
+            const prompt = `user@web-host:${term.cwd}$ `;
+            term.lines.push(prompt + cmd);
+            if (output) term.lines.push(output);
+            renderTerminalContent();
+            saveTerminals();
+        }
+
+        // 配方渲染
+        function renderRecipeList() {
+            const listEl = document.getElementById('recipeList');
+            listEl.innerHTML = '';
+            recipes.forEach(recipe => {
+                const li = document.createElement('li');
+                li.className = 'recipe-item';
+                li.innerHTML = `
+                    <span class="recipe-icon"><i class="fa-regular fa-file-lines"></i></span>
+                    <div class="recipe-info">
+                        <div class="recipe-name">${recipe.name}</div>
+                        <div class="recipe-command">${recipe.command}</div>
+                    </div>
+                    <div class="recipe-actions">
+                        <i class="fa-regular fa-play" data-id="${recipe.id}" data-action="apply"></i>
+                        <i class="fa-regular fa-trash-can" data-id="${recipe.id}" data-action="delete"></i>
+                    </div>
+                `;
+                listEl.appendChild(li);
+            });
+            // 事件委托绑定 (避免多次绑定)
+            document.querySelectorAll('.recipe-actions .fa-play').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const id = btn.dataset.id;
+                    const recipe = recipes.find(r => r.id === id);
+                    if (recipe) applyRecipe(recipe.command);
+                });
+            });
+            document.querySelectorAll('.recipe-actions .fa-trash-can').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const id = btn.dataset.id;
+                    deleteRecipe(id);
+                });
+            });
+        }
+
+        function applyRecipe(cmd) {
+            appendCommandOutput(cmd, `> 执行: ${cmd.substring(0,30)}... (模拟输出)`);
+            switchView('terminal');
+        }
+
+        function deleteRecipe(rid) {
+            recipes = recipes.filter(r => r.id !== rid);
+            saveRecipes();
+            renderRecipeList();
+        }
+
+        function addNewRecipe() {
+            const name = prompt('配方名称', '新命令');
+            if (!name) return;
+            const command = prompt('命令内容', 'echo "hello"');
+            if (!command) return;
+            const newId = `r${nextRecipeId++}`;
+            recipes.push({ id: newId, name, command });
+            saveRecipes();
+            renderRecipeList();
+        }
+
+        function saveCurrentAsRecipe() {
+            const term = getActiveTerminal();
+            if (!term) return;
+            let lastCmd = 'ls -la';
+            for (let i = term.lines.length - 1; i >= 0; i--) {
+                const line = term.lines[i];
+                const match = line.match(/\$\s*(.+)/);
+                if (match) { lastCmd = match[1]; break; }
+            }
+            const name = prompt('保存配方名称', '快捷命令');
+            if (!name) return;
+            const cmd = prompt('编辑命令', lastCmd);
+            if (!cmd) return;
+            const newId = `r${nextRecipeId++}`;
+            recipes.push({ id: newId, name, command: cmd });
+            saveRecipes();
+            renderRecipeList();
+        }
+
+        // 终端操作
+        function addNewTerminal() {
+            const newId = nextTerminalId++;
+            const name = `终端 ${newId}`;
+            terminals.push({
+                id: newId,
+                name: name,
+                cwd: '/home/user',
+                lines: [`欢迎使用持久终端 ${name}`, `user@web-host:/home/user$ `]
+            });
+            saveTerminals();
+            setActiveTerminal(newId);
+            renderTerminalSelect();
+        }
+
+        function closeCurrentTerminal() {
+            if (terminals.length <= 1) {
+                alert('至少保留一个终端');
+                return;
+            }
+            terminals = terminals.filter(t => t.id !== activeTerminalId);
+            setActiveTerminal(terminals[0].id);
+            saveTerminals();
+            renderTerminalSelect();
+        }
+
+        function setActiveTerminal(termId) {
+            const term = terminals.find(t => t.id === termId);
+            if (!term) return;
+            activeTerminalId = termId;
+            currentFsPath = term.cwd || '/home/user';
+            renderTerminalSelect();
+            renderTerminalContent();
+            renderFileList();  // 文件浏览器路径同步
+        }
+
+        // 切换视图
+        function switchView(viewId) {
+            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+            document.getElementById(viewId + 'View').classList.add('active');
+            document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+            document.getElementById('nav' + viewId.charAt(0).toUpperCase() + viewId.slice(1)).classList.add('active');
+            if (viewId === 'file') renderFileList();
+            if (viewId === 'recipe') renderRecipeList();
+            if (viewId === 'terminal') {
+                renderTerminalContent();
+                renderTerminalSelect();
+            }
+        }
+
+        // 上传
+        function uploadFiles(files) {
+            if (!files.length) return;
+            const fileNames = Array.from(files).map(f => f.name).join(', ');
+            appendCommandOutput(`上传到 ${currentFsPath}`, `已接收: ${fileNames} (模拟上传完成)`);
+            switchView('terminal');
+        }
+
+        // 刷新 (重新加载存储)
+        function refreshAll() {
+            loadFromStorage();
+            renderTerminalSelect();
+            renderTerminalContent();
+            renderFileList();
+            renderRecipeList();
+        }
+
+        // ========== 初始化 ==========
+        loadFromStorage();
+        renderTerminalSelect();
+        renderTerminalContent();
+        renderFileList();
+        renderRecipeList();
+
+        // ========== 事件绑定 ==========
+        document.getElementById('newTerminalBtn').addEventListener('click', addNewTerminal);
+        document.getElementById('saveRecipeBtn').addEventListener('click', saveCurrentAsRecipe);
+        document.getElementById('refreshBtn').addEventListener('click', refreshAll);
+
+        // 终端切换select
+        document.getElementById('terminalSelect').addEventListener('change', (e) => {
+            setActiveTerminal(parseInt(e.target.value));
+        });
+
+        // 关闭终端
+        document.getElementById('closeTerminalBtn').addEventListener('click', closeCurrentTerminal);
+
+        // 发送命令
+        document.getElementById('sendCommandBtn').addEventListener('click', () => {
+            const input = document.getElementById('commandInput');
+            const cmd = input.value.trim();
+            if (cmd) {
+                appendCommandOutput(cmd, `> 执行: ${cmd} (模拟)`);
+                input.value = '';
+            }
+        });
+        // 允许回车发送
+        document.getElementById('commandInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                document.getElementById('sendCommandBtn').click();
+            }
+        });
+
+        // 底部导航
+        document.getElementById('navTerminal').addEventListener('click', () => switchView('terminal'));
+        document.getElementById('navFile').addEventListener('click', () => switchView('file'));
+        document.getElementById('navRecipe').addEventListener('click', () => switchView('recipe'));
+
+        // 上传
+        const fileInput = document.getElementById('fileInput');
+        document.getElementById('uploadBtn').addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', (e) => {
+            uploadFiles(e.target.files);
+            fileInput.value = '';
+        });
+
+        // 新建配方
+        document.getElementById('addRecipeBtn').addEventListener('click', addNewRecipe);
+
+        // 确保终端激活正确
+        if (!activeTerminalId && terminals.length) setActiveTerminal(terminals[0].id);
+    })();
+</script>
+</body>
+</html>

@@ -1,8 +1,9 @@
 import { defineStore } from 'pinia';
 import { parseCommandLine } from '../utils/command-line.js';
+import { DEFAULT_CWD_PATH } from '../utils/desktop-terminal.js';
 
 function resolveHttpBase() {
-  return String(import.meta.env?.VITE_WEBPTY_BASE || '/web-pty').trim();
+  return String(import.meta.env?.VITE_WEBPTY_BASE || '').trim();
 }
 
 function buildApiPath(pathname, params) {
@@ -43,7 +44,7 @@ async function parseErrorMessage(response, fallback) {
 function buildDefaultForm() {
   return {
     commandLine: '',
-    cwd: '/home/yueyuan',
+    cwd: DEFAULT_CWD_PATH,
     envInput: '{}',
     stdin: '',
     timeoutMs: '300000',

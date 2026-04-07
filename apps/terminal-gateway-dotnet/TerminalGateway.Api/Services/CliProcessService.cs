@@ -8,11 +8,13 @@ public sealed class CliProcessService : IDisposable
 {
     private readonly ProcessManager _manager;
     private readonly CliTemplateService _templates;
+    private readonly TerminalEnvService _terminalEnvs;
     private readonly string _filesBasePath;
 
-    public CliProcessService(GatewayOptions options, CliTemplateService templates)
+    public CliProcessService(GatewayOptions options, CliTemplateService templates, TerminalEnvService terminalEnvs)
     {
         _templates = templates;
+        _terminalEnvs = terminalEnvs;
         _filesBasePath = Path.GetFullPath(options.FilesBasePath);
         _manager = new ProcessManager(Math.Max(1, options.ProcessManagerMaxConcurrency));
     }
@@ -20,6 +22,11 @@ public sealed class CliProcessService : IDisposable
     public async Task<object> StartManagedAsync(StartCliProcessRequest request, CancellationToken cancellationToken)
     {
         var template = _templates.GetRequired(request.TemplateId ?? string.Empty);
+        var currentNodeOs = NodeOsHelper.Current;
+        if (template.SupportedOs.Count > 0 && !template.SupportedOs.Contains(currentNodeOs, StringComparer.Ordinal))
+        {
+            throw new InvalidOperationException($"template does not support current node os: {currentNodeOs}");
+        }
         var cwd = ResolveWithinBase(request.CwdOverride, template.DefaultCwd);
         var command = BuildCommand(template, request, cwd);
         var metadata = new Dictionary<string, object>(StringComparer.Ordinal)
@@ -108,6 +115,10 @@ public sealed class CliProcessService : IDisposable
             .AddArguments([.. template.BaseArgs, .. NormalizeStrings(request.ExtraArgs ?? [])])
             .SetWorkingDirectory(cwd);
 
+        foreach (var kv in _terminalEnvs.ResolveEnvironment(template.EnvGroupNames, template.EnvEntryIds, NodeOsHelper.Current))
+        {
+            command.SetEnvironmentVariable(kv.Key, kv.Value);
+        }
         foreach (var kv in template.DefaultEnv)
         {
             command.SetEnvironmentVariable(kv.Key, kv.Value);

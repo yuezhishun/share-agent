@@ -43,7 +43,7 @@ function persistInstanceAliases(aliases) {
 }
 
 function resolveHttpBase() {
-  const explicit = String(import.meta.env.VITE_WEBPTY_BASE || '/web-pty').trim();
+  const explicit = String(import.meta.env?.VITE_WEBPTY_BASE || '').trim();
   return explicit;
 }
 
@@ -499,6 +499,32 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       }
     },
 
+    forgetMissingInstance(instanceId) {
+      const id = String(instanceId || '').trim();
+      if (!id) {
+        return;
+      }
+
+      this.instances = this.instances.filter((item) => String(item?.id || '').trim() !== id);
+      this.joinedInstanceIds = this.joinedInstanceIds.filter((item) => item !== id);
+
+      const stream = this.streamStates[id];
+      if (stream?.syncTimeout) {
+        clearTimeout(stream.syncTimeout);
+      }
+      if (stream?.screenSyncTimeout) {
+        clearTimeout(stream.screenSyncTimeout);
+      }
+      delete this.streamStates[id];
+      delete this.resizeAckByInstance[id];
+
+      if (this.selectedInstanceId === id) {
+        this.selectedInstanceId = this.instances[0]?.id || '';
+      }
+
+      this.setStatus(`Instance not found: ${id}`);
+    },
+
     handleIncomingRaw(message) {
       const id = String(message?.instance_id || '').trim();
       const stream = this.ensureStreamState(id);
@@ -617,6 +643,11 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
         return [message];
       }
 
+      if (message.type === 'term.instance.missing') {
+        this.forgetMissingInstance(instanceId);
+        return [message];
+      }
+
       if (message.type === 'term.resize.ack' && message.accepted === true) {
         this.resizeAckByInstance[instanceId] = Date.now();
         this.requestScreenSync(instanceId, 'resize').catch(() => {
@@ -644,6 +675,10 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       }
       if (message?.type === 'term.snapshot') {
         this.setStatus('Connected');
+        return;
+      }
+      if (message?.type === 'term.instance.missing') {
+        this.setStatus(`Instance not found: ${messageInstanceId}`);
         return;
       }
       if (message?.type === 'term.exit') {
@@ -686,6 +721,28 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       const body = await response.json();
       this.nodes = Array.isArray(body?.items) ? body.items : [];
       return this.nodes;
+    },
+
+    upsertInstanceSummary(summary) {
+      if (!summary || typeof summary !== 'object') {
+        return;
+      }
+
+      const instanceId = String(summary.id || '').trim();
+      if (!instanceId) {
+        return;
+      }
+
+      const next = Array.isArray(this.instances) ? [...this.instances] : [];
+      const index = next.findIndex((item) => String(item?.id || '').trim() === instanceId);
+      if (index >= 0) {
+        next[index] = { ...next[index], ...summary };
+      } else {
+        next.unshift(summary);
+      }
+
+      next.sort((a, b) => String(b?.created_at || '').localeCompare(String(a?.created_at || '')));
+      this.instances = next;
     },
 
     resolvePreferredNodeId(candidate = '') {
@@ -836,7 +893,6 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       await this.ensureConnection();
       this.selectedInstanceId = id;
       await this.joinInstance(id);
-      await this.syncJoinedInstances({ include: [id] });
       await this.requestScreenSync(id);
       this.setStatus('Connected');
     },
@@ -847,11 +903,16 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
       }
       const source = String(options?.source || 'programmatic');
       const payload = String(data || '');
-      await this.connection.invoke('SendInput', {
+      const request = {
         instanceId: this.selectedInstanceId,
         data: payload,
         source
-      });
+      };
+      if (options?.fireAndForget === true && typeof this.connection.send === 'function') {
+        await this.connection.send('SendInput', request);
+        return;
+      }
+      await this.connection.invoke('SendInput', request);
     },
 
     async sendBracketedPaste(text) {
@@ -911,8 +972,12 @@ export const useWebCliTerminalStore = defineStore('webcliTerminal', {
         throw new Error(await parseErrorMessage(response, `create instance failed: ${response.status}`));
       }
       const created = await response.json();
-      await this.fetchInstances();
       this.selectedInstanceId = String(created.instance_id || '');
+      if (created?.summary && typeof created.summary === 'object') {
+        this.upsertInstanceSummary(created.summary);
+      } else {
+        await this.fetchInstances();
+      }
       return created;
     },
 

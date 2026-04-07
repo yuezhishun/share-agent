@@ -103,6 +103,19 @@ public sealed class RemoteInstanceRegistry
         return _instanceToNode.TryGetValue((instanceId ?? string.Empty).Trim(), out nodeId!);
     }
 
+    public bool TryGetSummary(string instanceId, out InstanceSummary summary)
+    {
+        var normalized = (instanceId ?? string.Empty).Trim();
+        if (_summaries.TryGetValue(normalized, out var cached))
+        {
+            summary = Clone(cached.Summary);
+            return true;
+        }
+
+        summary = null!;
+        return false;
+    }
+
     public IReadOnlyList<InstanceSummary> List()
     {
         var cutoff = _timeProvider.GetUtcNow() - _cacheTtl;

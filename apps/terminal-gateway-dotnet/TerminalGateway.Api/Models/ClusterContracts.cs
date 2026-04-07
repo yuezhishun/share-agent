@@ -9,6 +9,7 @@ public sealed class ClusterRegisterNodeRequest
     public string? NodeName { get; set; }
     public string? NodeLabel { get; set; }
     public string? NodeRole { get; set; }
+    public string? NodeOs { get; set; }
     public int? InstanceCount { get; set; }
 }
 
@@ -16,6 +17,7 @@ public sealed class ClusterHeartbeatRequest
 {
     public string? Token { get; set; }
     public string? NodeId { get; set; }
+    public string? NodeOs { get; set; }
     public int? InstanceCount { get; set; }
 }
 
@@ -92,6 +94,7 @@ public sealed class NodeSummary
     public required string NodeId { get; init; }
     public required string NodeName { get; init; }
     public required string NodeRole { get; init; }
+    public required string NodeOs { get; init; }
     public string? NodeLabel { get; init; }
     public bool IsCurrent { get; init; }
     public required bool NodeOnline { get; init; }

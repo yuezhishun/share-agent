@@ -15,6 +15,8 @@ public sealed class ClusterCommandExecutor
     private readonly FileApiService _files;
     private readonly ProcessApiService _processes;
     private readonly CliTemplateService _cliTemplates;
+    private readonly TerminalEnvService _terminalEnvs;
+    private readonly TerminalShortcutService _terminalShortcuts;
     private readonly CliProcessService _cliProcesses;
     private readonly AgentCatalogService _agentCatalog;
     private readonly AgentGatewayService _agentGateway;
@@ -28,6 +30,8 @@ public sealed class ClusterCommandExecutor
         FileApiService files,
         ProcessApiService processes,
         CliTemplateService cliTemplates,
+        TerminalEnvService terminalEnvs,
+        TerminalShortcutService terminalShortcuts,
         CliProcessService cliProcesses,
         AgentCatalogService agentCatalog,
         AgentGatewayService agentGateway,
@@ -40,6 +44,8 @@ public sealed class ClusterCommandExecutor
         _files = files;
         _processes = processes;
         _cliTemplates = cliTemplates;
+        _terminalEnvs = terminalEnvs;
+        _terminalShortcuts = terminalShortcuts;
         _cliProcesses = cliProcesses;
         _agentCatalog = agentCatalog;
         _agentGateway = agentGateway;
@@ -271,6 +277,18 @@ public sealed class ClusterCommandExecutor
                     var name = ReadString(command.Payload, "name");
                     return Ok(command, _files.CreateDirectory(_options.FilesBasePath, path, name));
                 }
+                case "files.rename":
+                {
+                    var path = ReadString(command.Payload, "path");
+                    var newName = ReadString(command.Payload, "new_name") ?? ReadString(command.Payload, "newName");
+                    return Ok(command, _files.RenameEntry(_options.FilesBasePath, path, newName));
+                }
+                case "files.remove":
+                {
+                    var path = ReadString(command.Payload, "path");
+                    var recursive = ReadBool(command.Payload, "recursive");
+                    return Ok(command, _files.RemoveEntry(_options.FilesBasePath, path, recursive));
+                }
                 case "files.download":
                 {
                     var path = ReadString(command.Payload, "path");
@@ -351,7 +369,51 @@ public sealed class ClusterCommandExecutor
                     return Ok(command, _processes.RemoveManaged(processId));
                 }
                 case "cli.template.list":
-                    return Ok(command, new { items = _cliTemplates.List() });
+                {
+                    var templateKind = ReadString(command.Payload, "kind");
+                    return Ok(command, new { items = _cliTemplates.List(templateKind) });
+                }
+                case "terminal.env.list":
+                {
+                    var group = ReadString(command.Payload, "group");
+                    var search = ReadString(command.Payload, "search");
+                    return Ok(command, new { items = _terminalEnvs.List(group, search).Select(ToApiTerminalEnv) });
+                }
+                case "terminal.env.create":
+                {
+                    var request = command.Payload.Deserialize<CreateTerminalEnvEntryRequest>(CaseInsensitiveJson) ?? new CreateTerminalEnvEntryRequest();
+                    return Ok(command, ToApiTerminalEnv(_terminalEnvs.Create(request)));
+                }
+                case "terminal.env.update":
+                {
+                    var envId = ReadString(command.Payload, "env_id") ?? ReadString(command.Payload, "envId");
+                    if (string.IsNullOrWhiteSpace(envId))
+                    {
+                        return Fail(command, "env_id is required");
+                    }
+
+                    UpdateTerminalEnvEntryRequest request;
+                    if (TryGetPropertyInsensitive(command.Payload, "updates", out var envUpdatesElement) && envUpdatesElement.ValueKind == JsonValueKind.Object)
+                    {
+                        request = envUpdatesElement.Deserialize<UpdateTerminalEnvEntryRequest>(CaseInsensitiveJson) ?? new UpdateTerminalEnvEntryRequest();
+                    }
+                    else
+                    {
+                        request = command.Payload.Deserialize<UpdateTerminalEnvEntryRequest>(CaseInsensitiveJson) ?? new UpdateTerminalEnvEntryRequest();
+                    }
+
+                    return Ok(command, ToApiTerminalEnv(_terminalEnvs.Update(envId, request)));
+                }
+                case "terminal.env.delete":
+                {
+                    var envId = ReadString(command.Payload, "env_id") ?? ReadString(command.Payload, "envId");
+                    if (string.IsNullOrWhiteSpace(envId))
+                    {
+                        return Fail(command, "env_id is required");
+                    }
+
+                    return Ok(command, _terminalEnvs.Delete(envId));
+                }
                 case "cli.template.create":
                 {
                     var request = command.Payload.Deserialize<CreateCliTemplateRequest>(CaseInsensitiveJson) ?? new CreateCliTemplateRequest();
@@ -386,6 +448,43 @@ public sealed class ClusterCommandExecutor
                     }
 
                     return Ok(command, _cliTemplates.Delete(templateId));
+                }
+                case "terminal.shortcut.list":
+                    return Ok(command, new { items = _terminalShortcuts.List() });
+                case "terminal.shortcut.create":
+                {
+                    var request = command.Payload.Deserialize<CreateTerminalShortcutRequest>(CaseInsensitiveJson) ?? new CreateTerminalShortcutRequest();
+                    return Ok(command, _terminalShortcuts.Create(request));
+                }
+                case "terminal.shortcut.update":
+                {
+                    var shortcutId = ReadString(command.Payload, "shortcut_id") ?? ReadString(command.Payload, "shortcutId");
+                    if (string.IsNullOrWhiteSpace(shortcutId))
+                    {
+                        return Fail(command, "shortcut_id is required");
+                    }
+
+                    UpdateTerminalShortcutRequest request;
+                    if (TryGetPropertyInsensitive(command.Payload, "updates", out var updatesElement) && updatesElement.ValueKind == JsonValueKind.Object)
+                    {
+                        request = updatesElement.Deserialize<UpdateTerminalShortcutRequest>(CaseInsensitiveJson) ?? new UpdateTerminalShortcutRequest();
+                    }
+                    else
+                    {
+                        request = command.Payload.Deserialize<UpdateTerminalShortcutRequest>(CaseInsensitiveJson) ?? new UpdateTerminalShortcutRequest();
+                    }
+
+                    return Ok(command, _terminalShortcuts.Update(shortcutId, request));
+                }
+                case "terminal.shortcut.delete":
+                {
+                    var shortcutId = ReadString(command.Payload, "shortcut_id") ?? ReadString(command.Payload, "shortcutId");
+                    if (string.IsNullOrWhiteSpace(shortcutId))
+                    {
+                        return Fail(command, "shortcut_id is required");
+                    }
+
+                    return Ok(command, _terminalShortcuts.Delete(shortcutId));
                 }
                 case "cli.process.start":
                 {
@@ -658,5 +757,21 @@ public sealed class ClusterCommandExecutor
                 _ => true
             })
             .ToList();
+    }
+
+    private static object ToApiTerminalEnv(TerminalEnvEntryRecord item)
+    {
+        return new
+        {
+            id = item.EnvId,
+            key = item.Key,
+            valueType = item.ValueType,
+            value = item.Value,
+            group = item.GroupName,
+            enabled = item.Enabled,
+            sortOrder = item.SortOrder,
+            createdAt = item.CreatedAt,
+            updatedAt = item.UpdatedAt
+        };
     }
 }

@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 
 function resolveHttpBase() {
-  return String(import.meta.env.VITE_WEBPTY_BASE || '/web-pty').trim();
+  return String(import.meta.env.VITE_WEBPTY_BASE || '').trim();
 }
 
 function buildApiPath(pathname, params) {
@@ -91,6 +91,20 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
   }),
 
   actions: {
+    resetState(next = {}) {
+      this.currentNodeId = String(next.currentNodeId || '').trim();
+      this.basePath = String(next.basePath || '');
+      this.currentPath = String(next.currentPath || '');
+      this.parentPath = '';
+      this.loading = false;
+      this.error = '';
+      this.items = [];
+      this.preview = null;
+      this.previewError = '';
+      this.actionLoading = false;
+      this.actionError = '';
+    },
+
     resetPreview() {
       this.preview = null;
       this.previewError = '';
@@ -248,11 +262,13 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
       }
     },
 
-    async renameEntry(path, newName) {
+    async renameEntry(path, newName, nodeId = this.currentNodeId) {
+      const targetNodeId = String(nodeId || '').trim();
+      this.setCurrentNodeId(targetNodeId);
       this.actionLoading = true;
       this.setActionError('');
       try {
-        const response = await fetch(buildApiPath('/api/files/rename'), {
+        const response = await fetch(buildNodeFilesApiPath('/files/rename', targetNodeId), {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
@@ -265,7 +281,7 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
         }
 
         const payload = await response.json();
-        await this.loadList(this.currentPath);
+        await this.loadList(this.currentPath, targetNodeId);
         return payload?.item || null;
       } catch (error) {
         const message = String(error?.message || error);
@@ -276,12 +292,14 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
       }
     },
 
-    async removeEntry(path, options = {}) {
+    async removeEntry(path, options = {}, nodeId = this.currentNodeId) {
+      const targetNodeId = String(nodeId || '').trim();
+      this.setCurrentNodeId(targetNodeId);
       this.actionLoading = true;
       this.setActionError('');
       try {
         const recursive = options?.recursive ? '1' : '0';
-        const response = await fetch(buildApiPath('/api/files/remove', {
+        const response = await fetch(buildNodeFilesApiPath('/files/remove', targetNodeId, {
           path,
           recursive
         }), {
@@ -292,7 +310,7 @@ export const useWebCliFilesStore = defineStore('webcliFiles', {
         }
 
         const payload = await response.json();
-        await this.loadList(this.currentPath);
+        await this.loadList(this.currentPath, targetNodeId);
         return payload;
       } catch (error) {
         const message = String(error?.message || error);

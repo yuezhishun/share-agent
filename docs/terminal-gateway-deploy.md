@@ -1,340 +1,162 @@
 # terminal-gateway 部署说明
 
-## 1. 适用范围
+## 1. 部署入口
 
-本文档只描述当前仓库内 `terminal-gateway-dotnet` 的部署与运行方式，重点覆盖：
+当前仓库的部署脚本按场景组织：
 
-- 集群模式：master + slave
-- 单实例模式：仅 master
-- 单实例模式：仅 slave
-- 本地直接运行
-- 从 cluster 切回单 master 时的 Nginx 切换
+- `deploy/single-master`
+  - 单机 master，前端由 Nginx 提供，后端本机反代
+- `deploy/cluster-lan`
+  - 公网 master + 局域网 slave
+  - master 公网入口固定为 `https://pty.addai.vip`
+  - slave 本机也部署一套前端，优先本地访问
+- `deploy/cluster-examples`
+  - 本机快速启动示例，不负责生产部署
+- `deploy/docker`
+  - Docker Compose 联调
 
-相关脚本：
+## 2. 路由约定
 
-- `deploy/release-local.sh`
-- `deploy/release-frontend-local.sh`
-- `deploy/release-cluster-local.sh`
-- `deploy/release-cluster-frontend-local.sh`
-- `deploy/verify-local.sh`
-- `deploy/verify-cluster-local.sh`
+### 2.1 生产 master
 
-## 2. 模式说明
+- 前端：`/`
+- API：`/api/`
+- Terminal Hub：`/hubs/terminal`
+- Cluster Hub：`/hubs/cluster`
 
-- 默认角色是 `master`
-- 当 `GATEWAY_ROLE=slave` 且 `MASTER_URL` 非空时，网关会以 slave 身份连接 master
-- cluster 模式通常使用两个 systemd 服务：
-  - `terminal-gateway-master.service`
-  - `terminal-gateway-slave.service`
-- 单 master 模式通常使用一个 systemd 服务：
-  - `terminal-gateway-dotnet.service`
+### 2.2 局域网 slave
 
-## 3. 常用环境变量
+- 前端：`/`
+- API：`/api/`
+- Terminal Hub：`/hubs/terminal`
+- slave 通过 `MASTER_URL` 接入远程 master
 
-- `HOST`
-- `PORT`
-- `GATEWAY_ROLE`
-- `NODE_ID`
-- `NODE_NAME`
-- `NODE_LABEL`
-- `MASTER_URL`
-- `CLUSTER_TOKEN`
-- `FILES_BASE_PATH`
-- `TERMINAL_SETTINGS_STORE_FILE`
-- `TERMINAL_PROFILE_STORE_FILE`
+### 2.3 前端构建变量
 
-## 4. 本地直接运行
+统一使用：
 
-### 4.1 本地启动单 master 模式
+- `VITE_APP_BASE_PATH`
+- `VITE_WEBPTY_BASE`
+- `VITE_WEBPTY_HUB_PATH`
+- `VITE_WEBPTY_HUB_URL`
+
+不再使用 `VITE_WEBPTY_HUB_PATH_V2`。
+
+## 3. 单机 master
+
+### 3.1 Linux
+
+执行顺序：
 
 ```bash
-dotnet run --project apps/terminal-gateway-dotnet/TerminalGateway.Api/TerminalGateway.Api.csproj
+bash deploy/single-master/build-frontend.sh
+sudo bash deploy/single-master/install-service.sh
+sudo bash deploy/single-master/install-nginx.sh
+bash deploy/single-master/verify.sh
+```
+
+说明：
+
+- `build-frontend.sh` 把前端发布到 `/www/wwwroot/pty-agent-web`
+- `install-service.sh` 写入单机 master 的 systemd service
+- `install-nginx.sh` 写入站点 vhost，默认代理到 `127.0.0.1:7300`
+- `verify.sh` 校验前端、健康接口和终端实例创建/销毁
+
+### 3.2 Windows
+
+执行顺序：
+
+```powershell
+powershell -File deploy/single-master/build-frontend.ps1
+powershell -File deploy/single-master/start-gateway.ps1
+```
+
+说明：
+
+- 默认环境名：`SingleWindowsMaster`
+- Windows 脚本只负责前端构建和前台启动 gateway
+- 若本机使用 Nginx，请让根路径指向构建输出目录，并把 `/api/`、`/hubs/` 反代到 gateway
+
+## 4. 生产 master + 局域网 slave
+
+### 4.1 生产 master
+
+执行顺序：
+
+```bash
+bash deploy/cluster-lan/build-master-frontend.sh
+sudo bash deploy/cluster-lan/install-master-service.sh
+sudo bash deploy/cluster-lan/install-master-nginx.sh
+bash deploy/cluster-lan/verify-master.sh
 ```
 
 默认值：
 
-- `HOST=0.0.0.0`
-- `PORT=8080`
-- `GATEWAY_ROLE=master`
+- master service 监听 `127.0.0.1:7310`
+- Nginx 根目录 `/www/wwwroot/pty-agent-web`
+- 站点域名 `pty.addai.vip`
 
-如需显式指定：
+### 4.2 局域网 slave
 
-```bash
-GATEWAY_ROLE=master \
-PORT=7300 \
-dotnet run --project apps/terminal-gateway-dotnet/TerminalGateway.Api/TerminalGateway.Api.csproj
-```
-
-### 4.2 本地启动单 slave 模式
-
-前提：已有可访问的 master。
+执行顺序：
 
 ```bash
-GATEWAY_ROLE=slave \
-HOST=127.0.0.1 \
-PORT=7320 \
-NODE_ID=slave-local \
-NODE_NAME="Slave Local" \
-MASTER_URL=http://127.0.0.1:7310 \
-CLUSTER_TOKEN=dev-cluster-token \
-FILES_BASE_PATH=/home/yueyuan/gitlab \
-TERMINAL_SETTINGS_STORE_FILE=/tmp/pty-agent-terminal-settings-slave.json \
-TERMINAL_PROFILE_STORE_FILE=/tmp/pty-agent-terminal-profiles-slave.json \
-dotnet run --project apps/terminal-gateway-dotnet/TerminalGateway.Api/TerminalGateway.Api.csproj
+bash deploy/cluster-lan/build-slave-frontend.sh
+sudo MASTER_URL=https://pty.addai.vip bash deploy/cluster-lan/install-slave-service.sh
+sudo bash deploy/cluster-lan/install-slave-nginx.sh
+bash deploy/cluster-lan/verify-slave.sh
 ```
 
-### 4.3 本地启动 master/slave 模式
+默认值：
 
-先启动 master：
+- slave service 监听 `127.0.0.1:7320`
+- slave 前端发布目录 `/www/wwwroot/pty-agent-slave-web`
+- slave 本地站点默认 `server_name=slave.local`
+
+### 4.3 集群联通验证
 
 ```bash
-GATEWAY_ROLE=master \
-HOST=127.0.0.1 \
-PORT=7310 \
-NODE_ID=master-local \
-NODE_NAME="Master Local" \
-CLUSTER_TOKEN=dev-cluster-token \
-FILES_BASE_PATH=/home/yueyuan \
-TERMINAL_SETTINGS_STORE_FILE=/tmp/pty-agent-terminal-settings-master.json \
-TERMINAL_PROFILE_STORE_FILE=/tmp/pty-agent-terminal-profiles-master.json \
-dotnet run --project apps/terminal-gateway-dotnet/TerminalGateway.Api/TerminalGateway.Api.csproj
+bash deploy/cluster-lan/verify-cluster.sh
 ```
 
-再启动 slave：
+脚本检查：
+
+- 公网 master 健康
+- slave 本机健康
+- master 的 `/api/nodes` 中能看到 slave
+
+## 5. 本机 cluster 示例
+
+这组脚本只负责本机快速运行，不负责生产安装：
 
 ```bash
-GATEWAY_ROLE=slave \
-HOST=127.0.0.1 \
-PORT=7320 \
-NODE_ID=slave-local \
-NODE_NAME="Slave Local" \
-MASTER_URL=http://127.0.0.1:7310 \
-CLUSTER_TOKEN=dev-cluster-token \
-FILES_BASE_PATH=/home/yueyuan/gitlab \
-TERMINAL_SETTINGS_STORE_FILE=/tmp/pty-agent-terminal-settings-slave.json \
-TERMINAL_PROFILE_STORE_FILE=/tmp/pty-agent-terminal-profiles-slave.json \
-dotnet run --project apps/terminal-gateway-dotnet/TerminalGateway.Api/TerminalGateway.Api.csproj
+bash deploy/cluster-examples/start-master.sh
+bash deploy/cluster-examples/start-master-slave.sh
 ```
 
-约束：
+Windows：
 
-- `CLUSTER_TOKEN` 必须一致
-- `MASTER_URL` 必须可达
-- master/slave 应使用不同的 `PORT`、`NODE_ID` 和本地存储文件
+```powershell
+powershell -File deploy/cluster-examples/start-master.ps1
+powershell -File deploy/cluster-examples/start-master-slave.ps1
+```
 
-## 5. systemd 部署
+单一来源是 `TerminalGateway.Api` 下的 `appsettings.Cluster*.json`。
 
-### 5.1 启动集群模式
+## 6. Docker 联调
 
 ```bash
-sudo bash deploy/release-cluster-local.sh
+cd deploy/docker
+docker compose up --build
+./smoke.sh
 ```
-
-脚本行为：
-
-- 写入 `terminal-gateway-master.service`
-- 写入 `terminal-gateway-slave.service`
-- 构建 master/slave 两套前端
-- 发布到：
-  - `/www/wwwroot/pty-agent-web-master`
-  - `/www/wwwroot/pty-agent-web-slave`
-- 启用并重启两个服务
-
-默认端口：
-
-- master：`7310`
-- slave：`7320`
-
-如需覆盖默认值：
-
-```bash
-sudo MASTER_PORT=7310 \
-SLAVE_PORT=7320 \
-MASTER_NODE_ID=master-local \
-SLAVE_NODE_ID=slave-local \
-bash deploy/release-cluster-local.sh
-```
-
-### 5.2 更新集群模式
-
-后端和前端一起更新：
-
-```bash
-sudo bash deploy/release-cluster-local.sh
-```
-
-只更新前端：
-
-```bash
-sudo bash deploy/release-cluster-frontend-local.sh
-```
-
-验证：
-
-```bash
-bash deploy/verify-cluster-local.sh
-```
-
-### 5.3 停止集群模式
-
-停止并取消开机自启：
-
-```bash
-sudo systemctl disable --now terminal-gateway-master.service
-sudo systemctl disable --now terminal-gateway-slave.service
-```
-
-只停止：
-
-```bash
-sudo systemctl stop terminal-gateway-master.service
-sudo systemctl stop terminal-gateway-slave.service
-```
-
-### 5.4 启动 master 模式
-
-```bash
-sudo bash deploy/release-local.sh
-```
-
-脚本行为：
-
-- 写入 `terminal-gateway-dotnet.service`
-- 构建单套前端
-- 发布到 `/www/wwwroot/pty-agent-web`
-- 启用并重启该服务
-
-默认监听：
-
-- `HOST=127.0.0.1`
-- `PORT=7300`
-
-### 5.5 更新 master 模式
-
-后端和前端一起更新：
-
-```bash
-sudo bash deploy/release-local.sh
-```
-
-只更新前端：
-
-```bash
-sudo bash deploy/release-frontend-local.sh
-```
-
-验证：
-
-```bash
-bash deploy/verify-local.sh
-```
-
-### 5.6 停止 master 模式
-
-停止并取消开机自启：
-
-```bash
-sudo systemctl disable --now terminal-gateway-dotnet.service
-```
-
-只停止：
-
-```bash
-sudo systemctl stop terminal-gateway-dotnet.service
-```
-
-### 5.7 启动单 slave 模式
-
-前提：已有可访问的 master。当前仓库没有单独的 `release-slave-local.sh`，因此单 slave 需手动写 systemd unit。
-
-示例：
-
-```ini
-[Unit]
-Description=PTY Agent Terminal Gateway (slave)
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/home/yueyuan/pty-agent
-Environment=HOST=127.0.0.1
-Environment=PORT=7320
-Environment=GATEWAY_ROLE=slave
-Environment=NODE_ID=slave-local
-Environment=NODE_NAME=Slave Local
-Environment=MASTER_URL=http://127.0.0.1:7310
-Environment=CLUSTER_TOKEN=dev-cluster-token
-Environment=FILES_BASE_PATH=/home/yueyuan/gitlab
-Environment=TERMINAL_SETTINGS_STORE_FILE=/tmp/pty-agent-terminal-settings-slave.json
-Environment=TERMINAL_PROFILE_STORE_FILE=/tmp/pty-agent-terminal-profiles-slave.json
-ExecStart=/usr/bin/dotnet run --project /home/yueyuan/pty-agent/apps/terminal-gateway-dotnet/TerminalGateway.Api/TerminalGateway.Api.csproj
-Restart=always
-RestartSec=2
-StandardOutput=append:/www/wwwlogs/terminal-gateway-slave.out.log
-StandardError=append:/www/wwwlogs/terminal-gateway-slave.err.log
-
-[Install]
-WantedBy=multi-user.target
-```
-
-保存为 `/etc/systemd/system/terminal-gateway-slave.service` 后执行：
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable terminal-gateway-slave.service
-sudo systemctl restart terminal-gateway-slave.service
-```
-
-### 5.8 停止单 slave 模式
-
-停止并取消开机自启：
-
-```bash
-sudo systemctl disable --now terminal-gateway-slave.service
-```
-
-只停止：
-
-```bash
-sudo systemctl stop terminal-gateway-slave.service
-```
-
-## 6. 从 cluster 切回仅 master
-
-### 6.1 systemd 切换
-
-```bash
-sudo systemctl disable --now terminal-gateway-master.service
-sudo systemctl disable --now terminal-gateway-slave.service
-sudo bash deploy/release-local.sh
-```
-
-### 6.2 Nginx 也要同步切换
-
-如果线上 Nginx 仍保留 cluster 反代，`/web-pty/api/*` 会继续转发到旧的 `7310/7320`，从而返回 `502`。切换到单 master 时需要一并修改站点 vhost：
-
-- 根目录从 `pty-agent-web-master` 切回 `pty-agent-web`
-- `/web-pty/api/` 和 `/api/` 的 `proxy_pass` 从 `127.0.0.1:7310` 改回 `127.0.0.1:7300`
-- `/web-pty/hubs/` 和 `/hubs/` 的 `proxy_pass` 从 `127.0.0.1:7310` 改回 `127.0.0.1:7300`
-- 如果不再提供 slave 页面，可移除 `/slave/*` 相关 location
-
-修改后执行：
-
-```bash
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-线上 Nginx 关键路径可参考：
-
-- `docs/nginx-config-paths.md`
 
 ## 7. 排障
 
 ### 7.1 检查服务状态
 
 ```bash
-systemctl --no-pager --lines=50 status terminal-gateway-dotnet.service
+systemctl --no-pager --lines=50 status terminal-gateway-single-master.service
 systemctl --no-pager --lines=50 status terminal-gateway-master.service
 systemctl --no-pager --lines=50 status terminal-gateway-slave.service
 ```
@@ -342,43 +164,15 @@ systemctl --no-pager --lines=50 status terminal-gateway-slave.service
 ### 7.2 检查监听端口
 
 ```bash
-ss -ltnp | rg ':7300|:7310|:7320|:8080'
+ss -ltnp | rg ':7300|:7310|:7320'
 ```
 
-### 7.3 检查本机健康
-
-```bash
-curl -sS http://127.0.0.1:7300/api/health
-curl -sS http://127.0.0.1:7310/api/health
-curl -sS http://127.0.0.1:7320/api/health
-```
-
-### 7.4 典型问题
+### 7.3 典型问题
 
 - `502 Bad Gateway`
-  - 优先检查 Nginx 反代端口是否和当前模式一致
-  - 再检查对应 systemd 服务是否真的在监听该端口
-
-- slave 连不上 master
-  - 检查 `MASTER_URL`
-  - 检查 `CLUSTER_TOKEN`
-  - 检查防火墙和网络可达性
-
-- 切回单 master 后页面能开但 API 502
-  - 基本都是 Nginx 仍指向 `7310`
-
-## 8. 验证
-
-单 master 常用验证：
-
-```bash
-curl -k https://your-domain/web-pty/api/health
-curl -k https://your-domain/web-pty/api/nodes
-curl -k https://your-domain/web-pty/api/instances
-```
-
-cluster 常用验证：
-
-```bash
-bash deploy/verify-cluster-local.sh
-```
+  - 先检查 Nginx `proxy_pass` 端口是否和当前服务一致
+- slave 不显示在 master 节点列表中
+  - 先检查 `MASTER_URL`
+  - 再检查 `CLUSTER_TOKEN`
+- 前端能打开但无法连终端
+  - 先检查 `/hubs/terminal` 是否被正确反代

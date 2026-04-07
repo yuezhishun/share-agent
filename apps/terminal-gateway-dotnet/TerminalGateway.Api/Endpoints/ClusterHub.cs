@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.Logging;
 using TerminalGateway.Api.Infrastructure;
 using TerminalGateway.Api.Models;
 using TerminalGateway.Api.Services;
@@ -16,6 +17,7 @@ public sealed class ClusterHub : Hub
     private readonly RemoteInstanceRegistry _remoteInstances;
     private readonly IHubContext<TerminalHub> _terminalHub;
     private readonly ClusterTerminalSubscriptionService _subscriptions;
+    private readonly ILogger<ClusterHub> _logger;
 
     public ClusterHub(
         GatewayOptions options,
@@ -25,7 +27,8 @@ public sealed class ClusterHub : Hub
         ClusterEventDeduplicator events,
         RemoteInstanceRegistry remoteInstances,
         IHubContext<TerminalHub> terminalHub,
-        ClusterTerminalSubscriptionService subscriptions)
+        ClusterTerminalSubscriptionService subscriptions,
+        ILogger<ClusterHub> logger)
     {
         _options = options;
         _nodeRegistry = nodeRegistry;
@@ -35,6 +38,7 @@ public sealed class ClusterHub : Hub
         _remoteInstances = remoteInstances;
         _terminalHub = terminalHub;
         _subscriptions = subscriptions;
+        _logger = logger;
     }
 
     public Task RegisterNode(ClusterRegisterNodeRequest request)
@@ -99,9 +103,31 @@ public sealed class ClusterHub : Hub
             Payload = request.Payload
         };
 
-        var result = string.Equals(targetNodeId, _options.NodeId, StringComparison.Ordinal)
-            ? await _executor.ExecuteAsync(command, Context.ConnectionAborted)
-            : await _broker.SendAsync(sourceNodeId, targetNodeId, command.Type, command.Payload, Context.ConnectionAborted);
+        ClusterCommandResult result;
+        try
+        {
+            result = string.Equals(targetNodeId, _options.NodeId, StringComparison.Ordinal)
+                ? await _executor.ExecuteAsync(command, Context.ConnectionAborted)
+                : await _broker.SendAsync(sourceNodeId, targetNodeId, command.Type, command.Payload, Context.ConnectionAborted);
+        }
+        catch (TimeoutException ex)
+        {
+            _logger.LogWarning(ex,
+                "Cluster RequestCommand timed out. source_node_id={SourceNodeId} target_node_id={TargetNodeId} type={Type}",
+                sourceNodeId,
+                targetNodeId,
+                command.Type);
+            throw new HubException($"cluster command timed out for node {targetNodeId}");
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning(ex,
+                "Cluster RequestCommand failed. source_node_id={SourceNodeId} target_node_id={TargetNodeId} type={Type}",
+                sourceNodeId,
+                targetNodeId,
+                command.Type);
+            throw new HubException(ex.Message);
+        }
         TrackInstanceOwnership(command, result);
         return result;
     }

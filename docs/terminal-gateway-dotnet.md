@@ -372,20 +372,27 @@ dotnet run --project apps/terminal-gateway-dotnet/TerminalGateway.Api/TerminalGa
 
 ## 7. 部署脚本
 
-单机：
+单机 master：
 
 ```bash
-sudo bash deploy/release-local.sh
-sudo bash deploy/release-frontend-local.sh
-bash deploy/verify-local.sh
+bash deploy/single-master/build-frontend.sh
+sudo bash deploy/single-master/install-service.sh
+sudo bash deploy/single-master/install-nginx.sh
+bash deploy/single-master/verify.sh
 ```
 
-集群：
+生产 master + 局域网 slave：
 
 ```bash
-sudo bash deploy/release-cluster-local.sh
-sudo bash deploy/release-cluster-frontend-local.sh
-bash deploy/verify-cluster-local.sh
+bash deploy/cluster-lan/build-master-frontend.sh
+sudo bash deploy/cluster-lan/install-master-service.sh
+sudo bash deploy/cluster-lan/install-master-nginx.sh
+
+bash deploy/cluster-lan/build-slave-frontend.sh
+sudo bash deploy/cluster-lan/install-slave-service.sh
+sudo bash deploy/cluster-lan/install-slave-nginx.sh
+
+bash deploy/cluster-lan/verify-cluster.sh
 ```
 
 ## 8. 测试

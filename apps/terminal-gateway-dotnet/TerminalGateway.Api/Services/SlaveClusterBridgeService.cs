@@ -73,6 +73,7 @@ public sealed class SlaveClusterBridgeService : BackgroundService
                     NodeName = _options.NodeName,
                     NodeLabel = _options.NodeLabel,
                     NodeRole = "slave",
+                    NodeOs = NodeOsHelper.Current,
                     InstanceCount = _instances.List().Count
                 }, stoppingToken);
                 await SyncLocalInstancesAsync(connection, stoppingToken);
@@ -90,6 +91,7 @@ public sealed class SlaveClusterBridgeService : BackgroundService
                     {
                         Token = _options.ClusterToken,
                         NodeId = _options.NodeId,
+                        NodeOs = NodeOsHelper.Current,
                         InstanceCount = _instances.List().Count
                     }, stoppingToken);
                     await SyncLocalInstancesAsync(connection, stoppingToken);
@@ -400,6 +402,7 @@ public sealed class SlaveClusterBridgeService : BackgroundService
                 NodeId = ReadString(item, "node_id") ?? string.Empty,
                 NodeName = ReadString(item, "node_name") ?? string.Empty,
                 NodeRole = ReadString(item, "node_role") ?? string.Empty,
+                NodeOs = NodeOsHelper.Normalize(ReadString(item, "node_os")),
                 NodeLabel = ReadString(item, "node_label"),
                 IsCurrent = ReadBool(item, "is_current", false),
                 NodeOnline = ReadBool(item, "node_online", false),

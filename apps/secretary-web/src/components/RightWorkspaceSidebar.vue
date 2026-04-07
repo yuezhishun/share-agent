@@ -50,6 +50,20 @@
       <div v-else-if="activeRightTab === 'recipes'" class="section-header-actions">
         <span
           class="add-icon"
+          :class="{ active: showTerminalEnvLibrary }"
+          title="环境变量库"
+          data-testid="terminal-env-library-toggle"
+          @click="showTerminalEnvLibrary ? emit('close-terminal-env-library') : emit('open-terminal-env-library')"
+        ><i class="fa-solid fa-boxes-stacked" /></span>
+        <span
+          class="add-icon"
+          :class="{ active: showTerminalEnvEditor }"
+          :title="showTerminalEnvEditor ? '收起环境变量表单' : '添加环境变量'"
+          data-testid="terminal-env-editor-toggle"
+          @click="showTerminalEnvEditor ? emit('close-terminal-env-editor') : emit('open-terminal-env-editor')"
+        ><i :class="showTerminalEnvEditor ? 'fa-solid fa-minus' : 'fa-solid fa-plus'" /></span>
+        <span
+          class="add-icon"
           :class="{ active: showTerminalSizeEditor }"
           title="设置伪终端尺寸"
           data-testid="terminal-size-toggle"
@@ -209,120 +223,84 @@
         <div v-for="group in shortcutGroups" :key="group.group" class="shortcut-group">
           <div class="shortcut-group-title">{{ group.group }}</div>
           <div class="shortcut-grid">
-            <button
+            <div
               v-for="item in group.items"
               :key="item.id"
-              type="button"
-              class="shortcut-btn"
-              @click="emit('send-shortcut', item)"
+              class="shortcut-btn-shell"
             >
-              {{ item.label }}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div v-else class="recipes-panel">
-      <div v-if="showTerminalSizeEditor" class="terminal-size-editor">
-        <label class="terminal-size-field">
-          <span>宽 cols</span>
-          <input
-            :value="terminalSizeDraftCols"
-            data-testid="terminal-size-cols"
-            type="number"
-            min="1"
-            step="1"
-            inputmode="numeric"
-            @input="emit('update:terminalSizeDraftCols', $event.target.value)"
-          />
-        </label>
-        <label class="terminal-size-field">
-          <span>高 rows</span>
-          <input
-            :value="terminalSizeDraftRows"
-            data-testid="terminal-size-rows"
-            type="number"
-            min="1"
-            step="1"
-            inputmode="numeric"
-            @input="emit('update:terminalSizeDraftRows', $event.target.value)"
-          />
-        </label>
-        <div class="terminal-size-actions">
-          <button type="button" class="primary" @click="emit('apply-terminal-size')">确定</button>
-          <button type="button" @click="emit('cancel-terminal-size-editor')">取消</button>
-        </div>
-      </div>
-      <form v-if="showRecipeEditor" class="recipe-editor" @submit.prevent="emit('submit-recipe-editor')">
-        <input
-          :ref="setRecipeNameInputRef"
-          :value="recipeEditor.name"
-          type="text"
-          placeholder="显示名（可选）"
-          @input="emit('update:recipeEditor', { ...recipeEditor, name: $event.target.value })"
-        />
-        <select
-          :value="recipeEditor.cwd"
-          :disabled="recipeFoldersLoading || recipeFolderOptions.length === 0"
-          @change="emit('update:recipeEditor', { ...recipeEditor, cwd: $event.target.value })"
-        >
-          <option v-for="item in recipeFolderOptions" :key="item.path" :value="item.path">
-            {{ item.label }}
-          </option>
-        </select>
-        <textarea
-          :value="recipeEditor.commandLine"
-          rows="3"
-          placeholder='命令行，如 bash -lc "npm run dev" 或 ["bash","-lc","npm run dev"]'
-          required
-          @input="emit('update:recipeEditor', { ...recipeEditor, commandLine: $event.target.value })"
-        />
-        <div v-if="recipeFoldersError" class="panel-error">{{ recipeFoldersError }}</div>
-        <textarea
-          :value="recipeEditor.envInput"
-          rows="3"
-          placeholder='环境变量(JSON对象)，如 {"TERM":"xterm-256color"}'
-          @input="emit('update:recipeEditor', { ...recipeEditor, envInput: $event.target.value })"
-        />
-        <div class="recipe-editor-actions">
-          <button type="submit" class="primary" :disabled="recipeFoldersLoading || recipeFolderOptions.length === 0">{{ editingRecipeId ? '更新配方' : '保存配方' }}</button>
-          <button type="button" @click="emit('cancel-recipe-edit')">取消</button>
-        </div>
-      </form>
-
-      <ul id="recipeList" class="recipe-list">
-        <li v-for="item in recipeItems" :key="item.id" class="recipe-item" :class="{ default: isDefaultCreateRecipe(item.id) }">
-          <span class="recipe-icon"><i class="fa-regular fa-file-lines" /></span>
-          <div class="recipe-info">
-            <div class="recipe-name">{{ item.name || item.command }}</div>
-            <div class="recipe-command" :title="formatRecipeSummary(item)">{{ formatRecipeSummary(item) }}</div>
-          </div>
-          <div class="recipe-meta">
-            <button
-              type="button"
-              class="recipe-star-btn"
-              :class="{ active: isDefaultCreateRecipe(item.id) }"
-              :title="isDefaultCreateRecipe(item.id) ? '取消 + 号默认配方' : '设为 + 号默认配方'"
-              @click="emit('toggle-default-create-recipe', item)"
-            >
-              <i :class="isDefaultCreateRecipe(item.id) ? 'fa-solid fa-star' : 'fa-regular fa-star'" />
-            </button>
-            <div class="recipe-actions">
-              <button type="button" class="recipe-action-btn" title="执行配方" @click="emit('run-recipe', item)">
-                <i class="fa-regular fa-play" />
+              <button
+                type="button"
+                class="shortcut-btn"
+                @click="emit('send-shortcut', item)"
+              >
+                {{ item.label }}
               </button>
-              <button type="button" class="recipe-action-btn" title="编辑配方" @click="emit('edit-recipe', item)">
-                <i class="fa-regular fa-pen-to-square" />
-              </button>
-              <button type="button" class="recipe-action-btn danger" title="删除配方" @click="emit('remove-recipe', item.id)">
+              <button
+                v-if="item.isCustom"
+                type="button"
+                class="shortcut-remove-btn"
+                :title="`删除快捷指令 ${item.label}`"
+                @click="emit('remove-shortcut', item)"
+              >
                 <i class="fa-regular fa-trash-can" />
               </button>
             </div>
           </div>
-        </li>
-      </ul>
+        </div>
+      </div>
     </div>
+
+    <RightSidebarRecipesTab
+      v-else
+      :show-terminal-size-editor="showTerminalSizeEditor"
+      :terminal-size-draft-cols="terminalSizeDraftCols"
+      :terminal-size-draft-rows="terminalSizeDraftRows"
+      :show-terminal-env-library="showTerminalEnvLibrary"
+      :terminal-env-search="terminalEnvSearch"
+      :terminal-env-group-filter="terminalEnvGroupFilter"
+      :terminal-env-groups="terminalEnvGroups"
+      :terminal-env-items="terminalEnvItems"
+      :filtered-terminal-env-items="filteredTerminalEnvItems"
+      :show-terminal-env-editor="showTerminalEnvEditor"
+      :terminal-env-editor="terminalEnvEditor"
+      :editing-terminal-env-id="editingTerminalEnvId"
+      :show-recipe-editor="showRecipeEditor"
+      :recipe-editor="recipeEditor"
+      :recipe-folders-loading="recipeFoldersLoading"
+      :recipe-folder-options="recipeFolderOptions"
+      :recipe-folders-error="recipeFoldersError"
+      :editing-recipe-id="editingRecipeId"
+      :recipe-items="recipeItems"
+      :recipe-env-preview="recipeEnvPreview"
+      :is-env-entry-included-by-group="isEnvEntryIncludedByGroup"
+      :is-default-create-recipe="isDefaultCreateRecipe"
+      :format-recipe-summary="formatRecipeSummary"
+      :set-recipe-name-input-ref="setRecipeNameInputRef"
+      @close-terminal-env-library="emit('close-terminal-env-library')"
+      @open-terminal-env-editor="emit('open-terminal-env-editor')"
+      @close-terminal-env-editor="emit('close-terminal-env-editor')"
+      @update:terminal-env-search="emit('update:terminalEnvSearch', $event)"
+      @update:terminal-env-group-filter="emit('update:terminalEnvGroupFilter', $event)"
+      @update:terminal-env-editor="emit('update:terminalEnvEditor', $event)"
+      @reset-terminal-env-editor="emit('reset-terminal-env-editor')"
+      @submit-terminal-env-editor="emit('submit-terminal-env-editor')"
+      @edit-terminal-env="emit('edit-terminal-env', $event)"
+      @remove-terminal-env="emit('remove-terminal-env', $event)"
+      @update:terminal-size-draft-cols="emit('update:terminalSizeDraftCols', $event)"
+      @update:terminal-size-draft-rows="emit('update:terminalSizeDraftRows', $event)"
+      @apply-terminal-size="emit('apply-terminal-size')"
+      @cancel-terminal-size-editor="emit('cancel-terminal-size-editor')"
+      @cancel-recipe-edit="emit('cancel-recipe-edit')"
+      @update:recipe-editor="emit('update:recipeEditor', $event)"
+      @submit-recipe-editor="emit('submit-recipe-editor')"
+      @toggle-recipe-supported-os="emit('toggle-recipe-supported-os', $event)"
+      @set-recipe-env-group="emit('set-recipe-env-group', $event)"
+      @toggle-recipe-env-entry="emit('toggle-recipe-env-entry', $event)"
+      @toggle-default-create-recipe="emit('toggle-default-create-recipe', $event)"
+      @run-recipe="emit('run-recipe', $event)"
+      @edit-recipe="emit('edit-recipe', $event)"
+      @remove-recipe="emit('remove-recipe', $event)"
+    />
 
     <div class="right-tab-footer">
       <button
@@ -354,6 +332,8 @@
 </template>
 
 <script setup>
+import RightSidebarRecipesTab from './RightSidebarRecipesTab.vue';
+
 defineProps({
   filesStore: { type: Object, required: true },
   activeRightTab: { type: String, default: 'files' },
@@ -372,6 +352,15 @@ defineProps({
   showTerminalSizeEditor: { type: Boolean, default: false },
   terminalSizeDraftCols: { type: String, default: '' },
   terminalSizeDraftRows: { type: String, default: '' },
+  showTerminalEnvLibrary: { type: Boolean, default: false },
+  terminalEnvSearch: { type: String, default: '' },
+  terminalEnvGroupFilter: { type: String, default: '' },
+  terminalEnvGroups: { type: Array, default: () => [] },
+  terminalEnvItems: { type: Array, default: () => [] },
+  filteredTerminalEnvItems: { type: Array, default: () => [] },
+  showTerminalEnvEditor: { type: Boolean, default: false },
+  terminalEnvEditor: { type: Object, default: () => ({}) },
+  editingTerminalEnvId: { type: String, default: '' },
   showRecipeEditor: { type: Boolean, default: false },
   recipeEditor: { type: Object, required: true },
   recipeFoldersLoading: { type: Boolean, default: false },
@@ -379,6 +368,8 @@ defineProps({
   recipeFoldersError: { type: String, default: '' },
   editingRecipeId: { type: String, default: '' },
   recipeItems: { type: Array, default: () => [] },
+  recipeEnvPreview: { type: Object, default: () => ({}) },
+  isEnvEntryIncludedByGroup: { type: Function, required: true },
   isDefaultCreateRecipe: { type: Function, required: true },
   formatRecipeSummary: { type: Function, required: true },
   setShortcutLabelInputRef: { type: Function, required: true },
@@ -394,6 +385,17 @@ const emit = defineEmits([
   'toggle-shortcut-editor',
   'toggle-voice-mode',
   'toggle-terminal-size-editor',
+  'open-terminal-env-library',
+  'close-terminal-env-library',
+  'open-terminal-env-editor',
+  'close-terminal-env-editor',
+  'update:terminalEnvSearch',
+  'update:terminalEnvGroupFilter',
+  'update:terminalEnvEditor',
+  'reset-terminal-env-editor',
+  'submit-terminal-env-editor',
+  'edit-terminal-env',
+  'remove-terminal-env',
   'update:terminalSizeDraftCols',
   'update:terminalSizeDraftRows',
   'apply-terminal-size',
@@ -409,8 +411,12 @@ const emit = defineEmits([
   'add-shortcut-command',
   'collapse-shortcut-editor',
   'send-shortcut',
+  'remove-shortcut',
   'update:recipeEditor',
   'submit-recipe-editor',
+  'toggle-recipe-supported-os',
+  'set-recipe-env-group',
+  'toggle-recipe-env-entry',
   'toggle-default-create-recipe',
   'run-recipe',
   'edit-recipe',
@@ -658,6 +664,156 @@ const emit = defineEmits([
   flex-direction: column;
   gap: 10px;
   background-color: #1f2832;
+  position: relative;
+}
+
+.terminal-env-library {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #35506a;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(12, 22, 31, 0.98), rgba(16, 27, 37, 0.98));
+}
+
+.terminal-env-library-topbar,
+.terminal-env-library-toolbar,
+.terminal-env-editor-row,
+.terminal-env-item-actions,
+.recipe-chip-list,
+.recipe-editor-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.terminal-env-library-title,
+.recipe-editor-block-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #d8ecff;
+}
+
+.icon-btn-inline {
+  margin-left: auto;
+}
+
+.terminal-env-library-layout {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.terminal-env-group-list,
+.terminal-env-main,
+.terminal-env-editor,
+.recipe-editor-block,
+.recipe-env-entry-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.terminal-env-group-chip,
+.recipe-chip {
+  justify-content: flex-start;
+  background: #1b2430;
+  border-color: #3d4b5b;
+  color: #c7dff7;
+}
+
+.terminal-env-group-chip.active,
+.recipe-chip.active {
+  background: #0e639c;
+  border-color: #0e639c;
+  color: #fff;
+}
+
+.terminal-env-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.terminal-env-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid #33485d;
+  border-radius: 10px;
+  background: rgba(23, 33, 44, 0.86);
+}
+
+.terminal-env-item-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.terminal-env-item-key {
+  font-weight: 600;
+  color: #f2f7fb;
+}
+
+.terminal-env-item-meta,
+.terminal-env-array-hint,
+.recipe-check-row small {
+  font-size: 0.72rem;
+  color: #90afcb;
+}
+
+.terminal-env-item-preview,
+.recipe-env-preview {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  color: #9cdcfe;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.terminal-env-array-editor,
+.terminal-env-array-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.terminal-env-array-row {
+  flex-direction: row;
+}
+
+.terminal-env-enabled-toggle,
+.recipe-check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  color: #d9e7f6;
+}
+
+.recipe-editor-block {
+  padding: 10px;
+  border: 1px solid #31485d;
+  border-radius: 10px;
+  background: rgba(20, 29, 38, 0.86);
+}
+
+.recipe-env-entry-list {
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.recipe-env-preview {
+  margin: 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: #111923;
 }
 
 .terminal-size-editor {
@@ -857,7 +1013,12 @@ const emit = defineEmits([
   gap: 8px;
 }
 
+.shortcut-btn-shell {
+  position: relative;
+}
+
 .shortcut-btn {
+  width: 100%;
   justify-content: center;
   font-size: 0.76rem;
   background-color: #2d3a4a;
@@ -867,6 +1028,26 @@ const emit = defineEmits([
 
 .shortcut-btn:hover {
   background-color: #39506a;
+}
+
+.shortcut-remove-btn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background-color: rgba(17, 19, 21, 0.8);
+  border-color: rgba(244, 135, 113, 0.35);
+  color: #f2a194;
+}
+
+.shortcut-remove-btn:hover {
+  background-color: rgba(94, 33, 27, 0.9);
 }
 
 .recipe-editor {
@@ -1067,11 +1248,11 @@ button.primary:hover {
 }
 
 @media (max-width: 820px) {
-  .shortcut-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .shortcut-editor {
+    grid-template-columns: 1fr;
   }
 
-  .shortcut-editor {
+  .terminal-env-library-layout {
     grid-template-columns: 1fr;
   }
 

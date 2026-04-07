@@ -109,7 +109,7 @@ public class SnapshotOracleConsistencyTests
             command = "/bin/cat",
             cols = 80,
             rows = 25,
-            cwd = "/home/yueyuan"
+            cwd = TestPaths.DefaultCwd
         });
         Assert.Equal(HttpStatusCode.OK, createRes.StatusCode);
 

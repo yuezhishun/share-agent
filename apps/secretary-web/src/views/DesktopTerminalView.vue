@@ -188,6 +188,15 @@
         :show-terminal-size-editor="showTerminalSizeEditor"
         :terminal-size-draft-cols="terminalSizeDraftCols"
         :terminal-size-draft-rows="terminalSizeDraftRows"
+        :show-terminal-env-library="showTerminalEnvLibrary"
+        :terminal-env-search="terminalEnvSearch"
+        :terminal-env-group-filter="terminalEnvGroupFilter"
+        :terminal-env-groups="terminalEnvGroups"
+        :terminal-env-items="terminalEnvItems"
+        :filtered-terminal-env-items="filteredTerminalEnvItems"
+        :show-terminal-env-editor="showTerminalEnvEditor"
+        :terminal-env-editor="terminalEnvEditor"
+        :editing-terminal-env-id="editingTerminalEnvId"
         :show-recipe-editor="showRecipeEditor"
         :recipe-editor="recipeEditor"
         :recipe-folders-loading="recipeFoldersLoading"
@@ -195,6 +204,8 @@
         :recipe-folders-error="recipeFoldersError"
         :editing-recipe-id="editingRecipeId"
         :recipe-items="recipeItems"
+        :recipe-env-preview="recipeEnvPreview"
+        :is-env-entry-included-by-group="isEnvEntryIncludedByGroup"
         :is-default-create-recipe="isDefaultCreateRecipe"
         :format-recipe-summary="formatRecipeSummary"
         :set-shortcut-label-input-ref="setShortcutLabelInputRef"
@@ -207,6 +218,17 @@
         @toggle-shortcut-editor="toggleShortcutEditor"
         @toggle-voice-mode="toggleVoiceMode"
         @toggle-terminal-size-editor="toggleTerminalSizeEditor"
+        @open-terminal-env-library="openTerminalEnvLibrary"
+        @close-terminal-env-library="closeTerminalEnvLibrary"
+        @open-terminal-env-editor="openTerminalEnvEditor"
+        @close-terminal-env-editor="closeTerminalEnvEditor"
+        @update:terminal-env-search="terminalEnvSearch = $event"
+        @update:terminal-env-group-filter="terminalEnvGroupFilter = $event"
+        @update:terminal-env-editor="terminalEnvEditor = $event"
+        @reset-terminal-env-editor="resetTerminalEnvEditor"
+        @submit-terminal-env-editor="submitTerminalEnvEditor"
+        @edit-terminal-env="editTerminalEnv"
+        @remove-terminal-env="removeTerminalEnv"
         @update:terminal-size-draft-cols="terminalSizeDraftCols = $event"
         @update:terminal-size-draft-rows="terminalSizeDraftRows = $event"
         @apply-terminal-size="applyTerminalSize"
@@ -222,8 +244,12 @@
         @add-shortcut-command="addShortcutCommand"
         @collapse-shortcut-editor="collapseShortcutEditor"
         @send-shortcut="sendShortcut"
+        @remove-shortcut="removeShortcut"
         @update:recipe-editor="recipeEditor = $event"
         @submit-recipe-editor="submitRecipeEditor"
+        @toggle-recipe-supported-os="toggleRecipeSupportedOs"
+        @set-recipe-env-group="setRecipeEnvGroup"
+        @toggle-recipe-env-entry="toggleRecipeEnvEntry"
         @toggle-default-create-recipe="toggleDefaultCreateRecipe"
         @run-recipe="runRecipe"
         @edit-recipe="editRecipe"
@@ -268,6 +294,8 @@ import 'xterm/css/xterm.css';
 import { useWebCliTerminalStore } from '../stores/webcli-terminal.js';
 import { useWebCliFilesStore } from '../stores/webcli-files.js';
 import { useWebCliRecipesStore } from '../stores/webcli-recipes.js';
+import { useWebCliShortcutsStore } from '../stores/webcli-shortcuts.js';
+import { useWebCliTerminalEnvsStore } from '../stores/webcli-terminal-envs.js';
 import { createTerminalProtocolRenderer } from '../composables/useTerminalProtocol.js';
 import { useDesktopTerminalFileTabs } from '../composables/useDesktopTerminalFileTabs.js';
 import FileEditorPanel from '../components/FileEditorPanel.vue';
@@ -278,16 +306,14 @@ import {
   isTerminalViewportRenderable,
   measureStableTerminalGeometry,
   normalizeTerminalGeometry
-} from './desktop-terminal-resize.js';
+} from '../utils/desktop-terminal-resize.js';
 import { formatCommandLine, parseCommandLine } from '../utils/command-line.js';
 import {
   BUILT_IN_SHORTCUT_ITEMS,
   COMBO_KEY_INTERVAL_MS,
   compareShortcutGroup,
   compressPath,
-  CUSTOM_SHORTCUT_STORAGE_KEY,
   DEFAULT_CWD_PATH,
-  DEFAULT_RECIPE_STORAGE_KEY,
   formatFileEntryTooltip,
   formatFileTabTooltip,
   formatInstanceSummary,
@@ -298,8 +324,6 @@ import {
   normalizeShortcutGroup,
   parseJsonOrDefault,
   parseRecipeEnv,
-  QUICK_COMMAND_INTERVAL_MS,
-  toShortcutPayload,
   buildRecipeEditor as buildRecipeEditorState
 } from '../utils/desktop-terminal.js';
 import {
@@ -311,12 +335,14 @@ import {
 const terminalStore = useWebCliTerminalStore();
 const filesStore = useWebCliFilesStore();
 const recipesStore = useWebCliRecipesStore();
+const shortcutsStore = useWebCliShortcutsStore();
+const terminalEnvsStore = useWebCliTerminalEnvsStore();
 
 const terminalRef = ref(null);
 const uploadFilesInputRef = ref(null);
 
-const command = ref('bash');
-const argsInput = ref('["-i"]');
+const command = ref('');
+const argsInput = ref('[]');
 const envInput = ref('{}');
 const cwd = ref('');
 const createNodeId = ref('');
@@ -327,8 +353,6 @@ const activeCenterTab = ref('terminal');
 const editingRecipeId = ref('');
 const showRecipeEditor = ref(false);
 const recipeEditor = ref(buildRecipeEditor());
-const defaultCreateRecipeId = ref('');
-const customShortcutItems = ref([]);
 const showShortcutEditor = ref(false);
 const showFolderCreator = ref(false);
 const showTerminalSizeEditor = ref(false);
@@ -338,6 +362,12 @@ const folderName = ref('');
 const recipeFolderOptions = ref([]);
 const recipeFoldersLoading = ref(false);
 const recipeFoldersError = ref('');
+const showTerminalEnvLibrary = ref(false);
+const showTerminalEnvEditor = ref(false);
+const terminalEnvSearch = ref('');
+const terminalEnvGroupFilter = ref('');
+const editingTerminalEnvId = ref('');
+const terminalEnvEditor = ref(buildTerminalEnvEditor());
 const shortcutEditor = ref({
   label: '',
   command: '',
@@ -373,6 +403,7 @@ let pendingTerminalFitFrame = 0;
 let terminalFitRequestId = 0;
 let terminalInputElement = null;
 let voiceCommitTimer = 0;
+let shortcutSendQueue = Promise.resolve();
 
 const recipeItems = computed(() => [...recipesStore.items].sort((a, b) => {
   const groupCompare = String(a.group || 'general').localeCompare(String(b.group || 'general'), 'zh-Hans-CN');
@@ -381,6 +412,70 @@ const recipeItems = computed(() => [...recipesStore.items].sort((a, b) => {
   }
   return String(a.name || a.command || '').localeCompare(String(b.name || b.command || ''), 'zh-Hans-CN');
 }));
+
+const terminalEnvItems = computed(() => [...terminalEnvsStore.items].sort((a, b) => {
+  const groupCompare = String(a.group || 'general').localeCompare(String(b.group || 'general'), 'zh-Hans-CN');
+  if (groupCompare !== 0) {
+    return groupCompare;
+  }
+  const sortCompare = Number(a.sortOrder || 0) - Number(b.sortOrder || 0);
+  if (sortCompare !== 0) {
+    return sortCompare;
+  }
+  return String(a.key || '').localeCompare(String(b.key || ''), 'zh-Hans-CN');
+}));
+
+const terminalEnvGroups = computed(() => terminalEnvsStore.groups);
+
+const filteredTerminalEnvItems = computed(() => {
+  const search = String(terminalEnvSearch.value || '').trim().toLowerCase();
+  const group = String(terminalEnvGroupFilter.value || '').trim();
+  return terminalEnvItems.value.filter((item) => {
+    if (group && item.group !== group) {
+      return false;
+    }
+    if (search && !String(item.key || '').toLowerCase().includes(search)) {
+      return false;
+    }
+    return true;
+  });
+});
+
+const selectedRecipeNodeOs = computed(() => String(selectedNode.value?.node_os || 'linux').trim() || 'linux');
+
+const recipeEnvGroupSelection = computed(() => Array.isArray(recipeEditor.value.selectedEnvGroupNames) ? recipeEditor.value.selectedEnvGroupNames : []);
+const recipeEnvEntrySelection = computed(() => Array.isArray(recipeEditor.value.selectedEnvEntryIds) ? recipeEditor.value.selectedEnvEntryIds : []);
+
+const recipeEnvPreview = computed(() => {
+  const output = {};
+  const selectedGroups = new Set(recipeEnvGroupSelection.value);
+  const selectedEntries = new Set(recipeEnvEntrySelection.value);
+  const separator = selectedRecipeNodeOs.value === 'windows' ? ';' : ':';
+
+  for (const item of terminalEnvItems.value) {
+    if (item.enabled === false) {
+      continue;
+    }
+    if (!selectedGroups.has(item.group) && !selectedEntries.has(item.id)) {
+      continue;
+    }
+    output[item.key] = item.valueType === 'array'
+      ? (Array.isArray(item.value) ? item.value.join(separator) : '')
+      : String(item.value ?? '');
+  }
+
+  let overrides = {};
+  try {
+    overrides = parseJsonOrDefault(recipeEditor.value.envInput, {});
+  } catch {
+    overrides = {};
+  }
+  for (const [key, value] of Object.entries(overrides || {})) {
+    output[String(key)] = String(value ?? '');
+  }
+
+  return output;
+});
 
 const currentTerminalName = computed(() => {
   const selected = terminalStore.selectedInstance;
@@ -457,23 +552,21 @@ const rightTabIconClass = computed(() => {
 
 const currentPathDisplay = computed(() => compressPath(filesStore.currentPath));
 
-const defaultCreateRecipe = computed(() => {
-  const targetId = String(defaultCreateRecipeId.value || '').trim();
-  if (!targetId) {
-    return null;
-  }
-  return recipesStore.items.find((item) => item.id === targetId) || null;
-});
+const defaultCreateRecipe = computed(() => recipesStore.defaultRecipe);
+const createLaunchRecipe = computed(() => defaultCreateRecipe.value || recipeItems.value[0] || null);
 
 const createTerminalTitle = computed(() => {
-  const recipe = defaultCreateRecipe.value;
+  const recipe = createLaunchRecipe.value;
   if (!recipe) {
-    return '新建终端';
+    return '新建终端（无可用配方）';
   }
-  return `新建终端（默认配方：${recipe.name || recipe.command}）`;
+  if (defaultCreateRecipe.value?.id === recipe.id) {
+    return `新建终端（默认配方：${recipe.name || recipe.command}）`;
+  }
+  return `新建终端（配方：${recipe.name || recipe.command}）`;
 });
 
-const shortcutItems = computed(() => [...BUILT_IN_SHORTCUT_ITEMS, ...customShortcutItems.value]);
+const shortcutItems = computed(() => [...BUILT_IN_SHORTCUT_ITEMS, ...shortcutsStore.items.filter((item) => item.enabled !== false)]);
 
 const shortcutGroups = computed(() => {
   const groups = new Map();
@@ -497,12 +590,121 @@ function getInstanceAlias(instanceId) {
   return terminalStore.getInstanceAlias(instanceId);
 }
 
+function formatTerminalEnvValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item ?? '')).join('\n');
+  }
+  return String(value ?? '');
+}
+
+function parseTerminalEnvValue(text) {
+  const raw = String(text ?? '');
+  if (!raw.includes('\n')) {
+    return {
+      valueType: 'string',
+      value: raw
+    };
+  }
+
+  return {
+    valueType: 'array',
+    value: raw
+      .split(/\r?\n/)
+      .map((item) => String(item ?? '').trim())
+      .filter(Boolean)
+  };
+}
+
+function buildTerminalEnvEditor(seed = null) {
+  const source = seed || {};
+  return {
+    key: String(source.key || ''),
+    value: formatTerminalEnvValue(source.value),
+    group: String(source.group || 'general'),
+    enabled: source.enabled !== false,
+    sortOrder: Number(source.sortOrder || 0) || 0
+  };
+}
+
 function buildRecipeEditor(seed = null) {
   return buildRecipeEditorState(seed, normalizeSelectableCwd, formatCommandLine);
 }
 
+function updateRecipeEditor(patch) {
+  recipeEditor.value = {
+    ...recipeEditor.value,
+    ...patch
+  };
+}
+
+function toggleRecipeSupportedOs(value) {
+  const current = Array.isArray(recipeEditor.value.supportedOs) ? [...recipeEditor.value.supportedOs] : [];
+  const next = current.includes(value)
+    ? current.filter((item) => item !== value)
+    : [...current, value];
+  updateRecipeEditor({ supportedOs: next });
+}
+
+function setRecipeEnvGroup(groupName) {
+  const next = String(groupName || '').trim();
+  updateRecipeEditor({ selectedEnvGroupNames: next ? [next] : [] });
+}
+
+function toggleRecipeEnvEntry(envId) {
+  const current = Array.isArray(recipeEditor.value.selectedEnvEntryIds) ? [...recipeEditor.value.selectedEnvEntryIds] : [];
+  const next = current.includes(envId)
+    ? current.filter((item) => item !== envId)
+    : [...current, envId];
+  updateRecipeEditor({ selectedEnvEntryIds: next });
+}
+
+function isEnvEntryIncludedByGroup(envItem) {
+  const groups = Array.isArray(recipeEditor.value.selectedEnvGroupNames) ? recipeEditor.value.selectedEnvGroupNames : [];
+  return groups.includes(String(envItem?.group || ''));
+}
+
+function closeRecipeSidePanels() {
+  showTerminalEnvLibrary.value = false;
+  showTerminalEnvEditor.value = false;
+  showTerminalSizeEditor.value = false;
+  showRecipeEditor.value = false;
+}
+
+function openTerminalEnvLibrary() {
+  closeRecipeSidePanels();
+  showTerminalEnvLibrary.value = true;
+}
+
+function openTerminalEnvEditor(seed = null) {
+  closeRecipeSidePanels();
+  showTerminalEnvEditor.value = true;
+  editingTerminalEnvId.value = seed ? String(seed?.id || '').trim() : '';
+  terminalEnvEditor.value = buildTerminalEnvEditor(seed || { group: terminalEnvGroupFilter.value || 'general' });
+}
+
+function closeTerminalEnvLibrary() {
+  showTerminalEnvLibrary.value = false;
+  terminalEnvSearch.value = '';
+  terminalEnvGroupFilter.value = '';
+}
+
+function editTerminalEnv(item) {
+  openTerminalEnvEditor(item);
+}
+
+function resetTerminalEnvEditor() {
+  editingTerminalEnvId.value = '';
+  openTerminalEnvEditor({ group: terminalEnvGroupFilter.value || 'general' });
+}
+
+function closeTerminalEnvEditor() {
+  showTerminalEnvEditor.value = false;
+  editingTerminalEnvId.value = '';
+  terminalEnvEditor.value = buildTerminalEnvEditor();
+}
+
 function resolveHttpBase() {
-  return String(import.meta.env.VITE_WEBPTY_BASE || '/web-pty').trim();
+  return String(import.meta.env?.VITE_WEBPTY_BASE || '').trim();
 }
 
 function buildApiPath(pathname) {
@@ -595,79 +797,59 @@ async function loadRecipeFolders(nodeId = createNodeId.value) {
   }
 }
 
+async function loadNodeRecipes(nodeId = createNodeId.value) {
+  const targetNodeId = String(nodeId || '').trim();
+  try {
+    await recipesStore.fetchRecipes(targetNodeId);
+  } catch (error) {
+    terminalStore.setStatus(String(error?.message || error || 'load recipes failed'));
+  }
+}
+
+async function loadTerminalEnvEntries(nodeId = createNodeId.value) {
+  const targetNodeId = String(nodeId || '').trim();
+  try {
+    await terminalEnvsStore.fetchEntries(targetNodeId);
+  } catch (error) {
+    terminalStore.setStatus(String(error?.message || error || 'load terminal envs failed'));
+  }
+}
+
 function getActiveNodeId() {
   return String(createNodeId.value || terminalStore.selectedInstance?.node_id || terminalStore.getDefaultNodeId(createNodeId.value) || '').trim();
 }
 
-function hydrateCustomShortcuts() {
+async function loadCustomShortcuts() {
   try {
-    const raw = localStorage.getItem(CUSTOM_SHORTCUT_STORAGE_KEY);
-    if (!raw) {
-      customShortcutItems.value = [];
-      return;
-    }
-    const parsed = JSON.parse(raw);
-    const items = Array.isArray(parsed?.items) ? parsed.items : [];
-    customShortcutItems.value = items
-      .map((item) => toShortcutPayload(item))
-      .filter(Boolean);
-  } catch {
-    customShortcutItems.value = [];
-  }
-}
-
-function persistCustomShortcuts() {
-  const payload = customShortcutItems.value
-    .map((item) => toShortcutPayload(item))
-    .filter(Boolean);
-  try {
-    localStorage.setItem(CUSTOM_SHORTCUT_STORAGE_KEY, JSON.stringify({ items: payload }));
-  } catch {
-  }
-}
-
-function hydrateDefaultCreateRecipe() {
-  try {
-    const value = localStorage.getItem(DEFAULT_RECIPE_STORAGE_KEY);
-    defaultCreateRecipeId.value = String(value || '').trim();
-  } catch {
-    defaultCreateRecipeId.value = '';
-  }
-}
-
-function persistDefaultCreateRecipe() {
-  const id = String(defaultCreateRecipeId.value || '').trim();
-  try {
-    if (!id) {
-      localStorage.removeItem(DEFAULT_RECIPE_STORAGE_KEY);
-      return;
-    }
-    localStorage.setItem(DEFAULT_RECIPE_STORAGE_KEY, id);
-  } catch {
+    await shortcutsStore.fetchShortcuts();
+  } catch (error) {
+    terminalStore.setStatus(String(error?.message || error || 'load shortcuts failed'));
   }
 }
 
 function isDefaultCreateRecipe(recipeId) {
-  return String(recipeId || '') === String(defaultCreateRecipeId.value || '');
+  return String(recipeId || '') === String(defaultCreateRecipe.value?.id || '');
 }
 
-function toggleDefaultCreateRecipe(item) {
-  if (!item?.id) {
-    return;
-  }
-  if (isDefaultCreateRecipe(item.id)) {
-    defaultCreateRecipeId.value = '';
-    persistDefaultCreateRecipe();
-    terminalStore.setStatus('已取消 + 号默认配方');
-    return;
-  }
+async function toggleDefaultCreateRecipe(item) {
+  try {
+    if (!item?.id) {
+      return;
+    }
+    if (isDefaultCreateRecipe(item.id)) {
+      await recipesStore.clearDefaultRecipe(getActiveNodeId());
+      terminalStore.setStatus('已取消 + 号默认配方');
+      return;
+    }
 
-  defaultCreateRecipeId.value = String(item.id);
-  persistDefaultCreateRecipe();
-  terminalStore.setStatus(`已设置 + 号默认配方：${item.name || item.command}`);
+    await recipesStore.setDefaultRecipe(item.id, getActiveNodeId());
+    terminalStore.setStatus(`已设置 + 号默认配方：${item.name || item.command}`);
+  } catch (error) {
+    terminalStore.setStatus(String(error?.message || error || 'set default recipe failed'));
+  }
 }
 
-function addShortcutCommand() {
+async function addShortcutCommand() {
   const label = String(shortcutEditor.value.label || '').trim();
   const commandText = String(shortcutEditor.value.command || '').trim();
   if (!label || !commandText) {
@@ -677,16 +859,17 @@ function addShortcutCommand() {
 
   const group = normalizeShortcutGroup(shortcutEditor.value.group);
   const pressEnter = shortcutEditor.value.pressEnter === true;
-  const id = `custom-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-
-  customShortcutItems.value.push({
-    id,
-    label,
-    group,
-    sequence: pressEnter ? [commandText, '\r'] : [commandText],
-    intervalMs: QUICK_COMMAND_INTERVAL_MS
-  });
-  persistCustomShortcuts();
+  try {
+    await shortcutsStore.addShortcut({
+      label,
+      command: commandText,
+      group,
+      pressEnter
+    });
+  } catch (error) {
+    terminalStore.setStatus(String(error?.message || error || 'save shortcut failed'));
+    return;
+  }
 
   shortcutEditor.value = {
     label: '',
@@ -696,6 +879,22 @@ function addShortcutCommand() {
   };
   showShortcutEditor.value = false;
   terminalStore.setStatus(`已添加快捷指令：${label}`);
+}
+
+async function removeShortcut(item) {
+  const shortcutId = String(item?.id || '').trim();
+  if (!shortcutId) {
+    return;
+  }
+  if (!window.confirm(`确认删除快捷指令 ${item.label || shortcutId}？`)) {
+    return;
+  }
+  try {
+    await shortcutsStore.removeShortcut(shortcutId);
+    terminalStore.setStatus(`已删除快捷指令：${item.label || shortcutId}`);
+  } catch (error) {
+    terminalStore.setStatus(String(error?.message || error || 'delete shortcut failed'));
+  }
 }
 
 function collapseShortcutEditor() {
@@ -962,8 +1161,10 @@ function applyLocalTerminalGeometry(nextCols, nextRows) {
 }
 
 function toggleTerminalSizeEditor() {
-  showTerminalSizeEditor.value = !showTerminalSizeEditor.value;
-  if (showTerminalSizeEditor.value) {
+  const nextVisible = !showTerminalSizeEditor.value;
+  closeRecipeSidePanels();
+  showTerminalSizeEditor.value = nextVisible;
+  if (nextVisible) {
     setTerminalDraftFromCurrent();
   }
 }
@@ -1170,7 +1371,11 @@ const closeAllFilesTitle = computed(() => `关闭全部文件标签（当前 ${f
 async function onTargetNodeChange(nodeId) {
   createNodeId.value = String(nodeId || '').trim();
   try {
+    filesStore.resetState({ currentNodeId: createNodeId.value });
+    await loadNodeRecipes(createNodeId.value);
+    await loadTerminalEnvEntries(createNodeId.value);
     await loadRecipeFolders(createNodeId.value);
+    await loadNodeFilesRoot(createNodeId.value);
     await syncNodeTerminalSelection();
   } catch (error) {
     terminalStore.setStatus(String(error?.message || error || 'switch node failed'));
@@ -1227,14 +1432,15 @@ function saveRenameInstance(instanceId) {
   cancelRenameInstance();
 }
 
+async function loadNodeFilesRoot(nodeId = getActiveNodeId()) {
+  filesStore.resetState({ currentNodeId: nodeId });
+  await filesStore.loadList('', nodeId);
+}
+
 async function loadFilesForSelected() {
   const nodeId = getActiveNodeId();
   const path = terminalStore.selectedInstance?.cwd || filesStore.currentPath || filesStore.basePath || '';
   await filesStore.loadList(path, nodeId);
-}
-
-async function loadNodeFilesRoot(nodeId = getActiveNodeId()) {
-  await filesStore.loadList('', nodeId);
 }
 
 async function connect(instanceId) {
@@ -1242,8 +1448,11 @@ async function connect(instanceId) {
   if (!id) {
     return;
   }
-  if (terminalStore.selectedInstanceId === id && terminalStore.wsConnected) {
+  const alreadyJoined = Array.isArray(terminalStore.joinedInstanceIds) && terminalStore.joinedInstanceIds.includes(id);
+  if (terminalStore.selectedInstanceId === id && terminalStore.wsConnected && alreadyJoined) {
     switchCenterTab('terminal');
+    terminalStore.resync().catch(() => {});
+    loadFilesForSelected().catch(() => {});
     return;
   }
   try {
@@ -1274,6 +1483,8 @@ async function refreshTerminals() {
     createNodeId.value = String(
       terminalStore.resolvePreferredNodeId(createNodeId.value || terminalStore.selectedInstance?.node_id || '')
     );
+    await loadNodeRecipes(createNodeId.value);
+    await loadTerminalEnvEntries(createNodeId.value);
     await loadRecipeFolders(createNodeId.value);
 
     if (terminalStore.instances.length === 0) {
@@ -1317,26 +1528,20 @@ async function createInstance() {
     }
 
     const geometry = await resolveCreateGeometry();
-    const selectedRecipe = defaultCreateRecipe.value;
-    const parsedArgs = selectedRecipe
-      ? (Array.isArray(selectedRecipe.args) ? selectedRecipe.args.map((x) => String(x)) : [])
-      : (() => {
-          const parsed = parseJsonOrDefault(argsInput.value, ['-i']);
-          return Array.isArray(parsed) ? parsed.map((x) => String(x)) : ['-i'];
-        })();
-    const parsedEnv = selectedRecipe
-      ? (selectedRecipe.env && typeof selectedRecipe.env === 'object' && !Array.isArray(selectedRecipe.env) ? selectedRecipe.env : {})
-      : (() => {
-          const parsed = parseJsonOrDefault(envInput.value, {});
-          return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-        })();
-    const commandText = selectedRecipe
-      ? (String(selectedRecipe.command || '').trim() || 'bash')
-      : (String(command.value || 'bash').trim() || 'bash');
+    const selectedRecipe = createLaunchRecipe.value;
+    if (!selectedRecipe?.id) {
+      terminalStore.setStatus('当前节点没有可用的终端配方');
+      return;
+    }
+    const parsedArgs = Array.isArray(selectedRecipe.args) ? selectedRecipe.args.map((x) => String(x)) : [];
+    const parsedEnv = resolveRecipeRuntimeEnv(selectedRecipe);
+    const commandText = String(selectedRecipe.command || '').trim();
+    if (!commandText) {
+      terminalStore.setStatus(`终端配方缺少命令：${selectedRecipe.name || selectedRecipe.id}`);
+      return;
+    }
     const fallbackCwd = terminalStore.selectedInstance?.cwd || filesStore.currentPath || filesStore.basePath || resolveDefaultSelectableCwd();
-    const resolvedCwd = selectedRecipe
-      ? normalizeSelectableCwd(selectedRecipe.cwd || fallbackCwd)
-      : normalizeSelectableCwd(cwd.value || fallbackCwd);
+    const resolvedCwd = normalizeSelectableCwd(selectedRecipe.cwd || fallbackCwd);
     const nodeId = getActiveNodeId();
 
     const created = await terminalStore.createInstance({
@@ -1349,13 +1554,8 @@ async function createInstance() {
     }, nodeId);
 
     if (created?.instance_id) {
-      await terminalStore.fetchInstances();
       await connect(created.instance_id);
-      if (selectedRecipe) {
-        terminalStore.setStatus(`Connected (+默认配方: ${selectedRecipe.name || selectedRecipe.command})`);
-      } else {
-        terminalStore.setStatus('Connected (default recipe)');
-      }
+      terminalStore.setStatus(`Connected (+配方: ${selectedRecipe.name || selectedRecipe.command})`);
     }
   } catch (error) {
     terminalStore.setStatus(String(error?.message || error || 'create failed'));
@@ -1526,8 +1726,11 @@ async function runRecipe(item) {
   try {
     const geometry = await resolveCreateGeometry();
     const args = Array.isArray(item?.args) ? item.args.map((x) => String(x)) : [];
-    const env = item?.env && typeof item.env === 'object' && !Array.isArray(item.env) ? item.env : {};
-    const recipeCommand = String(item?.command || '').trim() || 'bash';
+    const env = resolveRecipeRuntimeEnv(item);
+    const recipeCommand = String(item?.command || '').trim();
+    if (!recipeCommand) {
+      throw new Error('recipe command is required');
+    }
     const fallbackCwd = terminalStore.selectedInstance?.cwd || filesStore.currentPath || filesStore.basePath || resolveDefaultSelectableCwd();
     const recipeCwd = normalizeSelectableCwd(item?.cwd || fallbackCwd);
     const nodeId = getActiveNodeId();
@@ -1542,7 +1745,6 @@ async function runRecipe(item) {
     }, nodeId);
 
     if (created?.instance_id) {
-      await terminalStore.fetchInstances();
       await connect(created.instance_id);
       terminalStore.setStatus(`Recipe started: ${item.name || recipeCommand}`);
       switchCenterTab('terminal');
@@ -1553,20 +1755,23 @@ async function runRecipe(item) {
 }
 
 function addNewRecipe() {
+  closeRecipeSidePanels();
   showRecipeEditor.value = true;
   editingRecipeId.value = '';
-  const parsedArgs = parseJsonOrDefault(argsInput.value, ['-i']);
+  const parsedArgs = parseJsonOrDefault(argsInput.value, []);
   recipeEditor.value = buildRecipeEditor({
     cwd: normalizeSelectableCwd(cwd.value || resolveDefaultSelectableCwd()),
     command: command.value,
-    args: Array.isArray(parsedArgs) ? parsedArgs.map((item) => String(item)) : ['-i'],
+    args: Array.isArray(parsedArgs) ? parsedArgs.map((item) => String(item)) : [],
     env: parseJsonOrDefault(envInput.value, {}),
-    group: 'custom'
+    group: 'custom',
+    supportedOs: [selectedRecipeNodeOs.value]
   });
   focusRecipeNameInput();
 }
 
 function editRecipe(item) {
+  closeRecipeSidePanels();
   showRecipeEditor.value = true;
   editingRecipeId.value = item.id;
   recipeEditor.value = buildRecipeEditor(item);
@@ -1579,7 +1784,7 @@ function cancelRecipeEdit() {
   recipeEditor.value = buildRecipeEditor();
 }
 
-function submitRecipeEditor() {
+async function submitRecipeEditor() {
   try {
     const parsedCommand = parseCommandLine(recipeEditor.value.commandLine);
     const env = parseRecipeEnv(recipeEditor.value.envInput);
@@ -1594,14 +1799,21 @@ function submitRecipeEditor() {
       cwd: selectedCwd,
       command: parsedCommand.command,
       args: parsedCommand.args,
-      env
+      env,
+      envEntryIds: Array.isArray(recipeEditor.value.selectedEnvEntryIds) ? recipeEditor.value.selectedEnvEntryIds : [],
+      envGroupNames: Array.isArray(recipeEditor.value.selectedEnvGroupNames)
+        ? recipeEditor.value.selectedEnvGroupNames.slice(0, 1).filter(Boolean)
+        : [],
+      supportedOs: Array.isArray(recipeEditor.value.supportedOs) && recipeEditor.value.supportedOs.length > 0
+        ? recipeEditor.value.supportedOs
+        : [selectedRecipeNodeOs.value]
     };
 
     if (editingRecipeId.value) {
-      recipesStore.updateRecipe(editingRecipeId.value, payload);
+      await recipesStore.updateRecipe(editingRecipeId.value, payload, getActiveNodeId());
       terminalStore.setStatus('配方已更新');
     } else {
-      recipesStore.addRecipe(payload);
+      await recipesStore.addRecipe(payload, getActiveNodeId());
       terminalStore.setStatus('配方已保存');
     }
 
@@ -1611,17 +1823,12 @@ function submitRecipeEditor() {
   }
 }
 
-function removeRecipe(id) {
+async function removeRecipe(id) {
   if (!window.confirm('确认删除该配方？')) {
     return;
   }
   try {
-    const removedDefault = isDefaultCreateRecipe(id);
-    recipesStore.removeRecipe(id);
-    if (removedDefault) {
-      defaultCreateRecipeId.value = '';
-      persistDefaultCreateRecipe();
-    }
+    await recipesStore.removeRecipe(id, getActiveNodeId());
     if (editingRecipeId.value === id) {
       cancelRecipeEdit();
     }
@@ -1632,16 +1839,18 @@ function removeRecipe(id) {
 
 function saveCurrentAsRecipe() {
   try {
-    const args = parseJsonOrDefault(argsInput.value, ['-i']);
+    const args = parseJsonOrDefault(argsInput.value, []);
     const env = parseJsonOrDefault(envInput.value, {});
+    const launchRecipe = createLaunchRecipe.value;
     showRecipeEditor.value = true;
     recipeEditor.value = buildRecipeEditor({
       name: '',
       cwd: normalizeSelectableCwd(cwd.value || terminalStore.selectedInstance?.cwd || filesStore.currentPath || filesStore.basePath || resolveDefaultSelectableCwd()),
-      command: String(command.value || 'bash').trim() || 'bash',
-      args: Array.isArray(args) ? args.map((item) => String(item)) : ['-i'],
+      command: String(command.value || launchRecipe?.command || '').trim(),
+      args: Array.isArray(args) ? args.map((item) => String(item)) : [],
       env,
-      group: 'quick'
+      group: 'quick',
+      supportedOs: [selectedRecipeNodeOs.value]
     });
     editingRecipeId.value = '';
     terminalStore.setStatus('已填充当前配置，请点击“保存配方”确认');
@@ -1649,6 +1858,78 @@ function saveCurrentAsRecipe() {
   } catch (error) {
     terminalStore.setStatus(String(error?.message || error || 'prepare recipe failed'));
   }
+}
+
+async function submitTerminalEnvEditor() {
+  try {
+    const parsedValue = parseTerminalEnvValue(terminalEnvEditor.value.value);
+    const payload = {
+      key: String(terminalEnvEditor.value.key || '').trim(),
+      valueType: parsedValue.valueType,
+      value: parsedValue.value,
+      group: String(terminalEnvEditor.value.group || 'general').trim() || 'general',
+      enabled: terminalEnvEditor.value.enabled !== false,
+      sortOrder: Number(terminalEnvEditor.value.sortOrder || 0) || 0
+    };
+    if (!payload.key) {
+      throw new Error('环境变量 key 不能为空');
+    }
+
+    if (editingTerminalEnvId.value) {
+      await terminalEnvsStore.updateEntry(editingTerminalEnvId.value, payload, getActiveNodeId());
+      terminalStore.setStatus('环境变量已更新');
+    } else {
+      await terminalEnvsStore.addEntry(payload, getActiveNodeId());
+      terminalStore.setStatus('环境变量已保存');
+    }
+    resetTerminalEnvEditor();
+  } catch (error) {
+    terminalStore.setStatus(String(error?.message || error || 'save terminal env failed'));
+  }
+}
+
+async function removeTerminalEnv(id) {
+  if (!window.confirm('确认删除该环境变量？')) {
+    return;
+  }
+  try {
+    await terminalEnvsStore.removeEntry(id, getActiveNodeId());
+    if (editingTerminalEnvId.value === id) {
+      resetTerminalEnvEditor();
+    }
+    terminalStore.setStatus('环境变量已删除');
+  } catch (error) {
+    terminalStore.setStatus(String(error?.message || error || 'delete terminal env failed'));
+  }
+}
+
+function resolveRecipeRuntimeEnv(item) {
+  const output = {};
+  const nodeOs = String(selectedNode.value?.node_os || 'linux').trim() || 'linux';
+  const separator = nodeOs === 'windows' ? ';' : ':';
+  const selectedGroups = new Set(Array.isArray(item?.envGroupNames) ? item.envGroupNames : []);
+  const selectedEntries = new Set(Array.isArray(item?.envEntryIds) ? item.envEntryIds : []);
+
+  for (const envItem of terminalEnvItems.value) {
+    if (envItem.enabled === false) {
+      continue;
+    }
+    if (!selectedGroups.has(envItem.group) && !selectedEntries.has(envItem.id)) {
+      continue;
+    }
+    output[envItem.key] = envItem.valueType === 'array'
+      ? (Array.isArray(envItem.value) ? envItem.value.join(separator) : '')
+      : String(envItem.value ?? '');
+  }
+
+  const overrides = item?.envOverrides && typeof item.envOverrides === 'object' && !Array.isArray(item.envOverrides)
+    ? item.envOverrides
+    : (item?.env && typeof item.env === 'object' && !Array.isArray(item.env) ? item.env : {});
+  for (const [key, value] of Object.entries(overrides)) {
+    output[String(key)] = String(value ?? '');
+  }
+
+  return output;
 }
 
 function onTerminalPaste(event) {
@@ -1877,28 +2158,30 @@ async function sendShortcut(item) {
     ? Math.max(0, Math.floor(configuredInterval))
     : (payloads.length > 1 ? COMBO_KEY_INTERVAL_MS : 0);
 
-  try {
+  const run = async () => {
     for (let index = 0; index < payloads.length; index += 1) {
-      await terminalStore.sendInput(payloads[index]);
+      await terminalStore.sendInput(payloads[index], { fireAndForget: true });
       if (index < payloads.length - 1 && intervalMs > 0) {
         await wait(intervalMs);
       }
     }
-  } finally {
-    focusTerminal();
-  }
+  };
+
+  shortcutSendQueue = shortcutSendQueue
+    .catch(() => {})
+    .then(run)
+    .catch((error) => {
+      terminalStore.setStatus(String(error?.message || error || 'shortcut send failed'));
+    })
+    .finally(() => {
+      focusTerminal();
+    });
 }
 
 onMounted(async () => {
   applyResponsiveSidebarDefaults();
-  recipesStore.hydrate();
-  hydrateDefaultCreateRecipe();
-  hydrateCustomShortcuts();
+  await loadCustomShortcuts();
   setTerminalDraftFromCurrent();
-  if (defaultCreateRecipeId.value && !defaultCreateRecipe.value) {
-    defaultCreateRecipeId.value = '';
-    persistDefaultCreateRecipe();
-  }
 
   term = new Terminal({
     convertEol: true,
@@ -1951,6 +2234,8 @@ onMounted(async () => {
   if (!createNodeId.value) {
     createNodeId.value = String(terminalStore.resolvePreferredNodeId(terminalStore.selectedInstance?.node_id || ''));
   }
+  await loadNodeRecipes(createNodeId.value);
+  await loadTerminalEnvEntries(createNodeId.value);
   await loadRecipeFolders(createNodeId.value);
   if (voiceModeEnabled.value) {
     focusVoiceInput();

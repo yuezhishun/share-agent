@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多终端管理器 · 文件增强版</title>
+    <!-- Font Awesome 6 -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <!-- Google Fonts: Inter & JetBrains Mono -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1e1e1e;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            color: #e0e0e0;
+        }
+        .app { display: flex; flex-direction: column; height: 100%; }
+
+        /* 工具栏 */
+        .toolbar {
+            background-color: #2d2d2d;
+            padding: 8px 16px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            border-bottom: 1px solid #3c3c3c;
+            flex-shrink: 0;
+        }
+        .toolbar .logo {
+            font-weight: 600; font-size: 1.1rem; color: #ccc;
+            display: flex; align-items: center; gap: 6px;
+        }
+        .toolbar .logo i { color: #007acc; }
+        .toolbar .actions { display: flex; gap: 8px; margin-left: auto; }
+        button {
+            background-color: #3c3c3c; border: none; color: #e0e0e0;
+            font-family: 'Inter', sans-serif; font-size: 0.9rem;
+            padding: 6px 12px; border-radius: 4px;
+            display: inline-flex; align-items: center; gap: 6px;
+            cursor: pointer; transition: background 0.15s;
+            border: 1px solid transparent;
+        }
+        button:hover { background-color: #4a4a4a; }
+        button.primary { background-color: #0e639c; }
+        button.primary:hover { background-color: #1177bb; }
+        button i { font-size: 0.95rem; }
+
+        /* 主内容区 */
+        .main { display: flex; flex: 1; overflow: hidden; min-height: 0; }
+
+        /* 左侧边栏 — 三区域 */
+        .sidebar {
+            width: 320px;
+            background-color: #252526;
+            border-right: 1px solid #3c3c3c;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            flex-shrink: 0;
+        }
+        .sidebar-section {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            border-bottom: 1px solid #3c3c3c;
+        }
+        .sidebar-section:last-child { border-bottom: none; }
+
+        .section-header {
+            padding: 10px 16px 6px 16px;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #9e9e9e;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background-color: #2a2a2a;
+        }
+        .section-header .add-icon {
+            cursor: pointer; color: #b4b4b4; padding: 4px; border-radius: 4px;
+            transition: background 0.1s;
+        }
+        .section-header .add-icon:hover { background-color: #3a3a3a; color: #fff; }
+
+        /* 终端列表 */
+        .terminal-list, .recipe-list, .file-list {
+            list-style: none;
+            padding: 4px 0;
+            overflow-y: auto;
+        }
+        .terminal-list { flex: 2; }
+        .terminal-item {
+            display: flex; align-items: center; padding: 8px 16px;
+            margin: 2px 8px; border-radius: 4px; cursor: pointer;
+            font-size: 0.9rem; gap: 8px;
+        }
+        .terminal-item:hover { background-color: #2a2d2e; }
+        .terminal-item.active { background-color: #37373d; }
+        .terminal-item i { color: #6c9cbe; width: 20px; }
+        .terminal-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .close-btn {
+            color: #9e9e9e; border-radius: 4px; padding: 4px; font-size: 0.8rem;
+            visibility: hidden;
+        }
+        .terminal-item:hover .close-btn { visibility: visible; }
+        .close-btn:hover { background-color: #4a4a4a; color: #fff; }
+
+        /* 文件浏览器区域 (flex: 4) */
+        .file-browser {
+            flex: 4;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background-color: #1e1e1e;
+        }
+        .file-header {
+            padding: 8px 12px;
+            background-color: #2d2d2d;
+            border-bottom: 1px solid #3c3c3c;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .path-breadcrumb {
+            background-color: #3c3c3c;
+            padding: 4px 10px;
+            border-radius: 16px;
+            font-size: 0.8rem;
+            font-family: 'JetBrains Mono', monospace;
+            color: #9cdcfe;
+            flex: 1;
+            overflow-x: auto;
+            white-space: nowrap;
+            scrollbar-width: thin;
+        }
+        .upload-btn {
+            background-color: #0e639c;
+            padding: 4px 10px;
+            border-radius: 16px;
+            font-size: 0.8rem;
+            cursor: pointer;
+        }
+        .upload-btn:hover { background-color: #1177bb; }
+        .file-list {
+            flex: 1;
+            list-style: none;
+            padding: 4px 0;
+            overflow-y: auto;
+        }
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 6px 16px;
+            margin: 2px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            gap: 10px;
+        }
+        .file-item:hover { background-color: #2a2d2e; }
+        .file-item i { width: 20px; }
+        .file-item .file-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .file-item .file-size { color: #9e9e9e; font-size: 0.7rem; }
+        .folder-icon { color: #c586c0; }
+        .file-icon { color: #9cdcfe; }
+
+        /* 配方区域 */
+        .recipe-list { flex: 3; }
+        .recipe-item {
+            display: flex; align-items: center; padding: 8px 16px;
+            margin: 2px 8px; border-radius: 4px; font-size: 0.85rem; gap: 8px;
+        }
+        .recipe-item:hover { background-color: #2a2d2e; }
+        .recipe-icon { color: #c586c0; width: 20px; }
+        .recipe-info { flex: 1; overflow: hidden; }
+        .recipe-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .recipe-command { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: #9cdcfe; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .recipe-actions { display: flex; gap: 6px; }
+        .recipe-actions i { color: #b4b4b4; cursor: pointer; padding: 4px; border-radius: 4px; font-size: 0.8rem; }
+        .recipe-actions i:hover { background-color: #4a4a4a; color: #fff; }
+
+        /* 右侧终端面板 */
+        .terminal-panel {
+            flex: 1; background-color: #1e1e1e; display: flex; flex-direction: column;
+            padding: 16px 20px; overflow: hidden;
+        }
+        .terminal-header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 12px; color: #bbb; font-size: 0.9rem;
+            border-bottom: 1px solid #3c3c3c; padding-bottom: 8px;
+        }
+        .terminal-tabs { display: flex; gap: 4px; align-items: center; }
+        .current-tab {
+            background-color: #2d2d2d; padding: 4px 12px; border-radius: 16px;
+            font-weight: 500; color: #fff; display: flex; align-items: center; gap: 6px;
+        }
+        .terminal-viewport {
+            background-color: #0d0d0d; border-radius: 6px; padding: 16px;
+            flex: 1; overflow-y: auto; font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem; line-height: 1.5; color: #d4d4d4;
+            box-shadow: inset 0 0 8px rgba(0,0,0,0.6); white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .terminal-line { margin-bottom: 2px; display: flex; flex-wrap: wrap; }
+        .terminal-prompt { color: #6a9955; margin-right: 8px; }
+        ::-webkit-scrollbar { width: 10px; height: 10px; }
+        ::-webkit-scrollbar-track { background: #2d2d2d; }
+        ::-webkit-scrollbar-thumb { background: #5a5a5a; border-radius: 5px; }
+        ::-webkit-scrollbar-thumb:hover { background: #7a7a7a; }
+    </style>
+</head>
+<body>
+<div class="app">
+    <div class="toolbar">
+        <div class="logo"><i class="fa-solid fa-terminal"></i> 多终端管理器 (持久化)</div>
+        <div class="actions">
+            <button id="newTerminalBtn" class="primary"><i class="fa-solid fa-plus"></i> 新建终端</button>
+            <button id="refreshTerminalsBtn"><i class="fa-solid fa-rotate"></i> 刷新列表</button>
+            <button id="saveRecipeBtn"><i class="fa-regular fa-floppy-disk"></i> 保存当前配方</button>
+        </div>
+    </div>
+
+    <div class="main">
+        <!-- 左侧边栏 -->
+        <div class="sidebar">
+            <!-- 终端会话区域 -->
+            <div class="sidebar-section" style="flex: 2; display: flex; flex-direction: column; min-height: 0;">
+                <div class="section-header">
+                    <span><i class="fa-regular fa-window-terminal" style="margin-right: 6px;"></i> 终端会话</span>
+                    <span class="add-icon" id="addTerminalIcon"><i class="fa-solid fa-plus"></i></span>
+                </div>
+                <ul class="terminal-list" id="terminalList"></ul>
+            </div>
+
+            <!-- 文件浏览器区域 (新增) -->
+            <div class="sidebar-section file-browser">
+                <div class="section-header">
+                    <span><i class="fa-regular fa-folder-open" style="margin-right: 6px;"></i> 文件浏览器</span>
+                    <span class="add-icon" id="uploadFileIcon" title="上传文件"><i class="fa-solid fa-upload"></i></span>
+                </div>
+                <div class="file-header">
+                    <span class="path-breadcrumb" id="currentPath">/home/user</span>
+                    <span class="upload-btn" id="uploadBtn"><i class="fa-solid fa-upload"></i> 上传</span>
+                </div>
+                <ul class="file-list" id="fileList"></ul>
+            </div>
+
+            <!-- 配方库区域 -->
+            <div class="sidebar-section" style="flex: 3; display: flex; flex-direction: column; min-height: 0;">
+                <div class="section-header">
+                    <span><i class="fa-regular fa-bookmark" style="margin-right: 6px;"></i> 终端配方</span>
+                    <span class="add-icon" id="addRecipeIcon"><i class="fa-solid fa-plus"></i></span>
+                </div>
+                <ul class="recipe-list" id="recipeList"></ul>
+            </div>
+        </div>
+
+        <!-- 右侧终端面板 -->
+        <div class="terminal-panel">
+            <div class="terminal-header">
+                <div class="terminal-tabs">
+                    <span class="current-tab"><i class="fa-regular fa-window-terminal"></i> <span id="currentTerminalName">终端 1</span></span>
+                </div>
+                <div><span style="color: #6a9955;"><i class="fa-regular fa-keyboard"></i> 持久终端 (后台运行)</span></div>
+            </div>
+            <div class="terminal-viewport" id="terminalContent"></div>
+        </div>
+    </div>
+
+    <!-- 隐藏的文件输入，用于上传 -->
+    <input type="file" id="fileInput" style="display: none;" multiple>
+</div>
+
+<script>
+    (function() {
+        // ========== 存储键 ==========
+        const STORAGE_TERMINALS = 'web_term_manager_terminals';
+        const STORAGE_RECIPES = 'web_term_manager_recipes';
+        const STORAGE_NEXT_TERM_ID = 'web_term_manager_nextId';
+        const STORAGE_NEXT_RECIPE_ID = 'web_term_manager_nextRecipeId';
+
+        // ========== 模拟文件系统 (基于内存，简单嵌套) ==========
+        const virtualFS = {
+            '/': { type: 'dir', children: ['home', 'etc', 'var', 'tmp'] },
+            '/home': { type: 'dir', children: ['user'] },
+            '/home/user': { type: 'dir', children: ['Desktop', 'Downloads', 'projects', 'file1.txt', 'script.sh', 'notes.md'] },
+            '/home/user/Desktop': { type: 'dir', children: ['readme.txt'] },
+            '/home/user/Downloads': { type: 'dir', children: ['package.tar.gz'] },
+            '/home/user/projects': { type: 'dir', children: ['web-terminal'] },
+            '/home/user/projects/web-terminal': { type: 'dir', children: ['index.html', 'style.css'] },
+            '/home/user/file1.txt': { type: 'file', size: '2.3 KB', content: 'Hello, this is file1.txt\nSecond line.' },
+            '/home/user/script.sh': { type: 'file', size: '512 B', content: '#!/bin/bash\necho "Hello"' },
+            '/home/user/notes.md': { type: 'file', size: '1.1 KB', content: '# Notes\n- Item 1\n- Item 2' },
+            '/home/user/Desktop/readme.txt': { type: 'file', size: '45 B', content: 'This is Desktop readme' },
+            '/home/user/Downloads/package.tar.gz': { type: 'file', size: '2.1 MB', content: 'compressed archive' },
+            '/home/user/projects/web-terminal/index.html': { type: 'file', size: '3.2 KB', content: '<!DOCTYPE html>\n...' },
+            '/home/user/projects/web-terminal/style.css': { type: 'file', size: '1.4 KB', content: 'body { margin:0; }' },
+        };
+
+        // 获取目录内容列表
+        function getDirContents(path) {
+            const node = virtualFS[path];
+            if (!node || node.type !== 'dir') return [];
+            return node.children.map(name => {
+                const fullPath = path === '/' ? '/' + name : path + '/' + name;
+                const item = virtualFS[fullPath] || { type: 'file', size: '0 B' }; // fallback
+                return {
+                    name: name,
+                    path: fullPath,
+                    type: item.type || 'file',
+                    size: item.size || '0 B'
+                };
+            }).sort((a, b) => {
+                if (a.type === 'dir' && b.type !== 'dir') return -1;
+                if (a.type !== 'dir' && b.type === 'dir') return 1;
+                return a.name.localeCompare(b.name);
+            });
+        }
+
+        // ========== 全局状态 ==========
+        let terminals = [];
+        let nextTerminalId = 1;
+        let activeTerminalId = null;
+
+        let recipes = [];
+        let nextRecipeId = 1;
+
+        // 文件浏览器当前路径 (与当前终端联动？但简单起见，使用独立路径，初始为/home/user)
+        let currentFsPath = '/home/user';
+
+        // ========== 加载 / 保存 ==========
+        function loadFromStorage() {
+            try {
+                const savedTerms = localStorage.getItem(STORAGE_TERMINALS);
+                if (savedTerms) {
+                    terminals = JSON.parse(savedTerms);
+                    // 确保每个终端有cwd字段 (旧数据兼容)
+                    terminals.forEach(t => { if (!t.cwd) t.cwd = '/home/user'; });
+                } else {
+                    // 默认终端
+                    terminals = [{
+                        id: 1,
+                        name: '终端 1',
+                        cwd: '/home/user',
+                        lines: [
+                            '欢迎使用持久终端 (bash)',
+                            'user@web-host:/home/user$ ',
+                            '系统: Linux 6.1  •  负载 0.08'
+                        ]
+                    }];
+                }
+                const savedNextId = localStorage.getItem(STORAGE_NEXT_TERM_ID);
+                nextTerminalId = savedNextId ? parseInt(savedNextId) : 2;
+
+                const savedRecipes = localStorage.getItem(STORAGE_RECIPES);
+                if (savedRecipes) {
+                    recipes = JSON.parse(savedRecipes);
+                } else {
+                    recipes = [
+                        { id: 'r1', name: '更新系统', command: 'sudo apt update && sudo apt upgrade -y' },
+                        { id: 'r2', name: '查看日志', command: 'journalctl -xe --no-pager | head -20' },
+                        { id: 'r3', name: '磁盘占用', command: 'df -h' }
+                    ];
+                }
+                const savedNextRecipe = localStorage.getItem(STORAGE_NEXT_RECIPE_ID);
+                nextRecipeId = savedNextRecipe ? parseInt(savedNextRecipe) : 4;
+            } catch (e) {
+                console.warn('加载失败，使用默认', e);
+            }
+            if (!terminals.length) {
+                terminals = [{ id: 1, name: '终端 1', cwd: '/home/user', lines: ['默认终端'] }];
+            }
+            activeTerminalId = terminals[0].id;
+        }
+
+        function saveTerminals() {
+            localStorage.setItem(STORAGE_TERMINALS, JSON.stringify(terminals));
+            localStorage.setItem(STORAGE_NEXT_TERM_ID, nextTerminalId.toString());
+        }
+        function saveRecipes() {
+            localStorage.setItem(STORAGE_RECIPES, JSON.stringify(recipes));
+            localStorage.setItem(STORAGE_NEXT_RECIPE_ID, nextRecipeId.toString());
+        }
+
+        // ========== 辅助函数 ==========
+        function getActiveTerminal() {
+            return terminals.find(t => t.id === activeTerminalId);
+        }
+
+        // 向当前终端追加一行
+        function appendToTerminal(line) {
+            const term = getActiveTerminal();
+            if (term) {
+                term.lines.push(line);
+                renderTerminalContent();
+                saveTerminals();
+            }
+        }
+
+        // 带提示符追加 (模拟命令执行)
+        function appendCommandOutput(cmd, output = '') {
+            const term = getActiveTerminal();
+            if (!term) return;
+            const prompt = `user@web-host:${term.cwd}$ `;
+            term.lines.push(prompt + cmd);
+            if (output) term.lines.push(output);
+            renderTerminalContent();
+            saveTerminals();
+        }
+
+        // ========== 渲染 ==========
+        function renderTerminalList() {
+            const listEl = document.getElementById('terminalList');
+            listEl.innerHTML = '';
+            terminals.forEach(term => {
+                const li = document.createElement('li');
+                li.className = `terminal-item ${term.id === activeTerminalId ? 'active' : ''}`;
+                li.dataset.termId = term.id;
+                li.innerHTML = `<i class="fa-regular fa-terminal"></i>
+                    <span class="terminal-name">${term.name}</span>
+                    <span class="close-btn"><i class="fa-regular fa-circle-xmark"></i></span>`;
+                li.querySelector('.close-btn').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    closeTerminal(term.id);
+                });
+                li.addEventListener('click', () => setActiveTerminal(term.id));
+                listEl.appendChild(li);
+            });
+        }
+
+        function setActiveTerminal(termId) {
+            if (!terminals.find(t => t.id === termId)) return;
+            activeTerminalId = termId;
+            // 同步文件浏览器路径为终端cwd
+            const term = getActiveTerminal();
+            if (term) currentFsPath = term.cwd || '/home/user';
+            renderTerminalList();
+            renderTerminalContent();
+            updateCurrentTerminalName();
+            renderFileList(); // 刷新文件浏览器
+        }
+
+        function updateCurrentTerminalName() {
+            const term = getActiveTerminal();
+            document.getElementById('currentTerminalName').textContent = term ? term.name : '无';
+        }
+
+        function renderTerminalContent() {
+            const contentDiv = document.getElementById('terminalContent');
+            const term = getActiveTerminal();
+            if (!term) return;
+            contentDiv.innerHTML = '';
+            term.lines.forEach(line => {
+                const lineDiv = document.createElement('div');
+                lineDiv.className = 'terminal-line';
+                lineDiv.textContent = line;
+                contentDiv.appendChild(lineDiv);
+            });
+            contentDiv.scrollTop = contentDiv.scrollHeight;
+        }
+
+        // 文件浏览器渲染
+        function renderFileList() {
+            const listEl = document.getElementById('fileList');
+            const pathEl = document.getElementById('currentPath');
+            pathEl.textContent = currentFsPath;
+
+            const contents = getDirContents(currentFsPath);
+            listEl.innerHTML = '';
+            // 添加返回上级 (除非是根)
+            if (currentFsPath !== '/') {
+                const parentLi = document.createElement('li');
+                parentLi.className = 'file-item';
+                parentLi.innerHTML = `<i class="fa-regular fa-folder-open folder-icon"></i>
+                    <span class="file-name">..</span>
+                    <span class="file-size"></span>`;
+                parentLi.addEventListener('click', () => navigateToDir(currentFsPath.substring(0, currentFsPath.lastIndexOf('/')) || '/'));
+                listEl.appendChild(parentLi);
+            }
+
+            contents.forEach(item => {
+                const li = document.createElement('li');
+                li.className = 'file-item';
+                const icon = item.type === 'dir' ? '<i class="fa-regular fa-folder-open folder-icon"></i>' : '<i class="fa-regular fa-file file-icon"></i>';
+                li.innerHTML = `${icon}<span class="file-name">${item.name}</span><span class="file-size">${item.size}</span>`;
+                li.addEventListener('click', () => {
+                    if (item.type === 'dir') {
+                        navigateToDir(item.path);
+                    } else {
+                        viewFile(item.path);
+                    }
+                });
+                listEl.appendChild(li);
+            });
+        }
+
+        // 导航目录
+        function navigateToDir(path) {
+            if (!virtualFS[path] || virtualFS[path].type !== 'dir') return;
+            currentFsPath = path;
+            // 同步当前终端的cwd
+            const term = getActiveTerminal();
+            if (term) {
+                term.cwd = path;
+                saveTerminals();
+            }
+            renderFileList();
+        }
+
+        // 查看文件 (在终端模拟cat)
+        function viewFile(filePath) {
+            const node = virtualFS[filePath];
+            if (!node || node.type !== 'file') {
+                appendToTerminal(`cat: ${filePath}: 无法读取文件 (模拟)`);
+                return;
+            }
+            const content = node.content || '（空文件）';
+            appendCommandOutput(`cat ${filePath.split('/').pop()}`, content);
+        }
+
+        // 模拟上传
+        function uploadFiles(files) {
+            if (!files.length) return;
+            const term = getActiveTerminal();
+            const fileNames = Array.from(files).map(f => f.name).join(', ');
+            appendCommandOutput(`上传文件到 ${currentFsPath}`, `已接收: ${fileNames} (模拟上传完成)`);
+            // 可选将文件“添加”到虚拟文件系统 (简单起见，仅提示)
+        }
+
+        // ========== 终端操作 ==========
+        function addNewTerminal() {
+            const newId = nextTerminalId++;
+            const name = `终端 ${newId}`;
+            terminals.push({
+                id: newId,
+                name: name,
+                cwd: '/home/user',
+                lines: [
+                    `欢迎使用持久终端 (bash)  ${name}`,
+                    `user@web-host:/home/user$ `
+                ]
+            });
+            saveTerminals();
+            setActiveTerminal(newId);
+        }
+
+        function closeTerminal(termId) {
+            if (terminals.length <= 1) {
+                alert('至少保留一个终端');
+                return;
+            }
+            terminals = terminals.filter(t => t.id !== termId);
+            if (activeTerminalId === termId) {
+                setActiveTerminal(terminals[0].id);
+            } else {
+                renderTerminalList();
+            }
+            saveTerminals();
+        }
+
+        // 刷新终端列表 (从存储重新加载)
+        function refreshTerminals() {
+            loadFromStorage(); // 重新加载存储数据
+            renderTerminalList();
+            renderTerminalContent();
+            updateCurrentTerminalName();
+            currentFsPath = getActiveTerminal()?.cwd || '/home/user';
+            renderFileList();
+            renderRecipeList();
+        }
+
+        // ========== 配方操作 ==========
+        function renderRecipeList() {
+            const listEl = document.getElementById('recipeList');
+            listEl.innerHTML = '';
+            recipes.forEach(recipe => {
+                const li = document.createElement('li');
+                li.className = 'recipe-item';
+                li.dataset.recipeId = recipe.id;
+                li.innerHTML = `
+                    <span class="recipe-icon"><i class="fa-regular fa-file-lines"></i></span>
+                    <div class="recipe-info">
+                        <div class="recipe-name">${recipe.name}</div>
+                        <div class="recipe-command">${recipe.command}</div>
+                    </div>
+                    <div class="recipe-actions">
+                        <i class="fa-regular fa-play" title="应用配方"></i>
+                        <i class="fa-regular fa-trash-can" title="删除配方"></i>
+                    </div>
+                `;
+                li.querySelector('.fa-play').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    applyRecipe(recipe.command);
+                });
+                li.querySelector('.fa-trash-can').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    deleteRecipe(recipe.id);
+                });
+                listEl.appendChild(li);
+            });
+        }
+
+        function applyRecipe(cmd) {
+            appendCommandOutput(cmd, `> 执行: ${cmd.substring(0,40)}... (模拟输出)`);
+        }
+
+        function deleteRecipe(rid) {
+            recipes = recipes.filter(r => r.id !== rid);
+            saveRecipes();
+            renderRecipeList();
+        }
+
+        function addNewRecipe() {
+            const name = prompt('配方名称：', '新命令');
+            if (!name) return;
+            const command = prompt('命令内容：', 'echo "hello"');
+            if (!command) return;
+            const newId = `r${nextRecipeId++}`;
+            recipes.push({ id: newId, name, command });
+            saveRecipes();
+            renderRecipeList();
+        }
+
+        function saveCurrentAsRecipe() {
+            const term = getActiveTerminal();
+            if (!term) return;
+            let lastCmd = 'ls -la';
+            for (let i = term.lines.length - 1; i >= 0; i--) {
+                const line = term.lines[i];
+                const match = line.match(/\$\s*(.+)/);
+                if (match) { lastCmd = match[1]; break; }
+            }
+            const name = prompt('保存配方，输入名称：', '快捷命令');
+            if (!name) return;
+            const cmd = prompt('编辑命令:', lastCmd);
+            if (!cmd) return;
+            const newId = `r${nextRecipeId++}`;
+            recipes.push({ id: newId, name, command: cmd });
+            saveRecipes();
+            renderRecipeList();
+        }
+
+        // ========== 初始化 ==========
+        loadFromStorage();
+        renderTerminalList();
+        renderTerminalContent();
+        updateCurrentTerminalName();
+        renderFileList();
+        renderRecipeList();
+
+        // ========== 事件绑定 ==========
+        document.getElementById('newTerminalBtn').addEventListener('click', addNewTerminal);
+        document.getElementById('addTerminalIcon').addEventListener('click', addNewTerminal);
+        document.getElementById('refreshTerminalsBtn').addEventListener('click', refreshTerminals);
+        document.getElementById('saveRecipeBtn').addEventListener('click', saveCurrentAsRecipe);
+        document.getElementById('addRecipeIcon').addEventListener('click', addNewRecipe);
+
+        // 上传按钮
+        const fileInput = document.getElementById('fileInput');
+        document.getElementById('uploadBtn').addEventListener('click', () => fileInput.click());
+        document.getElementById('uploadFileIcon').addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', (e) => {
+            uploadFiles(e.target.files);
+            fileInput.value = ''; // 允许重复上传同文件
+        });
+
+        // 全局确保activeTerminal
+        if (!activeTerminalId && terminals.length) setActiveTerminal(terminals[0].id);
+    })();
+</script>
+</body>
+</html>

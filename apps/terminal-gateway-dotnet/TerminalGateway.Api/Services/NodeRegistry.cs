@@ -25,6 +25,7 @@ public sealed class NodeRegistry
                 NodeName = NormalizeNodeName(request.NodeName, nodeId),
                 NodeLabel = NormalizeLabel(request.NodeLabel),
                 NodeRole = "slave",
+                NodeOs = NormalizeNodeOs(request.NodeOs),
                 InstanceCount = Math.Max(0, request.InstanceCount ?? 0),
                 LastSeenAt = now,
                 ConnectionId = connectionId
@@ -34,6 +35,7 @@ public sealed class NodeRegistry
                 existing.NodeName = NormalizeNodeName(request.NodeName, nodeId);
                 existing.NodeLabel = NormalizeLabel(request.NodeLabel);
                 existing.NodeRole = "slave";
+                existing.NodeOs = NormalizeNodeOs(request.NodeOs);
                 existing.InstanceCount = Math.Max(0, request.InstanceCount ?? existing.InstanceCount);
                 existing.LastSeenAt = now;
                 existing.ConnectionId = connectionId;
@@ -51,12 +53,14 @@ public sealed class NodeRegistry
                 NodeId = nodeId,
                 NodeName = nodeId,
                 NodeRole = "slave",
+                NodeOs = NormalizeNodeOs(request.NodeOs),
                 InstanceCount = Math.Max(0, request.InstanceCount ?? 0),
                 LastSeenAt = now,
                 ConnectionId = connectionId
             },
             (_, existing) =>
             {
+                existing.NodeOs = NormalizeNodeOs(request.NodeOs);
                 existing.InstanceCount = Math.Max(0, request.InstanceCount ?? existing.InstanceCount);
                 existing.LastSeenAt = now;
                 existing.ConnectionId = connectionId;
@@ -88,6 +92,7 @@ public sealed class NodeRegistry
                 NodeId = _options.NodeId,
                 NodeName = _options.NodeName,
                 NodeRole = _options.GatewayRole,
+                NodeOs = NodeOsHelper.Current,
                 NodeLabel = _options.NodeLabel,
                 IsCurrent = true,
                 NodeOnline = true,
@@ -104,6 +109,7 @@ public sealed class NodeRegistry
                 NodeId = state.NodeId,
                 NodeName = state.NodeName,
                 NodeRole = state.NodeRole,
+                NodeOs = state.NodeOs,
                 NodeLabel = state.NodeLabel,
                 IsCurrent = false,
                 NodeOnline = online,
@@ -153,6 +159,7 @@ public sealed class NodeRegistry
                 NodeId = state.NodeId,
                 NodeName = state.NodeName,
                 NodeRole = state.NodeRole,
+                NodeOs = state.NodeOs,
                 NodeLabel = state.NodeLabel,
                 IsCurrent = false,
                 NodeOnline = online,
@@ -183,11 +190,17 @@ public sealed class NodeRegistry
         return value.Length == 0 ? null : value;
     }
 
+    private static string NormalizeNodeOs(string? nodeOs)
+    {
+        return NodeOsHelper.Normalize(nodeOs);
+    }
+
     private sealed class RemoteNodeState
     {
         public required string NodeId { get; init; }
         public required string NodeRole { get; set; }
         public required string NodeName { get; set; }
+        public required string NodeOs { get; set; }
         public string? NodeLabel { get; set; }
         public required int InstanceCount { get; set; }
         public required DateTimeOffset LastSeenAt { get; set; }

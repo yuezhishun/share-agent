@@ -1,35 +1,29 @@
 import { defineStore } from 'pinia';
 
-const STORAGE_KEY = 'webcli-recipes-v1';
-
-function nowIso() {
-  return new Date().toISOString();
+function resolveHttpBase() {
+  return String(import.meta.env.VITE_WEBPTY_BASE || '').trim();
 }
 
-function toSafeGroup(value) {
-  const text = String(value || '').trim();
-  return text || 'general';
+function buildNodeApiPath(nodeId, pathname, params) {
+  const base = resolveHttpBase();
+  const normalizedNodeId = String(nodeId || '').trim();
+  const url = new URL(
+    `${base}/api/nodes/${encodeURIComponent(normalizedNodeId)}${pathname}`,
+    typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1'
+  );
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value === undefined || value === null || value === '') {
+      continue;
+    }
+    url.searchParams.set(key, String(value));
+  }
+  return `${url.pathname}${url.search}`;
 }
 
 function normalizeArgs(value) {
-  if (Array.isArray(value)) {
-    return value.map((x) => String(x ?? '')).filter((x) => x.length > 0);
-  }
-
-  const text = String(value || '').trim();
-  if (!text) {
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(text);
-    if (Array.isArray(parsed)) {
-      return parsed.map((x) => String(x ?? '')).filter((x) => x.length > 0);
-    }
-  } catch {
-  }
-
-  return text.split(/\s+/).filter(Boolean);
+  return Array.isArray(value)
+    ? value.map((item) => String(item ?? '')).filter(Boolean)
+    : [];
 }
 
 function normalizeEnv(value) {
@@ -37,221 +31,200 @@ function normalizeEnv(value) {
     return {};
   }
 
-  const env = {};
+  const result = {};
   for (const [key, raw] of Object.entries(value)) {
     const envKey = String(key || '').trim();
     if (!envKey) {
       continue;
     }
-    env[envKey] = String(raw ?? '');
+    result[envKey] = String(raw ?? '');
   }
-  return env;
+  return result;
 }
 
-function normalizeRecipe(raw, fallbackId) {
-  const command = String(raw?.command || '').trim() || 'bash';
-  const args = normalizeArgs(raw?.args);
-  const env = normalizeEnv(raw?.env);
-  const cwd = String(raw?.cwd || '').trim();
-  const name = String(raw?.name || command).trim() || command;
-  const createdAt = String(raw?.createdAt || nowIso());
-  const updatedAt = String(raw?.updatedAt || createdAt);
+function normalizeStrings(value) {
+  return Array.isArray(value)
+    ? value.map((item) => String(item ?? '').trim()).filter(Boolean)
+    : [];
+}
 
+function normalizeRecipe(item) {
   return {
-    id: String(raw?.id || fallbackId || ''),
-    name,
-    group: toSafeGroup(raw?.group),
-    cwd,
-    command,
-    args,
-    env,
-    createdAt,
-    updatedAt
+    id: String(item?.template_id || item?.templateId || item?.id || '').trim(),
+    name: String(item?.name || '').trim(),
+    group: String(item?.group || item?.description || 'general').trim() || 'general',
+    cwd: String(item?.default_cwd || item?.defaultCwd || item?.cwd || '').trim(),
+    command: String(item?.executable || item?.command || '').trim(),
+    args: normalizeArgs(item?.base_args || item?.baseArgs || item?.args),
+    env: normalizeEnv(item?.default_env || item?.defaultEnv || item?.env),
+    envOverrides: normalizeEnv(item?.default_env || item?.defaultEnv || item?.envOverrides || item?.env),
+    envEntryIds: normalizeStrings(item?.env_entry_ids || item?.envEntryIds),
+    envGroupNames: normalizeStrings(item?.env_group_names || item?.envGroupNames),
+    supportedOs: normalizeStrings(item?.supported_os || item?.supportedOs),
+    createdAt: String(item?.created_at || item?.createdAt || '').trim(),
+    updatedAt: String(item?.updated_at || item?.updatedAt || '').trim(),
+    isDefault: item?.is_default === true || item?.isDefault === true,
+    templateKind: String(item?.template_kind || item?.templateKind || 'terminal').trim() || 'terminal'
   };
 }
 
-function buildDefaultRecipes() {
-  const createdAt = nowIso();
-  return [
-    normalizeRecipe({
-      id: 'r1',
-      name: '系统更新',
-      group: 'maintenance',
-      cwd: '/home/yueyuan',
-      command: 'bash',
-      args: ['-lc', 'sudo apt update && sudo apt upgrade -y'],
-      env: {},
-      createdAt,
-      updatedAt: createdAt
-    }),
-    normalizeRecipe({
-      id: 'r2',
-      name: '查看日志',
-      group: 'diagnostics',
-      cwd: '/home/yueyuan',
-      command: 'bash',
-      args: ['-lc', 'journalctl -xe --no-pager | head -n 50'],
-      env: {},
-      createdAt,
-      updatedAt: createdAt
-    }),
-    normalizeRecipe({
-      id: 'r3',
-      name: '磁盘占用',
-      group: 'diagnostics',
-      cwd: '/home/yueyuan',
-      command: 'bash',
-      args: ['-lc', 'df -h'],
-      env: {},
-      createdAt,
-      updatedAt: createdAt
-    })
-  ];
-}
-
-function inferNextId(items) {
-  let max = 0;
-  for (const item of items || []) {
-    const match = String(item?.id || '').match(/^r(\d+)$/);
-    if (!match) {
-      continue;
-    }
-    const value = Number(match[1]);
-    if (Number.isFinite(value) && value > max) {
-      max = value;
-    }
+async function parseErrorMessage(response, fallback) {
+  const text = await response.text();
+  if (!text) {
+    return fallback;
   }
-  return max + 1;
+  try {
+    const payload = JSON.parse(text);
+    return String(payload?.error || text);
+  } catch {
+    return text;
+  }
 }
 
 export const useWebCliRecipesStore = defineStore('webcliRecipes', {
   state: () => ({
-    loaded: false,
-    nextId: 4,
+    currentNodeId: '',
+    loading: false,
+    error: '',
     items: []
   }),
 
   getters: {
-    groups(state) {
-      const map = new Map();
-      for (const item of state.items) {
-        const group = toSafeGroup(item.group);
-        if (!map.has(group)) {
-          map.set(group, []);
-        }
-        map.get(group).push(item);
-      }
-      return Array.from(map.entries())
-        .sort((a, b) => a[0].localeCompare(b[0], 'zh-Hans-CN'))
-        .map(([group, items]) => ({
-          group,
-          items: items.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN'))
-        }));
+    defaultRecipe(state) {
+      return state.items.find((item) => item.isDefault) || null;
     }
   },
 
   actions: {
-    hydrate() {
-      if (this.loaded) {
+    async fetchRecipes(nodeId) {
+      const targetNodeId = String(nodeId || '').trim();
+      if (!targetNodeId) {
+        this.currentNodeId = '';
+        this.items = [];
+        this.error = '';
+        return [];
+      }
+
+      this.currentNodeId = targetNodeId;
+      this.loading = true;
+      this.error = '';
+      try {
+        const response = await fetch(buildNodeApiPath(targetNodeId, '/cli/templates', { kind: 'terminal' }));
+        if (!response.ok) {
+          throw new Error(await parseErrorMessage(response, `load recipes failed: ${response.status}`));
+        }
+        const payload = await response.json();
+        this.items = Array.isArray(payload?.items)
+          ? payload.items.map(normalizeRecipe).filter((item) => item.id)
+          : [];
+        return this.items;
+      } catch (error) {
+        this.items = [];
+        this.error = String(error?.message || error || 'load recipes failed');
+        throw error;
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async addRecipe(input, nodeId = this.currentNodeId) {
+      const targetNodeId = String(nodeId || '').trim();
+      const payload = {
+        template_id: String(input?.id || '').trim() || undefined,
+        name: String(input?.name || '').trim(),
+        template_kind: 'terminal',
+        cli_type: 'custom',
+        executable: String(input?.command || '').trim(),
+        base_args: normalizeArgs(input?.args),
+        default_cwd: String(input?.cwd || '').trim(),
+        default_env: normalizeEnv(input?.env),
+        env_entry_ids: normalizeStrings(input?.envEntryIds),
+        env_group_names: normalizeStrings(input?.envGroupNames),
+        supported_os: normalizeStrings(input?.supportedOs),
+        description: String(input?.group || 'general').trim() || 'general',
+        icon: 'terminal',
+        color: '#0e639c',
+        is_default: input?.isDefault === true
+      };
+
+      const response = await fetch(buildNodeApiPath(targetNodeId, '/cli/templates'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) {
+        throw new Error(await parseErrorMessage(response, `create recipe failed: ${response.status}`));
+      }
+
+      const created = normalizeRecipe(await response.json());
+      await this.fetchRecipes(targetNodeId);
+      return created;
+    },
+
+    async updateRecipe(id, input, nodeId = this.currentNodeId) {
+      const targetNodeId = String(nodeId || '').trim();
+      const targetId = String(id || '').trim();
+      const existing = this.items.find((item) => item.id === targetId);
+      const payload = {
+        name: String(input?.name ?? existing?.name ?? '').trim(),
+        template_kind: 'terminal',
+        cli_type: 'custom',
+        executable: String(input?.command ?? existing?.command ?? '').trim(),
+        base_args: normalizeArgs(input?.args ?? existing?.args),
+        default_cwd: String(input?.cwd ?? existing?.cwd ?? '').trim(),
+        default_env: normalizeEnv(input?.env ?? existing?.env),
+        env_entry_ids: normalizeStrings(input?.envEntryIds ?? existing?.envEntryIds),
+        env_group_names: normalizeStrings(input?.envGroupNames ?? existing?.envGroupNames),
+        supported_os: normalizeStrings(input?.supportedOs ?? existing?.supportedOs),
+        description: String(input?.group ?? existing?.group ?? 'general').trim() || 'general',
+        icon: 'terminal',
+        color: '#0e639c',
+        is_default: input?.isDefault ?? existing?.isDefault ?? false
+      };
+
+      const response = await fetch(buildNodeApiPath(targetNodeId, `/cli/templates/${encodeURIComponent(targetId)}`), {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) {
+        throw new Error(await parseErrorMessage(response, `update recipe failed: ${response.status}`));
+      }
+
+      const updated = normalizeRecipe(await response.json());
+      await this.fetchRecipes(targetNodeId);
+      return updated;
+    },
+
+    async removeRecipe(id, nodeId = this.currentNodeId) {
+      const targetNodeId = String(nodeId || '').trim();
+      const targetId = String(id || '').trim();
+      const response = await fetch(buildNodeApiPath(targetNodeId, `/cli/templates/${encodeURIComponent(targetId)}`), {
+        method: 'DELETE'
+      });
+      if (!response.ok) {
+        throw new Error(await parseErrorMessage(response, `delete recipe failed: ${response.status}`));
+      }
+      await this.fetchRecipes(targetNodeId);
+    },
+
+    async setDefaultRecipe(id, nodeId = this.currentNodeId) {
+      const targetNodeId = String(nodeId || '').trim();
+      const targetId = String(id || '').trim();
+      const current = this.items.find((item) => item.id === targetId);
+      if (!current) {
+        throw new Error('recipe not found');
+      }
+      await this.updateRecipe(targetId, { ...current, isDefault: true }, targetNodeId);
+    },
+
+    async clearDefaultRecipe(nodeId = this.currentNodeId) {
+      const targetNodeId = String(nodeId || '').trim();
+      const current = this.items.find((item) => item.isDefault);
+      if (!current) {
         return;
       }
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw) {
-          const payload = JSON.parse(raw);
-          const source = Array.isArray(payload?.items) ? payload.items : [];
-          this.items = source.map((item, index) => normalizeRecipe(item, `r${index + 1}`));
-          this.nextId = Number(payload?.nextId || inferNextId(this.items));
-        } else {
-          this.items = buildDefaultRecipes();
-          this.nextId = inferNextId(this.items);
-        }
-      } catch {
-        this.items = buildDefaultRecipes();
-        this.nextId = inferNextId(this.items);
-      }
-
-      if (!Array.isArray(this.items) || this.items.length === 0) {
-        this.items = buildDefaultRecipes();
-      }
-      if (!Number.isFinite(this.nextId) || this.nextId < 1) {
-        this.nextId = inferNextId(this.items);
-      }
-      this.loaded = true;
-      this.persist();
-    },
-
-    persist() {
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({
-          nextId: this.nextId,
-          items: this.items
-        }));
-      } catch {
-      }
-    },
-
-    addRecipe(input) {
-      this.hydrate();
-      const command = String(input?.command || '').trim();
-      if (!command) {
-        throw new Error('command is required');
-      }
-
-      const timestamp = nowIso();
-      const item = normalizeRecipe({
-        ...input,
-        id: `r${this.nextId}`,
-        createdAt: timestamp,
-        updatedAt: timestamp
-      });
-      this.nextId += 1;
-      this.items.push(item);
-      this.persist();
-      return item;
-    },
-
-    updateRecipe(id, input) {
-      this.hydrate();
-      const targetId = String(id || '').trim();
-      const target = this.items.find((item) => item.id === targetId);
-      if (!target) {
-        throw new Error('recipe not found');
-      }
-
-      const nextCommand = String(input?.command ?? target.command).trim();
-      if (!nextCommand) {
-        throw new Error('command is required');
-      }
-
-      const merged = normalizeRecipe({
-        ...target,
-        ...input,
-        id: target.id,
-        createdAt: target.createdAt,
-        updatedAt: nowIso()
-      });
-
-      target.name = merged.name;
-      target.group = merged.group;
-      target.cwd = merged.cwd;
-      target.command = merged.command;
-      target.args = merged.args;
-      target.env = merged.env;
-      target.updatedAt = merged.updatedAt;
-      this.persist();
-      return target;
-    },
-
-    removeRecipe(id) {
-      this.hydrate();
-      const targetId = String(id || '').trim();
-      const sizeBefore = this.items.length;
-      this.items = this.items.filter((item) => item.id !== targetId);
-      if (this.items.length === sizeBefore) {
-        throw new Error('recipe not found');
-      }
-      this.persist();
+      await this.updateRecipe(current.id, { ...current, isDefault: false }, targetNodeId);
     }
   }
 });

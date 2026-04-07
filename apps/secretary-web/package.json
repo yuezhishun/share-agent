@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "NODE_OPTIONS=--max-old-space-size=4096 vite build",
+    "build": "vite build",
+    "build:gateway": "vite build --outDir ../terminal-gateway-dotnet/TerminalGateway.Api/wwwroot",
     "preview": "vite preview",
     "test:e2e:install": "playwright install chromium",
     "test:e2e": "playwright test",
@@ -14,6 +15,7 @@
     "test:e2e:cluster": "playwright test -c playwright.cluster.config.js"
   },
   "dependencies": {
+    "@fortawesome/fontawesome-free": "^7.2.0",
     "@microsoft/signalr": "^10.0.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",
